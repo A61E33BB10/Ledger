@@ -1,0 +1,60 @@
+# Ignore everything by default
+*
+
+# But allow directories (so we can recurse)
+!*/
+
+# Allow the .gitignore file itself
+!.gitignore
+
+# Allow LaTeX source files
+!*.tex
+
+# Allow PDF outputs
+!*.pdf
+
+# Allow Python
+!*.py
+
+# Allow README
+!*.md
+
+# Allow Rust source and configuration
+!*.rs
+!Cargo.toml
+!Cargo.lock
+
+# Exclude virtual environment directories
+.venv/
+venv/
+env/
+
+# Exclude Python cache and build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Exclude IDE settings (add/remove based on your tools)
+.idea/
+.vscode/
+
+# Exclude OS-specific files
+.DS_Store
+Thumbs.db
+
+# Exclude environment secrets
+.env
+
+# Exclude logs
+*.log
+
+# Exclude Rust build artifacts
+target/
+debug/
+*.profdata
+*.profraw
