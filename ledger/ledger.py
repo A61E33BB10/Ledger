@@ -15,7 +15,7 @@ Key responsibilities:
 from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Set, Optional, Tuple
+from typing import Dict, List, Set, Optional, Tuple, Any
 import copy
 import hashlib
 import sys
@@ -26,7 +26,7 @@ from .core import (
     ExecuteResult, LedgerView, StateDelta,
     Positions, UnitState, BalanceMap,
     # Constants
-    QUANTITY_EPSILON,
+    QUANTITY_EPSILON, SYSTEM_WALLET,
     # Exceptions
     LedgerError, InsufficientFunds, BalanceConstraintViolation,
     TransferRuleViolation, UnitNotRegistered, WalletNotRegistered,
@@ -200,6 +200,81 @@ class Ledger:
         if unit not in self.units:
             raise UnitNotRegistered(f"Unit {unit} not registered")
         return sum(self.balances[w].get(unit, 0.0) for w in sorted(self.registered_wallets))
+
+    def verify_double_entry(
+        self,
+        expected_supplies: Dict[str, float] = None,
+        tolerance: float = 1e-9
+    ) -> Dict[str, Any]:
+        """
+        Verify that conservation laws hold for all units.
+
+        Double-entry accounting requires that for every unit, the sum of all
+        balances across all wallets equals a constant (the total supply).
+
+        This method can be used in two ways:
+        1. Without expected_supplies: Returns current total supplies for each unit
+        2. With expected_supplies: Verifies current supplies match expected values
+
+        Args:
+            expected_supplies: Optional dict mapping unit symbols to expected totals.
+                              If provided, will check that current totals match.
+            tolerance: Maximum allowed difference for floating-point comparisons.
+                      Defaults to 1e-9.
+
+        Returns:
+            Dict with keys:
+            - 'valid': bool - True if all conservation laws hold
+            - 'supplies': Dict[str, float] - Current total supply for each unit
+            - 'discrepancies': List[Dict] - Details of any conservation violations
+              Each discrepancy contains: unit, expected, actual, difference
+
+        Example:
+            # Check conservation after transactions
+            result = ledger.verify_double_entry()
+            assert result['valid'], f"Conservation violated: {result['discrepancies']}"
+
+            # Verify against known supplies
+            initial = {'USD': 1000000, 'AAPL': 10000}
+            result = ledger.verify_double_entry(expected_supplies=initial)
+            if not result['valid']:
+                print(f"Discrepancies found: {result['discrepancies']}")
+        """
+        supplies = {}
+        discrepancies = []
+
+        for unit_symbol in self.units:
+            current_supply = self.total_supply(unit_symbol)
+            supplies[unit_symbol] = current_supply
+
+            if expected_supplies and unit_symbol in expected_supplies:
+                expected = expected_supplies[unit_symbol]
+                difference = abs(current_supply - expected)
+                if difference > tolerance:
+                    discrepancies.append({
+                        'unit': unit_symbol,
+                        'expected': expected,
+                        'actual': current_supply,
+                        'difference': difference,
+                    })
+
+        # If expected_supplies provided, check for missing units
+        if expected_supplies:
+            for unit_symbol, expected in expected_supplies.items():
+                if unit_symbol not in supplies:
+                    discrepancies.append({
+                        'unit': unit_symbol,
+                        'expected': expected,
+                        'actual': 0.0,
+                        'difference': abs(expected),
+                        'error': 'unit not registered',
+                    })
+
+        return {
+            'valid': len(discrepancies) == 0,
+            'supplies': supplies,
+            'discrepancies': discrepancies,
+        }
 
     def is_registered(self, wallet: str) -> bool:
         """Check if a wallet is registered."""
@@ -612,7 +687,12 @@ class Ledger:
             net[key_dst] = unit.round(net.get(key_dst, 0.0) + move.quantity)
 
         # Check balance constraints
+        # Note: SYSTEM_WALLET is exempt from balance validation - it can hold any balance
         for (wallet, unit_sym), delta in net.items():
+            # Skip validation for system wallet (used for issuance/redemption)
+            if wallet == SYSTEM_WALLET:
+                continue
+
             current = self.balances[wallet][unit_sym]
             unit = self.units[unit_sym]
             proposed = unit.round(current + delta)

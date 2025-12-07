@@ -9,9 +9,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, Any, List
 
-from .core import (
+from ..core import (
     LedgerView, Move, ContractResult, Unit,
     bilateral_transfer_rule,
+    UNIT_TYPE_BILATERAL_FORWARD,
 )
 
 
@@ -59,7 +60,7 @@ def create_forward_unit(
     return Unit(
         symbol=symbol,
         name=name,
-        unit_type="BILATERAL_FORWARD",
+        unit_type=UNIT_TYPE_BILATERAL_FORWARD,
         min_balance=-10_000.0,
         max_balance=10_000.0,
         decimal_places=2,
@@ -183,6 +184,66 @@ def get_forward_value(
     forward_price = state['forward_price']
     quantity = state['quantity']
     return (spot_price - forward_price) * quantity
+
+
+def compute_early_termination(
+    view: LedgerView,
+    forward_symbol: str,
+) -> ContractResult:
+    """
+    Compute early termination of a forward contract (before delivery date).
+
+    Args:
+        view: Read-only view of the ledger state
+        forward_symbol: Symbol of the forward contract to terminate
+
+    Returns:
+        ContractResult with early settlement moves and state updates.
+    """
+    return compute_forward_settlement(view, forward_symbol, force_settlement=True)
+
+
+def transact(
+    view: LedgerView,
+    symbol: str,
+    event_type: str,
+    event_date: datetime,
+    **kwargs
+) -> ContractResult:
+    """
+    Generate moves and state updates for a forward contract lifecycle event.
+
+    This is the unified entry point for all forward contract lifecycle events,
+    routing to the appropriate handler based on event_type.
+
+    Args:
+        view: Read-only ledger access
+        symbol: Forward contract symbol
+        event_type: Type of event (DELIVERY, EARLY_TERMINATION)
+        event_date: When the event occurs
+        **kwargs: Event-specific parameters (currently none required)
+
+    Returns:
+        ContractResult with moves and state_updates, or empty result
+        if event_type is unknown.
+
+    Example:
+        # Process delivery at maturity
+        result = transact(ledger, "OIL_FWD_MAR25", "DELIVERY", datetime(2025, 3, 15))
+
+        # Process early termination
+        result = transact(ledger, "OIL_FWD_MAR25", "EARLY_TERMINATION", datetime(2025, 2, 1))
+    """
+    handlers = {
+        'DELIVERY': lambda: compute_forward_settlement(view, symbol, force_settlement=False),
+        'EARLY_TERMINATION': lambda: compute_early_termination(view, symbol),
+    }
+
+    handler = handlers.get(event_type)
+    if handler is None:
+        return ContractResult()  # Unknown event type - no action
+
+    return handler()
 
 
 def forward_contract(

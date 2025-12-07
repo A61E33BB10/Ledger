@@ -34,6 +34,18 @@ from .core import (
     WalletNotRegistered,
     bilateral_transfer_rule,
     cash,
+    SYSTEM_WALLET,
+    UNIT_TYPE_CASH,
+    UNIT_TYPE_STOCK,
+    UNIT_TYPE_BILATERAL_OPTION,
+    UNIT_TYPE_BILATERAL_FORWARD,
+    UNIT_TYPE_DEFERRED_CASH,
+    UNIT_TYPE_DELTA_HEDGE_STRATEGY,
+    UNIT_TYPE_BOND,
+    UNIT_TYPE_AUTOCALLABLE,
+    UNIT_TYPE_MARGIN_LOAN,
+    UNIT_TYPE_PORTFOLIO_SWAP,
+    UNIT_TYPE_STRUCTURED_NOTE,
 )
 
 # Ledger
@@ -51,25 +63,29 @@ from .black_scholes import (
 )
 
 # Options
-from .options import (
+from .units.option import (
     create_option_unit,
     build_option_trade,
     compute_option_settlement,
+    compute_option_exercise,
     get_option_intrinsic_value,
     get_option_moneyness,
     option_contract,
+    transact as option_transact,
 )
 
 # Forwards
-from .forwards import (
+from .units.forward import (
     create_forward_unit,
     compute_forward_settlement,
+    compute_early_termination,
     get_forward_value,
     forward_contract,
+    transact as forward_transact,
 )
 
 # Delta hedge
-from .delta_hedge_strategy import (
+from .strategies.delta_hedge import (
     create_delta_hedge_unit,
     compute_rebalance,
     compute_liquidation,
@@ -79,10 +95,97 @@ from .delta_hedge_strategy import (
 )
 
 # Stocks
-from .stocks import (
+from .units.stock import (
     create_stock_unit,
     compute_scheduled_dividend,
+    compute_stock_split,
     stock_contract,
+    transact as stock_transact,
+)
+
+# DeferredCash
+from .units.deferred_cash import (
+    create_deferred_cash_unit,
+    compute_deferred_cash_settlement,
+    transact as deferred_cash_transact,
+    deferred_cash_contract,
+)
+
+# Bonds
+from .units.bond import (
+    create_bond_unit,
+    compute_accrued_interest,
+    compute_coupon_payment,
+    compute_redemption,
+    transact as bond_transact,
+    bond_contract,
+    generate_coupon_schedule,
+    year_fraction,
+)
+
+# Futures
+from .units.future import (
+    create_future_unit,
+    execute_futures_trade,
+    compute_daily_settlement,
+    compute_intraday_margin,
+    compute_expiry,
+    future_contract,
+    transact as future_transact,
+    UNIT_TYPE_FUTURE,
+)
+
+# Autocallables
+from .units.autocallable import (
+    create_autocallable,
+    compute_observation,
+    compute_maturity_payoff,
+    autocallable_contract,
+    transact as autocallable_transact,
+    get_autocallable_status,
+    get_total_coupons_paid,
+)
+
+# Margin Loans
+from .units.margin_loan import (
+    create_margin_loan,
+    compute_collateral_value,
+    compute_margin_status,
+    compute_interest_accrual,
+    compute_margin_call,
+    compute_margin_cure,
+    compute_liquidation as compute_margin_loan_liquidation,
+    compute_repayment,
+    compute_add_collateral,
+    transact as margin_loan_transact,
+    margin_loan_contract,
+    MARGIN_STATUS_HEALTHY,
+    MARGIN_STATUS_WARNING,
+    MARGIN_STATUS_BREACH,
+    MARGIN_STATUS_LIQUIDATION,
+)
+
+# Portfolio Swaps
+from .units.portfolio_swap import (
+    create_portfolio_swap,
+    compute_portfolio_nav,
+    compute_funding_amount,
+    compute_swap_reset,
+    compute_termination as compute_swap_termination,
+    transact as portfolio_swap_transact,
+    portfolio_swap_contract,
+)
+
+# Structured Notes
+from .units.structured_note import (
+    create_structured_note,
+    compute_performance,
+    compute_payoff_rate,
+    compute_coupon_payment as compute_structured_note_coupon,
+    compute_maturity_payoff as compute_structured_note_maturity,
+    structured_note_contract,
+    transact as structured_note_transact,
+    generate_structured_note_coupon_schedule,
 )
 
 # Lifecycle
@@ -104,6 +207,11 @@ __all__ = [
     'ExecuteResult', 'LedgerError', 'InsufficientFunds', 'BalanceConstraintViolation',
     'TransferRuleViolation', 'UnitNotRegistered', 'WalletNotRegistered',
     'bilateral_transfer_rule', 'cash',
+    'SYSTEM_WALLET',
+    'UNIT_TYPE_CASH', 'UNIT_TYPE_STOCK', 'UNIT_TYPE_BILATERAL_OPTION',
+    'UNIT_TYPE_BILATERAL_FORWARD', 'UNIT_TYPE_DEFERRED_CASH', 'UNIT_TYPE_DELTA_HEDGE_STRATEGY',
+    'UNIT_TYPE_BOND', 'UNIT_TYPE_FUTURE', 'UNIT_TYPE_AUTOCALLABLE', 'UNIT_TYPE_MARGIN_LOAN',
+    'UNIT_TYPE_PORTFOLIO_SWAP',
     # Ledger
     'Ledger',
     # Black-Scholes
@@ -112,15 +220,47 @@ __all__ = [
     'gamma', 'vega',
     # Options
     'create_option_unit', 'build_option_trade', 'compute_option_settlement',
-    'get_option_intrinsic_value', 'get_option_moneyness', 'option_contract',
+    'compute_option_exercise', 'get_option_intrinsic_value', 'get_option_moneyness',
+    'option_contract', 'option_transact',
     # Forwards
-    'create_forward_unit', 'compute_forward_settlement', 'get_forward_value',
-    'forward_contract',
+    'create_forward_unit', 'compute_forward_settlement', 'compute_early_termination',
+    'get_forward_value', 'forward_contract', 'forward_transact',
     # Delta hedge
     'create_delta_hedge_unit', 'compute_rebalance', 'compute_liquidation',
     'get_hedge_state', 'compute_hedge_pnl_breakdown', 'delta_hedge_contract',
     # Stocks
-    'create_stock_unit', 'compute_scheduled_dividend', 'stock_contract',
+    'create_stock_unit', 'compute_scheduled_dividend', 'compute_stock_split',
+    'stock_contract', 'stock_transact',
+    # DeferredCash
+    'create_deferred_cash_unit', 'compute_deferred_cash_settlement',
+    'deferred_cash_transact', 'deferred_cash_contract',
+    # Bonds
+    'create_bond_unit', 'compute_accrued_interest', 'compute_coupon_payment',
+    'compute_redemption', 'bond_transact', 'bond_contract',
+    'generate_coupon_schedule', 'year_fraction',
+    # Futures
+    'create_future_unit', 'execute_futures_trade', 'compute_daily_settlement',
+    'compute_intraday_margin', 'compute_expiry', 'future_contract', 'future_transact',
+    # Autocallables
+    'create_autocallable', 'compute_observation', 'compute_maturity_payoff',
+    'autocallable_contract', 'autocallable_transact',
+    'get_autocallable_status', 'get_total_coupons_paid',
+    # Margin Loans
+    'create_margin_loan', 'compute_collateral_value', 'compute_margin_status',
+    'compute_interest_accrual', 'compute_margin_call', 'compute_margin_cure',
+    'compute_margin_loan_liquidation', 'compute_repayment', 'compute_add_collateral',
+    'margin_loan_transact', 'margin_loan_contract',
+    'MARGIN_STATUS_HEALTHY', 'MARGIN_STATUS_WARNING', 'MARGIN_STATUS_BREACH',
+    'MARGIN_STATUS_LIQUIDATION',
+    # Portfolio Swaps
+    'create_portfolio_swap', 'compute_portfolio_nav', 'compute_funding_amount',
+    'compute_swap_reset', 'compute_swap_termination', 'portfolio_swap_transact',
+    'portfolio_swap_contract',
+    # Structured Notes
+    'create_structured_note', 'compute_performance', 'compute_payoff_rate',
+    'compute_structured_note_coupon', 'compute_structured_note_maturity',
+    'structured_note_contract', 'structured_note_transact',
+    'generate_structured_note_coupon_schedule', 'UNIT_TYPE_STRUCTURED_NOTE',
     # Lifecycle
     'SmartContract', 'LifecycleEngine',
     # Pricing

@@ -11,9 +11,10 @@ from datetime import datetime
 import math
 from typing import Dict, Any, List
 
-from .core import (
+from ..core import (
     LedgerView, Move, ContractResult, Unit,
     bilateral_transfer_rule,
+    UNIT_TYPE_BILATERAL_OPTION,
 )
 
 
@@ -57,7 +58,7 @@ def create_option_unit(
     return Unit(
         symbol=symbol,
         name=name,
-        unit_type="BILATERAL_OPTION",
+        unit_type=UNIT_TYPE_BILATERAL_OPTION,
         min_balance=-10_000.0,
         max_balance=10_000.0,
         decimal_places=2,
@@ -305,6 +306,80 @@ def get_option_moneyness(
         return 'ITM' if spot_price > strike else 'OTM'
     else:  # put
         return 'ITM' if spot_price < strike else 'OTM'
+
+
+def compute_option_exercise(
+    view: LedgerView,
+    option_symbol: str,
+    settlement_price: float,
+) -> ContractResult:
+    """
+    Compute early exercise of an option (before maturity).
+
+    Args:
+        view: Read-only ledger view
+        option_symbol: Symbol of the option to exercise
+        settlement_price: Current market price of the underlying
+
+    Returns:
+        ContractResult with exercise settlement moves and state updates.
+    """
+    return compute_option_settlement(view, option_symbol, settlement_price, force_settlement=True)
+
+
+def transact(
+    view: LedgerView,
+    symbol: str,
+    event_type: str,
+    event_date: datetime,
+    **kwargs
+) -> ContractResult:
+    """
+    Generate moves and state updates for an option lifecycle event.
+
+    This is the unified entry point for all option lifecycle events, routing
+    to the appropriate handler based on event_type.
+
+    Args:
+        view: Read-only ledger access
+        symbol: Option symbol
+        event_type: Type of event (EXERCISE, EXPIRY, ASSIGNMENT)
+        event_date: When the event occurs
+        **kwargs: Event-specific parameters:
+            - For EXERCISE: settlement_price (float, required)
+            - For EXPIRY: settlement_price (float, required)
+            - For ASSIGNMENT: settlement_price (float, required)
+
+    Returns:
+        ContractResult with moves and state_updates, or empty result
+        if event_type is unknown.
+
+    Example:
+        # Exercise an option early
+        result = transact(ledger, "AAPL_CALL_150", "EXERCISE",
+                         datetime(2024, 6, 1), settlement_price=155.0)
+
+        # Expire an option at maturity
+        result = transact(ledger, "AAPL_CALL_150", "EXPIRY",
+                         datetime(2024, 12, 20), settlement_price=160.0)
+    """
+    settlement_price = kwargs.get('settlement_price')
+
+    if settlement_price is None:
+        # Cannot process option events without a settlement price
+        return ContractResult()
+
+    handlers = {
+        'EXERCISE': lambda: compute_option_exercise(view, symbol, settlement_price),
+        'EXPIRY': lambda: compute_option_settlement(view, symbol, settlement_price, force_settlement=False),
+        'ASSIGNMENT': lambda: compute_option_settlement(view, symbol, settlement_price, force_settlement=True),
+    }
+
+    handler = handlers.get(event_type)
+    if handler is None:
+        return ContractResult()  # Unknown event type - no action
+
+    return handler()
 
 
 def option_contract(

@@ -14,9 +14,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
-from .core import (
+from ..core import (
     LedgerView, Move, ContractResult, Unit,
     STOCK_DECIMAL_PLACES, DEFAULT_STOCK_SHORT_MIN_BALANCE,
+    UNIT_TYPE_STOCK,
 )
 
 
@@ -72,7 +73,7 @@ def create_stock_unit(
     return Unit(
         symbol=symbol,
         name=name,
-        unit_type="STOCK",
+        unit_type=UNIT_TYPE_STOCK,
         min_balance=min_balance,
         max_balance=float('inf'),
         decimal_places=STOCK_DECIMAL_PLACES,
@@ -169,6 +170,92 @@ def compute_scheduled_dividend(
     }
 
     return ContractResult(moves=tuple(moves), state_updates=state_updates)
+
+
+def compute_stock_split(
+    view: LedgerView,
+    symbol: str,
+    ratio: float,
+    split_date: datetime = None,
+) -> ContractResult:
+    """
+    Compute stock split by adjusting all balances.
+
+    Args:
+        view: Read-only ledger access
+        symbol: Stock symbol to split
+        ratio: Split ratio (e.g., 2.0 for 2-for-1 split)
+        split_date: Date of the split (defaults to view.current_time)
+
+    Returns:
+        ContractResult with state updates tracking the split.
+        Note: Balance adjustments are handled by the ledger, not via moves.
+    """
+    if ratio <= 0:
+        raise ValueError(f"Split ratio must be positive, got {ratio}")
+
+    state = view.get_unit_state(symbol)
+
+    # Use provided split_date or fall back to current_time
+    actual_split_date = split_date if split_date is not None else view.current_time
+
+    # Stock splits are typically handled by the ledger adjusting all balances
+    # This function just records the split in state for audit purposes
+    state_updates = {
+        symbol: {
+            **state,
+            'last_split_ratio': ratio,
+            'last_split_date': actual_split_date,
+        }
+    }
+
+    return ContractResult(moves=(), state_updates=state_updates)
+
+
+def transact(
+    view: LedgerView,
+    symbol: str,
+    event_type: str,
+    event_date: datetime,
+    **kwargs
+) -> ContractResult:
+    """
+    Generate moves and state updates for a stock lifecycle event.
+
+    This is the unified entry point for all stock lifecycle events, routing
+    to the appropriate handler based on event_type.
+
+    Args:
+        view: Read-only ledger access
+        symbol: Stock symbol
+        event_type: Type of event (DIVIDEND, SPLIT, MERGER)
+        event_date: When the event occurs
+        **kwargs: Event-specific parameters:
+            - For DIVIDEND: None (uses scheduled dividend)
+            - For SPLIT: ratio (float, e.g., 2.0 for 2-for-1)
+            - For MERGER: Not yet implemented
+
+    Returns:
+        ContractResult with moves and state_updates, or empty result
+        if event_type is unknown.
+
+    Example:
+        # Process a scheduled dividend
+        result = transact(ledger, "AAPL", "DIVIDEND", datetime(2024, 3, 15))
+
+        # Process a stock split
+        result = transact(ledger, "AAPL", "SPLIT", datetime(2024, 6, 1), ratio=2.0)
+    """
+    handlers = {
+        'DIVIDEND': lambda: compute_scheduled_dividend(view, symbol, event_date),
+        'SPLIT': lambda: compute_stock_split(view, symbol, kwargs.get('ratio', 1.0), event_date),
+    }
+
+    handler = handlers.get(event_type)
+    if handler is None:
+        return ContractResult()  # Unknown event type - no action
+
+    return handler()
 
 
 def stock_contract(

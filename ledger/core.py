@@ -28,6 +28,26 @@ from typing import (
 # CONSTANTS
 # ============================================================================
 
+# Reserved wallet for issuance, redemption, and obligation lifecycle.
+# The system wallet is exempt from balance validation and can hold any balance.
+SYSTEM_WALLET = "system"
+
+# Unit type constants (strings, not enum per design decision).
+# These provide clarity and consistency without over-engineering.
+UNIT_TYPE_CASH = "CASH"
+UNIT_TYPE_STOCK = "STOCK"
+UNIT_TYPE_BILATERAL_OPTION = "BILATERAL_OPTION"
+UNIT_TYPE_BILATERAL_FORWARD = "BILATERAL_FORWARD"
+UNIT_TYPE_DEFERRED_CASH = "DEFERRED_CASH"
+UNIT_TYPE_DELTA_HEDGE_STRATEGY = "DELTA_HEDGE_STRATEGY"
+UNIT_TYPE_BOND = "BOND"
+UNIT_TYPE_FUTURE = "FUTURE"
+# Phase 3 unit types
+UNIT_TYPE_MARGIN_LOAN = "MARGIN_LOAN"
+UNIT_TYPE_STRUCTURED_NOTE = "STRUCTURED_NOTE"
+UNIT_TYPE_PORTFOLIO_SWAP = "PORTFOLIO_SWAP"
+UNIT_TYPE_AUTOCALLABLE = "AUTOCALLABLE"
+
 # Epsilon for floating point comparisons.
 # Quantities with absolute value below this threshold are treated as zero.
 QUANTITY_EPSILON = 1e-12
@@ -430,7 +450,7 @@ def cash(symbol: str, name: str, decimal_places: int = 2) -> Unit:
     return Unit(
         symbol=symbol,
         name=name,
-        unit_type="CASH",
+        unit_type=UNIT_TYPE_CASH,
         decimal_places=decimal_places,
         min_balance=DEFAULT_CASH_MIN_BALANCE,
         _state={'issuer': 'central_bank'}

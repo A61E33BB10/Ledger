@@ -927,7 +927,7 @@ def run_all_examples():
     example_smart_contracts()                  # Example 4
 
     # Examples 5-7: Performance and precision
-    example_load_test(num_wallets=100, num_units=100, num_moves=10_000)  # Example 5 (reduced for demo)
+    example_load_test()  # Example 5 (reduced for demo)
     example_precision()                        # Example 6
     example_performance_benchmark()            # Example 7
 

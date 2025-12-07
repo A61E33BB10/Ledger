@@ -22,8 +22,8 @@ from datetime import datetime
 import math
 from typing import Dict, Any, List
 
-from .core import LedgerView, Move, ContractResult, Unit
-from .black_scholes import call_s as bs_call_delta, call as bs_call_price
+from ..core import LedgerView, Move, ContractResult, Unit, UNIT_TYPE_DELTA_HEDGE_STRATEGY
+from ..black_scholes import call_s as bs_call_delta, call as bs_call_price
 
 
 def create_delta_hedge_unit(
@@ -84,7 +84,7 @@ def create_delta_hedge_unit(
     return Unit(
         symbol=symbol,
         name=name,
-        unit_type="DELTA_HEDGE_STRATEGY",
+        unit_type=UNIT_TYPE_DELTA_HEDGE_STRATEGY,
         min_balance=-100.0,
         max_balance=100.0,
         decimal_places=4,
