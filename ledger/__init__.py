@@ -148,6 +148,20 @@ from .units.autocallable import (
 
 # Margin Loans
 from .units.margin_loan import (
+    # Frozen dataclasses (new pure function architecture)
+    MarginLoanTerms,
+    MarginLoanState,
+    MarginStatusResult,
+    # Adapter functions
+    load_margin_loan,
+    to_state_dict,
+    # Pure calculation functions (no LedgerView, all inputs explicit)
+    calculate_collateral_value,
+    calculate_pending_interest,
+    calculate_total_debt,
+    calculate_margin_status,
+    calculate_interest_accrual,
+    # Convenience functions (load + calculate)
     create_margin_loan,
     compute_collateral_value,
     compute_margin_status,
@@ -245,7 +259,11 @@ __all__ = [
     'create_autocallable', 'compute_observation', 'compute_maturity_payoff',
     'autocallable_contract', 'autocallable_transact',
     'get_autocallable_status', 'get_total_coupons_paid',
-    # Margin Loans
+    # Margin Loans - Pure Function Architecture
+    'MarginLoanTerms', 'MarginLoanState', 'MarginStatusResult',
+    'load_margin_loan', 'to_state_dict',
+    'calculate_collateral_value', 'calculate_pending_interest',
+    'calculate_total_debt', 'calculate_margin_status', 'calculate_interest_accrual',
     'create_margin_loan', 'compute_collateral_value', 'compute_margin_status',
     'compute_interest_accrual', 'compute_margin_call', 'compute_margin_cure',
     'compute_margin_loan_liquidation', 'compute_repayment', 'compute_add_collateral',

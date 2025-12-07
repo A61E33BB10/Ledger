@@ -1409,6 +1409,249 @@ class TestFullLifecycle:
 # CONSERVATION LAW TESTS
 # ============================================================================
 
+class TestPositionTransfer:
+    """Tests for payments to current position holders (not original holder_wallet)."""
+
+    def test_coupon_payment_to_current_holder_after_transfer(self):
+        """Coupon payment goes to current holder, not original holder_wallet."""
+        # Create autocallable with alice as original holder
+        view = FakeView(
+            balances={
+                'bank': {'USD': 1000000},
+                'alice': {},  # alice no longer holds the autocallable
+                'bob': {'AUTO': 1},  # bob now holds it (transferred from alice)
+            },
+            states={
+                'AUTO': {
+                    'underlying': 'SPX',
+                    'notional': 100000.0,
+                    'initial_spot': 100.0,
+                    'autocall_barrier': 1.0,
+                    'coupon_barrier': 0.7,
+                    'coupon_rate': 0.08,
+                    'put_barrier': 0.6,
+                    'issue_date': datetime(2024, 1, 15),
+                    'maturity_date': datetime(2025, 1, 15),
+                    'observation_schedule': [datetime(2024, 4, 15)],
+                    'currency': 'USD',
+                    'issuer_wallet': 'bank',
+                    'holder_wallet': 'alice',  # Original holder in state
+                    'memory_feature': True,
+                    'observation_history': [],
+                    'coupon_memory': 0.0,
+                    'put_knocked_in': False,
+                    'autocalled': False,
+                    'autocall_date': None,
+                    'settled': False,
+                }
+            },
+            time=datetime(2024, 4, 15)
+        )
+
+        # Trigger coupon payment (spot at 80% - above coupon barrier)
+        result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=80.0)
+
+        # Payment should go to bob (current holder), not alice (original holder_wallet)
+        assert len(result.moves) == 1
+        move = result.moves[0]
+        assert move.source == 'bank'
+        assert move.dest == 'bob'  # Current holder gets payment
+        assert move.unit == 'USD'
+        assert move.quantity == 8000.0  # 8% of 100000
+
+    def test_autocall_redemption_to_current_holder_after_transfer(self):
+        """Autocall redemption goes to current holder, not original holder_wallet."""
+        # Create autocallable with alice as original holder, bob as current holder
+        view = FakeView(
+            balances={
+                'bank': {'USD': 1000000},
+                'alice': {},
+                'bob': {'AUTO': 1},  # bob holds it now
+            },
+            states={
+                'AUTO': {
+                    'underlying': 'SPX',
+                    'notional': 100000.0,
+                    'initial_spot': 100.0,
+                    'autocall_barrier': 1.0,
+                    'coupon_barrier': 0.7,
+                    'coupon_rate': 0.08,
+                    'put_barrier': 0.6,
+                    'issue_date': datetime(2024, 1, 15),
+                    'maturity_date': datetime(2025, 1, 15),
+                    'observation_schedule': [datetime(2024, 4, 15)],
+                    'currency': 'USD',
+                    'issuer_wallet': 'bank',
+                    'holder_wallet': 'alice',  # Original holder
+                    'memory_feature': True,
+                    'observation_history': [],
+                    'coupon_memory': 0.0,
+                    'put_knocked_in': False,
+                    'autocalled': False,
+                    'autocall_date': None,
+                    'settled': False,
+                }
+            },
+            time=datetime(2024, 4, 15)
+        )
+
+        # Trigger autocall (spot at 100% - autocall barrier)
+        result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=100.0)
+
+        # Autocall redemption should go to bob, not alice
+        assert len(result.moves) == 1
+        move = result.moves[0]
+        assert move.source == 'bank'
+        assert move.dest == 'bob'  # Current holder
+        assert move.unit == 'USD'
+        assert move.quantity == 108000.0  # 100000 principal + 8000 coupon
+
+    def test_maturity_payoff_to_current_holder_after_transfer(self):
+        """Maturity payoff goes to current holder, not original holder_wallet."""
+        # Create autocallable with alice as original holder, bob as current holder
+        view = FakeView(
+            balances={
+                'bank': {'USD': 1000000},
+                'alice': {},
+                'bob': {'AUTO': 1},  # bob holds it now
+            },
+            states={
+                'AUTO': {
+                    'underlying': 'SPX',
+                    'notional': 100000.0,
+                    'initial_spot': 100.0,
+                    'autocall_barrier': 1.0,
+                    'coupon_barrier': 0.7,
+                    'coupon_rate': 0.08,
+                    'put_barrier': 0.6,
+                    'issue_date': datetime(2024, 1, 15),
+                    'maturity_date': datetime(2025, 1, 15),
+                    'observation_schedule': [datetime(2024, 4, 15)],
+                    'currency': 'USD',
+                    'issuer_wallet': 'bank',
+                    'holder_wallet': 'alice',  # Original holder
+                    'memory_feature': True,
+                    'observation_history': [],
+                    'coupon_memory': 0.0,
+                    'put_knocked_in': False,
+                    'autocalled': False,
+                    'autocall_date': None,
+                    'settled': False,
+                }
+            },
+            time=datetime(2025, 1, 15)
+        )
+
+        # Trigger maturity payment
+        result = compute_maturity_payoff(view, 'AUTO', final_spot=90.0)
+
+        # Maturity payment should go to bob, not alice
+        assert len(result.moves) == 1
+        move = result.moves[0]
+        assert move.source == 'bank'
+        assert move.dest == 'bob'  # Current holder
+        assert move.unit == 'USD'
+        assert move.quantity == 100000.0  # Full principal (no knock-in)
+
+    def test_multiple_holders_share_coupon_payment(self):
+        """Multiple holders each receive proportional coupon payments."""
+        # Create autocallable with alice and bob each holding 0.5 units
+        view = FakeView(
+            balances={
+                'bank': {'USD': 1000000},
+                'alice': {'AUTO': 0.5},
+                'bob': {'AUTO': 0.5},
+            },
+            states={
+                'AUTO': {
+                    'underlying': 'SPX',
+                    'notional': 100000.0,
+                    'initial_spot': 100.0,
+                    'autocall_barrier': 1.0,
+                    'coupon_barrier': 0.7,
+                    'coupon_rate': 0.08,
+                    'put_barrier': 0.6,
+                    'issue_date': datetime(2024, 1, 15),
+                    'maturity_date': datetime(2025, 1, 15),
+                    'observation_schedule': [datetime(2024, 4, 15)],
+                    'currency': 'USD',
+                    'issuer_wallet': 'bank',
+                    'holder_wallet': 'alice',  # Original holder
+                    'memory_feature': True,
+                    'observation_history': [],
+                    'coupon_memory': 0.0,
+                    'put_knocked_in': False,
+                    'autocalled': False,
+                    'autocall_date': None,
+                    'settled': False,
+                }
+            },
+            time=datetime(2024, 4, 15)
+        )
+
+        # Trigger coupon payment
+        result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=80.0)
+
+        # Both alice and bob should receive proportional payments
+        assert len(result.moves) == 2
+
+        # Moves should be sorted by wallet name (alice, bob)
+        alice_move = result.moves[0]
+        assert alice_move.source == 'bank'
+        assert alice_move.dest == 'alice'
+        assert alice_move.unit == 'USD'
+        assert alice_move.quantity == 4000.0  # 0.5 * 8000
+
+        bob_move = result.moves[1]
+        assert bob_move.source == 'bank'
+        assert bob_move.dest == 'bob'
+        assert bob_move.unit == 'USD'
+        assert bob_move.quantity == 4000.0  # 0.5 * 8000
+
+    def test_issuer_holding_units_does_not_receive_payment(self):
+        """Issuer holding autocallable units should not receive payment."""
+        view = FakeView(
+            balances={
+                'bank': {'USD': 1000000, 'AUTO': 0.3},  # bank holds some units
+                'alice': {'AUTO': 0.7},
+            },
+            states={
+                'AUTO': {
+                    'underlying': 'SPX',
+                    'notional': 100000.0,
+                    'initial_spot': 100.0,
+                    'autocall_barrier': 1.0,
+                    'coupon_barrier': 0.7,
+                    'coupon_rate': 0.08,
+                    'put_barrier': 0.6,
+                    'issue_date': datetime(2024, 1, 15),
+                    'maturity_date': datetime(2025, 1, 15),
+                    'observation_schedule': [datetime(2024, 4, 15)],
+                    'currency': 'USD',
+                    'issuer_wallet': 'bank',
+                    'holder_wallet': 'alice',
+                    'memory_feature': True,
+                    'observation_history': [],
+                    'coupon_memory': 0.0,
+                    'put_knocked_in': False,
+                    'autocalled': False,
+                    'autocall_date': None,
+                    'settled': False,
+                }
+            },
+            time=datetime(2024, 4, 15)
+        )
+
+        # Trigger coupon payment
+        result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=80.0)
+
+        # Only alice should receive payment (bank is excluded as issuer)
+        assert len(result.moves) == 1
+        move = result.moves[0]
+        assert move.dest == 'alice'
+        assert move.quantity == 5600.0  # 0.7 * 8000
+
+
 class TestConservationLaws:
     """Tests for financial conservation laws."""
 

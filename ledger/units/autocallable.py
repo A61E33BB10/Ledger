@@ -291,11 +291,11 @@ def compute_observation(
     if performance >= autocall_barrier:
         # Autocall triggered - pay principal + current coupon + memory
         current_coupon = notional * coupon_rate
-        payout = notional + current_coupon
+        payout_per_unit = notional + current_coupon
         memory_paid = 0.0
 
         if memory_feature and coupon_memory > QUANTITY_EPSILON:
-            payout += coupon_memory
+            payout_per_unit += coupon_memory
             memory_paid = coupon_memory
             new_coupon_memory = 0.0
 
@@ -306,13 +306,19 @@ def compute_observation(
         autocalled = True
         autocall_date = observation_date
 
-        moves.append(Move(
-            source=issuer_wallet,
-            dest=holder_wallet,
-            unit=currency,
-            quantity=payout,
-            contract_id=f'autocall_{symbol}_{observation_date.isoformat()}',
-        ))
+        # Use get_positions to find all current holders
+        positions = view.get_positions(symbol)
+        for wallet in sorted(positions.keys()):
+            units_held = positions[wallet]
+            if units_held > 0 and wallet != issuer_wallet:
+                payout = units_held * payout_per_unit
+                moves.append(Move(
+                    source=issuer_wallet,
+                    dest=wallet,
+                    unit=currency,
+                    quantity=payout,
+                    contract_id=f'autocall_{symbol}_{observation_date.isoformat()}_{wallet}',
+                ))
 
     else:
         # Step 2: Check coupon barrier
@@ -320,11 +326,11 @@ def compute_observation(
             # Coupon paid
             current_coupon = notional * coupon_rate
             memory_paid = 0.0
-            total_payment = current_coupon
+            payment_per_unit = current_coupon
 
             if memory_feature and coupon_memory > QUANTITY_EPSILON:
                 # Pay accumulated coupons too
-                total_payment += coupon_memory
+                payment_per_unit += coupon_memory
                 memory_paid = coupon_memory
                 new_coupon_memory = 0.0
 
@@ -332,13 +338,19 @@ def compute_observation(
             observation_record['memory_paid'] = memory_paid
             observation_record['total_coupon_earned'] = current_coupon + memory_paid
 
-            moves.append(Move(
-                source=issuer_wallet,
-                dest=holder_wallet,
-                unit=currency,
-                quantity=total_payment,
-                contract_id=f'coupon_{symbol}_{observation_date.isoformat()}',
-            ))
+            # Use get_positions to find all current holders
+            positions = view.get_positions(symbol)
+            for wallet in sorted(positions.keys()):
+                units_held = positions[wallet]
+                if units_held > 0 and wallet != issuer_wallet:
+                    total_payment = units_held * payment_per_unit
+                    moves.append(Move(
+                        source=issuer_wallet,
+                        dest=wallet,
+                        unit=currency,
+                        quantity=total_payment,
+                        contract_id=f'coupon_{symbol}_{observation_date.isoformat()}_{wallet}',
+                    ))
         else:
             # Coupon missed
             if memory_feature:
@@ -427,28 +439,34 @@ def compute_maturity_payoff(
     # Calculate final performance
     final_perf = final_spot / initial_spot
 
-    # Determine payout
+    # Determine payout per unit
     if put_knocked_in:
         # Principal at risk - pay back based on final performance, capped at 100%
-        payout = notional * min(1.0, final_perf)
+        payout_per_unit = notional * min(1.0, final_perf)
     else:
         # Principal protected
-        payout = notional
+        payout_per_unit = notional
 
     # Add any accumulated memory coupons
     if memory_feature and coupon_memory > QUANTITY_EPSILON:
-        payout += coupon_memory
+        payout_per_unit += coupon_memory
 
     moves: List[Move] = []
 
-    if payout > QUANTITY_EPSILON:
-        moves.append(Move(
-            source=issuer_wallet,
-            dest=holder_wallet,
-            unit=currency,
-            quantity=payout,
-            contract_id=f'maturity_{symbol}',
-        ))
+    # Use get_positions to find all current holders
+    if payout_per_unit > QUANTITY_EPSILON:
+        positions = view.get_positions(symbol)
+        for wallet in sorted(positions.keys()):
+            units_held = positions[wallet]
+            if units_held > 0 and wallet != issuer_wallet:
+                payout = units_held * payout_per_unit
+                moves.append(Move(
+                    source=issuer_wallet,
+                    dest=wallet,
+                    unit=currency,
+                    quantity=payout,
+                    contract_id=f'maturity_{symbol}_{wallet}',
+                ))
 
     # Build state updates
     state_updates = {
@@ -458,7 +476,7 @@ def compute_maturity_payoff(
             'settlement_date': view.current_time,
             'final_spot': final_spot,
             'final_performance': final_perf,
-            'final_payout': payout,
+            'final_payout': payout_per_unit,
             'coupon_memory': 0.0,  # Paid out
         }
     }

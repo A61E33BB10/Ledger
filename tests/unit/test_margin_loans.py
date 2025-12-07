@@ -1012,6 +1012,113 @@ class TestComputeLiquidation:
         with pytest.raises(ValueError, match="cannot be negative"):
             compute_margin_loan_liquidation(view, 'LOAN_001', prices, -5000.0)
 
+    def test_cannot_liquidate_during_breach_period(self):
+        """CRITICAL: Cannot liquidate when status is BREACH (deadline not passed)."""
+        state = dict(self.loan_state)
+        state['margin_call_deadline'] = datetime(2024, 1, 20)
+        view = FakeView(
+            balances={'alice': {'USD': 10000}, 'bank': {'USD': 100000}},
+            states={'LOAN_001': state},
+            time=datetime(2024, 1, 16),
+        )
+        prices = {'AAPL': 120.0}
+        status = compute_margin_status(view, 'LOAN_001', prices)
+        assert status['status'] == MARGIN_STATUS_BREACH
+        with pytest.raises(ValueError, match="Cannot liquidate.*BREACH"):
+            compute_margin_loan_liquidation(view, 'LOAN_001', prices, 90000.0)
+
+    def test_can_liquidate_when_deadline_passed(self):
+        """CRITICAL: CAN liquidate when status is LIQUIDATION (deadline passed)."""
+        state = dict(self.loan_state)
+        state['margin_call_deadline'] = datetime(2024, 1, 15)
+        view = FakeView(
+            balances={'alice': {'USD': 10000}, 'bank': {'USD': 100000}},
+            states={'LOAN_001': state},
+            time=datetime(2024, 1, 16),
+        )
+        prices = {'AAPL': 120.0}
+        status = compute_margin_status(view, 'LOAN_001', prices)
+        assert status['status'] == MARGIN_STATUS_LIQUIDATION
+        result = compute_margin_loan_liquidation(view, 'LOAN_001', prices, 95000.0)
+        assert result.state_updates['LOAN_001']['liquidated'] is True
+
+    def test_margin_call_3day_deadline_liquidate_after_1day_fails(self):
+        """CRITICAL: Issue margin call with 3-day deadline, try to liquidate after 1 day - should fail."""
+        loan_state = {
+            'loan_amount': 100000.0,
+            'interest_rate': 0.08,
+            'accrued_interest': 0.0,
+            'collateral': {'AAPL': 1000},
+            'haircuts': {'AAPL': 0.80},
+            'initial_margin': 1.5,
+            'maintenance_margin': 1.25,
+            'borrower_wallet': 'alice',
+            'lender_wallet': 'bank',
+            'currency': 'USD',
+            'margin_call_amount': 0.0,
+            'margin_call_deadline': None,
+            'margin_call_deadline_days': 3,
+            'liquidated': False,
+        }
+        view_day0 = FakeView(
+            balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
+            states={'LOAN_001': loan_state},
+            time=datetime(2024, 1, 15),
+        )
+        prices = {'AAPL': 150.0}
+        result_call = compute_margin_call(view_day0, 'LOAN_001', prices)
+        state_after_call = result_call.state_updates['LOAN_001']
+        assert state_after_call['margin_call_deadline'] == datetime(2024, 1, 18)
+        view_day1 = FakeView(
+            balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
+            states={'LOAN_001': state_after_call},
+            time=datetime(2024, 1, 16),
+        )
+        status = compute_margin_status(view_day1, 'LOAN_001', prices)
+        assert status['status'] == MARGIN_STATUS_BREACH
+        with pytest.raises(ValueError, match="Cannot liquidate.*BREACH"):
+            compute_margin_loan_liquidation(view_day1, 'LOAN_001', prices, 115000.0)
+
+    def test_margin_call_3day_deadline_liquidate_after_4days_succeeds(self):
+        """CRITICAL: Issue margin call with 3-day deadline, try to liquidate after 4 days - should succeed."""
+        loan_state = {
+            'loan_amount': 100000.0,
+            'interest_rate': 0.08,
+            'accrued_interest': 0.0,
+            'collateral': {'AAPL': 1000},
+            'haircuts': {'AAPL': 0.80},
+            'initial_margin': 1.5,
+            'maintenance_margin': 1.25,
+            'borrower_wallet': 'alice',
+            'lender_wallet': 'bank',
+            'currency': 'USD',
+            'margin_call_amount': 0.0,
+            'margin_call_deadline': None,
+            'margin_call_deadline_days': 3,
+            'liquidated': False,
+        }
+        view_day0 = FakeView(
+            balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
+            states={'LOAN_001': loan_state},
+            time=datetime(2024, 1, 15, 10, 0),
+        )
+        prices = {'AAPL': 150.0}
+        result_call = compute_margin_call(view_day0, 'LOAN_001', prices)
+        state_after_call = result_call.state_updates['LOAN_001']
+        assert state_after_call['margin_call_deadline'] == datetime(2024, 1, 18, 10, 0)
+        view_day4 = FakeView(
+            balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
+            states={'LOAN_001': state_after_call},
+            time=datetime(2024, 1, 19, 10, 0),
+        )
+        status = compute_margin_status(view_day4, 'LOAN_001', prices)
+        assert status['status'] == MARGIN_STATUS_LIQUIDATION
+        result = compute_margin_loan_liquidation(view_day4, 'LOAN_001', prices, 115000.0)
+        updated = result.state_updates['LOAN_001']
+        assert updated['liquidated'] is True
+        assert updated['collateral'] == {}
+        assert updated['loan_amount'] == 0.0
+
 
 # ============================================================================
 # REPAYMENT TESTS
@@ -1367,6 +1474,8 @@ class TestMarginLoanFullLifecycle:
             'liquidated': False,
             'total_interest_paid': 0.0,
             'total_principal_paid': 0.0,
+            'origination_date': datetime(2024, 1, 1),
+            'last_accrual_date': datetime(2024, 1, 1),
         }
 
         # Step 1: Check initial status (healthy)
@@ -1381,18 +1490,19 @@ class TestMarginLoanFullLifecycle:
         assert status1['status'] == MARGIN_STATUS_HEALTHY
         assert status1['margin_ratio'] == pytest.approx(1.6, abs=0.01)
 
-        # Step 2: Accrue 30 days of interest
+        # Step 2: Accrue 30 days of interest (updates last_accrual_date to Jan 1)
         result2 = compute_interest_accrual(view1, 'LOAN_001', 30)
         state_after_interest = result2.state_updates['LOAN_001']
         # Interest = 100,000 * 0.08 / 365 * 30 = $657.53
         expected_interest = 100000 * 0.08 / 365 * 30
         assert state_after_interest['accrued_interest'] == pytest.approx(expected_interest, abs=0.01)
 
-        # Step 3: Full repayment
+        # Step 3: Full repayment on same day (no pending interest)
+        # Use the same time to avoid pending interest accumulation
         view3 = FakeView(
             balances={'alice': {'USD': 200000}, 'bank': {'USD': 0}},
             states={'LOAN_001': state_after_interest},
-            time=datetime(2024, 2, 1),
+            time=datetime(2024, 1, 1),  # Same day as accrual
         )
 
         total_due = 100000 + expected_interest
@@ -1738,6 +1848,512 @@ class TestEdgeCases:
 # SMART CONTRACT TESTS
 # ============================================================================
 
+class TestPendingInterest:
+    """Tests for pending interest inclusion in debt calculations (CRITICAL BUG FIX)."""
+
+    def setup_method(self):
+        """Setup common test fixtures."""
+        self.loan_state = {
+            'loan_amount': 100000.0,
+            'interest_rate': 0.08,
+            'accrued_interest': 0.0,
+            'collateral': {'AAPL': 1000},
+            'haircuts': {'AAPL': 0.80},
+            'initial_margin': 1.5,
+            'maintenance_margin': 1.25,
+            'borrower_wallet': 'alice',
+            'lender_wallet': 'bank',
+            'currency': 'USD',
+            'margin_call_amount': 0.0,
+            'margin_call_deadline': None,
+            'margin_call_deadline_days': 3,
+            'liquidated': False,
+            'origination_date': datetime(2024, 1, 1),
+            'last_accrual_date': datetime(2024, 1, 1),
+            'total_interest_paid': 0.0,
+            'total_principal_paid': 0.0,
+        }
+
+    def test_liquidation_includes_pending_interest(self):
+        """Liquidation includes pending interest accrued since last_accrual_date."""
+        # Loan originated on Jan 1, last accrual on Jan 1
+        # 5 days pass without accrual (Jan 1 -> Jan 6)
+        # Expected pending interest = 100,000 * 0.08 / 365 * 5 = $109.59
+        state = dict(self.loan_state)
+        state['margin_call_deadline'] = datetime(2024, 1, 5)  # Deadline passed
+
+        view = FakeView(
+            balances={
+                'alice': {'USD': 10000},
+                'bank': {'USD': 100000},
+            },
+            states={'LOAN_001': state},
+            time=datetime(2024, 1, 6),  # 5 days after last accrual
+        )
+        prices = {'AAPL': 100.0}
+
+        # Expected pending interest
+        expected_pending = 100000 * 0.08 / 365 * 5  # ~109.59
+        expected_total_debt = 100000 + 0 + expected_pending  # ~100,109.59
+
+        # Liquidate with proceeds covering full debt including pending
+        sale_proceeds = 102000.0
+        result = compute_margin_loan_liquidation(view, 'LOAN_001', prices, sale_proceeds)
+
+        # Debt payment should include pending interest
+        debt_move = result.moves[0]
+        assert debt_move.quantity == pytest.approx(expected_total_debt, abs=0.01)
+
+        # Surplus should be proceeds minus total debt (including pending)
+        surplus_move = result.moves[1]
+        expected_surplus = sale_proceeds - expected_total_debt
+        assert surplus_move.quantity == pytest.approx(expected_surplus, abs=0.01)
+
+    def test_cure_includes_pending_interest(self):
+        """Cure amount validation includes pending interest in total debt."""
+        # 5 days pass without accrual
+        view = FakeView(
+            balances={
+                'alice': {'USD': 50000},
+                'bank': {'USD': 100000},
+            },
+            states={'LOAN_001': self.loan_state},
+            time=datetime(2024, 1, 6),  # 5 days after last accrual
+        )
+
+        # Expected pending interest
+        expected_pending = 100000 * 0.08 / 365 * 5  # ~109.59
+        expected_total_debt = 100000 + 0 + expected_pending  # ~100,109.59
+
+        # Cure with exact total debt (should succeed)
+        result = compute_margin_cure(view, 'LOAN_001', expected_total_debt)
+
+        # Should generate one move for the cure amount
+        assert len(result.moves) == 1
+        assert result.moves[0].quantity == pytest.approx(expected_total_debt, abs=0.01)
+
+        # Final state should have zero debt
+        updated = result.state_updates['LOAN_001']
+        assert updated['loan_amount'] == pytest.approx(0.0, abs=0.01)
+        assert updated['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+
+    def test_cure_exceeding_debt_with_pending_interest_raises(self):
+        """Cure amount exceeding total debt (including pending) raises error."""
+        view = FakeView(
+            balances={},
+            states={'LOAN_001': self.loan_state},
+            time=datetime(2024, 1, 6),  # 5 days after last accrual
+        )
+
+        # Try to cure with more than total debt (including pending)
+        expected_total_debt = 100000 + (100000 * 0.08 / 365 * 5)
+        excessive_cure = expected_total_debt + 1000
+
+        with pytest.raises(ValueError, match="exceeds total_debt"):
+            compute_margin_cure(view, 'LOAN_001', excessive_cure)
+
+    def test_repayment_includes_pending_interest(self):
+        """Repayment includes pending interest in total debt calculation."""
+        # 5 days pass without accrual
+        view = FakeView(
+            balances={
+                'alice': {'USD': 150000},
+                'bank': {'USD': 100000},
+            },
+            states={'LOAN_001': self.loan_state},
+            time=datetime(2024, 1, 6),  # 5 days after last accrual
+        )
+
+        # Expected pending interest
+        expected_pending = 100000 * 0.08 / 365 * 5  # ~109.59
+        expected_total_debt = 100000 + 0 + expected_pending  # ~100,109.59
+
+        # Full repayment including pending interest
+        result = compute_repayment(view, 'LOAN_001', expected_total_debt)
+
+        # Should generate one move for the repayment
+        assert len(result.moves) == 1
+        assert result.moves[0].quantity == pytest.approx(expected_total_debt, abs=0.01)
+
+        # Final state should have zero debt
+        updated = result.state_updates['LOAN_001']
+        assert updated['loan_amount'] == pytest.approx(0.0, abs=0.01)
+        assert updated['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+
+        # Total interest paid should equal the pending interest (no accrued)
+        assert updated['total_interest_paid'] == pytest.approx(expected_pending, abs=0.01)
+        assert updated['total_principal_paid'] == pytest.approx(100000.0, abs=0.01)
+
+    def test_repayment_exceeding_debt_with_pending_interest_raises(self):
+        """Repayment exceeding total debt (including pending) raises error."""
+        view = FakeView(
+            balances={},
+            states={'LOAN_001': self.loan_state},
+            time=datetime(2024, 1, 6),  # 5 days after last accrual
+        )
+
+        # Try to repay more than total debt (including pending)
+        expected_total_debt = 100000 + (100000 * 0.08 / 365 * 5)
+        excessive_repayment = expected_total_debt + 1000
+
+        with pytest.raises(ValueError, match="exceeds total_debt"):
+            compute_repayment(view, 'LOAN_001', excessive_repayment)
+
+    def test_pending_interest_5_day_liquidation_scenario(self):
+        """
+        CRITICAL TEST: 5-day pending interest scenario.
+
+        Scenario:
+        - Loan originated with $100k @ 8% on Jan 1
+        - Interest accrues for 5 days but compute_interest_accrual() is NOT called
+        - On Jan 6, loan is liquidated
+        - Verify lender receives full debt including 5 days of pending interest
+
+        This test ensures lenders don't lose accrued-but-not-persisted interest.
+        """
+        # Setup loan with margin call deadline past due
+        state = dict(self.loan_state)
+        state['margin_call_deadline'] = datetime(2024, 1, 5)  # Deadline passed
+
+        view = FakeView(
+            balances={
+                'alice': {'USD': 10000},
+                'bank': {'USD': 100000},
+            },
+            states={'LOAN_001': state},
+            time=datetime(2024, 1, 6),  # 5 days after origination/last_accrual
+        )
+        prices = {'AAPL': 100.0}
+
+        # Calculate expected pending interest for 5 days
+        expected_pending_interest = 100000 * 0.08 / 365 * 5  # ~109.59
+        expected_total_debt = 100000 + 0 + expected_pending_interest  # ~100,109.59
+
+        # Liquidate with sale proceeds that cover full debt
+        sale_proceeds = 105000.0
+        result = compute_margin_loan_liquidation(view, 'LOAN_001', prices, sale_proceeds)
+
+        # Verify debt payment includes pending interest
+        assert len(result.moves) == 2  # Debt payment + surplus
+
+        debt_move = result.moves[0]
+        assert debt_move.source == 'alice'
+        assert debt_move.dest == 'bank'
+        assert debt_move.quantity == pytest.approx(expected_total_debt, abs=0.01)
+
+        # Verify surplus is correct (proceeds - full debt including pending)
+        surplus_move = result.moves[1]
+        assert surplus_move.source == 'bank'
+        assert surplus_move.dest == 'alice'
+        expected_surplus = sale_proceeds - expected_total_debt  # ~4,890.41
+        assert surplus_move.quantity == pytest.approx(expected_surplus, abs=0.01)
+
+        # Verify liquidation state
+        updated = result.state_updates['LOAN_001']
+        assert updated['liquidated'] is True
+        assert updated['loan_amount'] == 0.0
+        assert updated['accrued_interest'] == 0.0
+        assert updated['collateral'] == {}
+        assert updated['liquidation_proceeds'] == sale_proceeds
+        assert updated['liquidation_deficiency'] == 0.0  # Full recovery
+
+    def test_pending_interest_payment_waterfall(self):
+        """Test that pending interest is paid before accrued interest and principal."""
+        # Setup with both accrued and pending interest
+        state = dict(self.loan_state)
+        state['accrued_interest'] = 500.0  # $500 already accrued
+
+        view = FakeView(
+            balances={
+                'alice': {'USD': 50000},
+                'bank': {'USD': 100000},
+            },
+            states={'LOAN_001': state},
+            time=datetime(2024, 1, 6),  # 5 days after last accrual
+        )
+
+        # Expected pending interest for 5 days
+        expected_pending = 100000 * 0.08 / 365 * 5  # ~109.59
+        total_interest = 500.0 + expected_pending  # ~609.59
+
+        # Repay enough to cover all interest plus some principal
+        repayment = 1000.0
+        result = compute_repayment(view, 'LOAN_001', repayment)
+
+        updated = result.state_updates['LOAN_001']
+
+        # All interest should be paid first (accrued + pending)
+        assert updated['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+        assert updated['total_interest_paid'] == pytest.approx(total_interest, abs=0.01)
+
+        # Remaining goes to principal
+        principal_payment = repayment - total_interest  # ~390.41
+        assert updated['loan_amount'] == pytest.approx(100000 - principal_payment, abs=0.01)
+        assert updated['total_principal_paid'] == pytest.approx(principal_payment, abs=0.01)
+
+    def test_pending_interest_updates_last_accrual_date(self):
+        """Verify that operations with pending interest update last_accrual_date."""
+        view = FakeView(
+            balances={
+                'alice': {'USD': 50000},
+                'bank': {'USD': 100000},
+            },
+            states={'LOAN_001': self.loan_state},
+            time=datetime(2024, 1, 6),  # 5 days after last accrual
+        )
+
+        # Make a repayment that includes pending interest
+        result = compute_repayment(view, 'LOAN_001', 1000.0)
+
+        updated = result.state_updates['LOAN_001']
+
+        # last_accrual_date should be updated to current time
+        assert updated['last_accrual_date'] == datetime(2024, 1, 6)
+
+    def test_add_collateral_includes_pending_interest_in_cure_check(self):
+        """
+        Adding collateral cure check should include pending interest.
+
+        This test verifies that when checking if adding collateral cures a margin call,
+        the total_debt calculation includes pending interest (interest accrued since
+        last_accrual_date but not yet persisted). Without this, a margin call could
+        be incorrectly cleared when pending interest would keep the ratio below
+        maintenance margin.
+        """
+        # Setup: loan with margin call and pending interest
+        state = {
+            'loan_amount': 100000.0,
+            'interest_rate': 0.08,
+            'accrued_interest': 0.0,
+            'last_accrual_date': datetime(2024, 1, 1),
+            'collateral': {'AAPL': 1000},  # 1000 shares
+            'haircuts': {'AAPL': 0.80},
+            'initial_margin': 1.5,
+            'maintenance_margin': 1.25,
+            'borrower_wallet': 'alice',
+            'lender_wallet': 'bank',
+            'currency': 'USD',
+            'margin_call_amount': 5000.0,
+            'margin_call_deadline': datetime(2024, 1, 20),
+            'margin_call_deadline_days': 3,
+            'liquidated': False,
+        }
+
+        # 30 days after last accrual = significant pending interest
+        # Pending interest = 100000 * 0.08 / 365 * 30 = ~$657.53
+        view = FakeView(
+            balances={'alice': {'AAPL': 100}},
+            states={'LOAN_001': state},
+            time=datetime(2024, 1, 31),  # 30 days elapsed
+        )
+
+        # Calculate expected pending interest
+        pending_interest = 100000 * 0.08 / 365 * 30  # ~657.53
+        total_debt_with_pending = 100000 + pending_interest  # ~100,657.53
+
+        # Price of AAPL such that:
+        # - WITHOUT pending interest: ratio would be ABOVE maintenance (1.25)
+        # - WITH pending interest: ratio would be BELOW maintenance (1.25)
+        #
+        # After adding 50 more shares: 1050 shares total
+        # Collateral value = 1050 * price * 0.80
+        #
+        # We want: collateral_value / 100000 >= 1.25 (passes without pending)
+        #          collateral_value / 100657.53 < 1.25 (fails with pending)
+        #
+        # So: 125000 <= collateral_value < 125821.91
+        # With 1050 * 0.80 = 840 effective shares: 148.81 <= price < 149.79
+        # Use price = 149.00
+        prices = {'AAPL': 149.00}
+        haircuts = {'AAPL': 0.80}
+
+        # Verify our math:
+        # After adding 50 shares: 1050 total
+        # Collateral value = 1050 * 149 * 0.80 = 125,160
+        # Without pending: ratio = 125160 / 100000 = 1.2516 >= 1.25 (would clear!)
+        # With pending: ratio = 125160 / 100657.53 = 1.2434 < 1.25 (stays in margin call)
+
+        # Add 50 shares of collateral (haircuts come from state)
+        result = compute_add_collateral(
+            view, 'LOAN_001', 'AAPL', 50.0, prices=prices
+        )
+
+        updated = result.state_updates['LOAN_001']
+
+        # Margin call should NOT be cleared because pending interest
+        # keeps the true ratio below maintenance margin
+        assert updated['margin_call_deadline'] is not None, \
+            "Margin call should NOT be cleared when pending interest keeps ratio below maintenance"
+        assert updated['margin_call_amount'] == 5000.0, \
+            "Margin call amount should remain unchanged"
+
+        # Verify collateral was added
+        assert updated['collateral']['AAPL'] == 1050
+
+    def test_add_collateral_clears_margin_call_when_truly_above_maintenance(self):
+        """
+        Adding enough collateral should clear margin call when ratio is truly above
+        maintenance (including pending interest in the calculation).
+        """
+        state = {
+            'loan_amount': 100000.0,
+            'interest_rate': 0.08,
+            'accrued_interest': 0.0,
+            'last_accrual_date': datetime(2024, 1, 1),
+            'collateral': {'AAPL': 1000},
+            'haircuts': {'AAPL': 0.80},
+            'initial_margin': 1.5,
+            'maintenance_margin': 1.25,
+            'borrower_wallet': 'alice',
+            'lender_wallet': 'bank',
+            'currency': 'USD',
+            'margin_call_amount': 5000.0,
+            'margin_call_deadline': datetime(2024, 1, 20),
+            'margin_call_deadline_days': 3,
+            'liquidated': False,
+        }
+
+        # 30 days pending interest = ~$657.53
+        view = FakeView(
+            balances={'alice': {'AAPL': 200}},
+            states={'LOAN_001': state},
+            time=datetime(2024, 1, 31),
+        )
+
+        # Use a higher price so that even with pending interest, ratio exceeds maintenance
+        # Need: collateral_value / 100657.53 >= 1.25
+        # So: collateral_value >= 125,821.91
+        # With 1100 shares (after adding 100) and 0.80 haircut:
+        # 1100 * price * 0.80 >= 125821.91
+        # price >= 143.00
+        prices = {'AAPL': 160.00}  # Plenty above threshold
+        haircuts = {'AAPL': 0.80}
+
+        # Verify: 1100 * 160 * 0.80 = 140,800
+        # Ratio = 140800 / 100657.53 = 1.399 > 1.25 (clears margin call)
+
+        result = compute_add_collateral(
+            view, 'LOAN_001', 'AAPL', 100.0, prices=prices
+        )
+
+        updated = result.state_updates['LOAN_001']
+
+        # Margin call SHOULD be cleared
+        assert updated['margin_call_deadline'] is None, \
+            "Margin call should be cleared when ratio is truly above maintenance"
+        assert updated['margin_call_amount'] == 0.0
+        assert updated['collateral']['AAPL'] == 1100
+
+
+class TestPendingInterestAfterPartialRepayment:
+    """Tests for pending interest calculation after partial principal repayment.
+
+    This test class verifies that _calculate_pending_interest correctly uses
+    loan_amount (which already represents current outstanding principal) instead
+    of incorrectly subtracting total_principal_paid again.
+    """
+
+    def test_pending_interest_after_partial_principal_payment(self):
+        """
+        After a partial principal payment, pending interest should be calculated
+        on the CURRENT outstanding principal (loan_amount), not on the original
+        amount minus total_principal_paid.
+
+        This test catches a bug where loan_amount was being double-reduced:
+        - loan_amount is already reduced when payments are made
+        - Subtracting total_principal_paid again would under-calculate interest
+        """
+        # Scenario: Original loan was 100k, borrower repaid 50k principal
+        # loan_amount should now be 50k (it gets reduced in compute_repayment)
+        # total_principal_paid tracks the cumulative amount for record-keeping
+        state = {
+            'loan_amount': 50000.0,  # Current outstanding (already reduced)
+            'total_principal_paid': 50000.0,  # For record-keeping
+            'interest_rate': 0.10,  # 10% annual
+            'accrued_interest': 0.0,
+            'last_accrual_date': datetime(2024, 1, 1),
+            'collateral': {'AAPL': 1000},
+            'haircuts': {'AAPL': 0.80},
+            'initial_margin': 1.5,
+            'maintenance_margin': 1.25,
+            'borrower_wallet': 'alice',
+            'lender_wallet': 'bank',
+            'currency': 'USD',
+            'margin_call_amount': 0.0,
+            'margin_call_deadline': None,
+            'margin_call_deadline_days': 3,
+            'liquidated': False,
+        }
+
+        # 10 days after last accrual
+        view = FakeView(
+            balances={'alice': {'USD': 100000}},
+            states={'LOAN_001': state},
+            time=datetime(2024, 1, 11),  # 10 days later
+        )
+
+        # Calculate margin status (which uses pending interest internally)
+        prices = {'AAPL': 100.0}
+        status = compute_margin_status(view, 'LOAN_001', prices)
+
+        # Expected pending interest = 50000 * 0.10 / 365 * 10 = ~$136.99
+        expected_pending = 50000 * 0.10 / 365 * 10
+
+        assert status['pending_interest'] == pytest.approx(expected_pending, abs=0.01), \
+            f"Pending interest should be {expected_pending}, got {status['pending_interest']}"
+
+        # Total debt should be loan_amount + accrued + pending
+        expected_debt = 50000.0 + 0.0 + expected_pending
+        assert status['total_debt'] == pytest.approx(expected_debt, abs=0.01)
+
+    def test_liquidation_after_partial_repayment_includes_correct_interest(self):
+        """
+        After a partial repayment, liquidation should calculate pending interest
+        on the current outstanding principal, not the original.
+        """
+        # After partial repayment: loan_amount reduced to 50k
+        state = {
+            'loan_amount': 50000.0,
+            'total_principal_paid': 50000.0,
+            'interest_rate': 0.10,
+            'accrued_interest': 0.0,
+            'last_accrual_date': datetime(2024, 1, 1),
+            'collateral': {'AAPL': 500},
+            'haircuts': {'AAPL': 0.80},
+            'initial_margin': 1.5,
+            'maintenance_margin': 1.25,
+            'borrower_wallet': 'alice',
+            'lender_wallet': 'bank',
+            'currency': 'USD',
+            'margin_call_amount': 10000.0,
+            'margin_call_deadline': datetime(2024, 1, 5),  # Deadline passed
+            'margin_call_deadline_days': 3,
+            'liquidated': False,
+        }
+
+        # 10 days after last accrual, deadline has passed
+        view = FakeView(
+            balances={'alice': {}, 'bank': {}},
+            states={'LOAN_001': state},
+            time=datetime(2024, 1, 11),
+        )
+
+        # Price crash triggers liquidation eligibility
+        prices = {'AAPL': 50.0}  # Collateral value = 500 * 50 * 0.80 = 20,000
+
+        # Sale proceeds cover the debt
+        # Expected debt = 50000 + 0 + (50000 * 0.10 / 365 * 10) = 50136.99
+        expected_pending = 50000 * 0.10 / 365 * 10
+        expected_debt = 50000 + expected_pending
+
+        # Sell all collateral for exactly the debt amount
+        result = compute_margin_loan_liquidation(view, 'LOAN_001', prices, sale_proceeds=expected_debt)
+
+        # Should have move for debt payment (no surplus, no deficiency)
+        assert len(result.moves) == 1
+        assert result.moves[0].quantity == pytest.approx(expected_debt, abs=0.01)
+
+
 class TestMarginLoanContract:
     """Tests for margin_loan_contract SmartContract function."""
 
@@ -1829,3 +2445,321 @@ class TestMarginLoanContract:
         result = margin_loan_contract(view, 'LOAN_001', datetime(2024, 1, 15), prices)
 
         assert result.is_empty()
+
+
+# ============================================================================
+# PURE FUNCTION PATTERN TESTS
+# ============================================================================
+
+from ledger import (
+    MarginLoanTerms,
+    MarginLoanState,
+    MarginStatusResult,
+    load_margin_loan,
+    calculate_collateral_value,
+    calculate_pending_interest,
+    calculate_margin_status,
+    calculate_interest_accrual,
+)
+
+
+class TestPureFunctionPattern:
+    """Tests demonstrating the pure function architecture.
+
+    These tests show how the new pattern enables:
+    1. Testing without LedgerView (no mocks needed)
+    2. Stress testing by passing different parameters
+    3. What-if analysis by modifying haircuts/prices
+    4. Full isolation of calculation logic
+    """
+
+    def test_calculate_collateral_value_pure(self):
+        """Pure function: calculate collateral value without LedgerView."""
+        collateral = {'AAPL': 1000, 'MSFT': 500}
+        prices = {'AAPL': 150.0, 'MSFT': 300.0}
+        haircuts = {'AAPL': 0.70, 'MSFT': 0.75}
+
+        # Direct call - no view, no state lookup
+        value = calculate_collateral_value(collateral, prices, haircuts)
+
+        # AAPL: 1000 * 150 * 0.70 = 105,000
+        # MSFT: 500 * 300 * 0.75 = 112,500
+        assert value == pytest.approx(217500.0, abs=0.01)
+
+    def test_stress_test_haircuts(self):
+        """Stress test: more conservative haircuts without mutating state."""
+        collateral = {'AAPL': 1000, 'MSFT': 500}
+        prices = {'AAPL': 150.0, 'MSFT': 300.0}
+        base_haircuts = {'AAPL': 0.70, 'MSFT': 0.75}
+
+        # Base case
+        base_value = calculate_collateral_value(collateral, prices, base_haircuts)
+
+        # Stressed case: 10% more conservative haircuts
+        stressed_haircuts = {k: v * 0.9 for k, v in base_haircuts.items()}
+        stressed_value = calculate_collateral_value(collateral, prices, stressed_haircuts)
+
+        # Stressed value should be 10% lower
+        assert stressed_value == pytest.approx(base_value * 0.9, abs=0.01)
+
+    def test_stress_test_prices(self):
+        """Stress test: price shock scenarios without mutating state."""
+        collateral = {'AAPL': 1000}
+        haircuts = {'AAPL': 0.80}
+
+        base_prices = {'AAPL': 200.0}
+        base_value = calculate_collateral_value(collateral, base_prices, haircuts)
+        assert base_value == pytest.approx(160000.0, abs=0.01)
+
+        # 20% price crash
+        shocked_prices = {'AAPL': 160.0}  # 20% drop
+        shocked_value = calculate_collateral_value(collateral, shocked_prices, haircuts)
+        assert shocked_value == pytest.approx(128000.0, abs=0.01)
+
+    def test_calculate_margin_status_pure(self):
+        """Pure function: margin status without LedgerView."""
+        terms = MarginLoanTerms(
+            interest_rate=0.08,
+            initial_margin=1.5,
+            maintenance_margin=1.25,
+            haircuts={'AAPL': 0.80},
+            margin_call_deadline_days=3,
+            currency='USD',
+            borrower_wallet='alice',
+            lender_wallet='bank',
+        )
+
+        state = MarginLoanState(
+            loan_amount=100000.0,
+            collateral={'AAPL': 1000},
+            accrued_interest=0.0,
+            last_accrual_date=None,
+            margin_call_amount=0.0,
+            margin_call_deadline=None,
+            liquidated=False,
+            origination_date=datetime(2024, 1, 1),
+            total_interest_paid=0.0,
+            total_principal_paid=0.0,
+        )
+
+        prices = {'AAPL': 200.0}  # Value = 160,000, ratio = 1.6
+
+        result = calculate_margin_status(terms, state, prices, datetime(2024, 1, 15))
+
+        assert isinstance(result, MarginStatusResult)
+        assert result.status == MARGIN_STATUS_HEALTHY
+        assert result.collateral_value == pytest.approx(160000.0, abs=0.01)
+        assert result.margin_ratio == pytest.approx(1.6, abs=0.01)
+
+    def test_what_if_analysis(self):
+        """What-if analysis: test different scenarios without any ledger."""
+        terms = MarginLoanTerms(
+            interest_rate=0.08,
+            initial_margin=1.5,
+            maintenance_margin=1.25,
+            haircuts={'AAPL': 0.80},
+            margin_call_deadline_days=3,
+            currency='USD',
+            borrower_wallet='alice',
+            lender_wallet='bank',
+        )
+
+        state = MarginLoanState(
+            loan_amount=100000.0,
+            collateral={'AAPL': 1000},
+            accrued_interest=0.0,
+            last_accrual_date=None,
+            margin_call_amount=0.0,
+            margin_call_deadline=None,
+            liquidated=False,
+            origination_date=datetime(2024, 1, 1),
+            total_interest_paid=0.0,
+            total_principal_paid=0.0,
+        )
+
+        now = datetime(2024, 1, 15)
+
+        # Scenario 1: Current price
+        result_base = calculate_margin_status(terms, state, {'AAPL': 200.0}, now)
+        assert result_base.status == MARGIN_STATUS_HEALTHY
+
+        # Scenario 2: 10% price drop
+        result_drop10 = calculate_margin_status(terms, state, {'AAPL': 180.0}, now)
+        assert result_drop10.status == MARGIN_STATUS_WARNING  # ratio = 1.44
+
+        # Scenario 3: 25% price drop
+        result_drop25 = calculate_margin_status(terms, state, {'AAPL': 150.0}, now)
+        assert result_drop25.status == MARGIN_STATUS_BREACH  # ratio = 1.2
+
+    def test_load_margin_loan_returns_frozen_dataclasses(self):
+        """load_margin_loan returns frozen dataclasses that can't be mutated."""
+        loan_state = {
+            'loan_amount': 100000.0,
+            'interest_rate': 0.08,
+            'accrued_interest': 500.0,
+            'collateral': {'AAPL': 1000},
+            'haircuts': {'AAPL': 0.80},
+            'initial_margin': 1.5,
+            'maintenance_margin': 1.25,
+            'borrower_wallet': 'alice',
+            'lender_wallet': 'bank',
+            'currency': 'USD',
+            'margin_call_amount': 0.0,
+            'margin_call_deadline': None,
+            'margin_call_deadline_days': 3,
+            'liquidated': False,
+            'total_interest_paid': 0.0,
+            'total_principal_paid': 0.0,
+        }
+
+        view = FakeView(
+            balances={},
+            states={'LOAN_001': loan_state},
+            time=datetime(2024, 1, 15),
+        )
+
+        terms, state = load_margin_loan(view, 'LOAN_001')
+
+        # Both should be frozen
+        assert isinstance(terms, MarginLoanTerms)
+        assert isinstance(state, MarginLoanState)
+
+        # Verify immutability - these should raise
+        with pytest.raises(Exception):  # FrozenInstanceError
+            terms.interest_rate = 0.10  # type: ignore
+
+        with pytest.raises(Exception):  # FrozenInstanceError
+            state.loan_amount = 50000.0  # type: ignore
+
+    def test_calculate_pending_interest_pure(self):
+        """Pure function: pending interest calculation."""
+        loan_amount = 100000.0
+        interest_rate = 0.08
+        last_accrual = datetime(2024, 1, 1)
+        current_time = datetime(2024, 1, 31)  # 30 days
+
+        pending = calculate_pending_interest(
+            loan_amount, interest_rate, last_accrual, current_time
+        )
+
+        # Expected: 100000 * 0.08 / 365 * 30 = 657.53
+        assert pending == pytest.approx(657.53, abs=0.01)
+
+    def test_calculate_interest_accrual_pure(self):
+        """Pure function: interest accrual calculation."""
+        terms = MarginLoanTerms(
+            interest_rate=0.08,
+            initial_margin=1.5,
+            maintenance_margin=1.25,
+            haircuts={'AAPL': 0.80},
+            margin_call_deadline_days=3,
+            currency='USD',
+            borrower_wallet='alice',
+            lender_wallet='bank',
+        )
+
+        state = MarginLoanState(
+            loan_amount=100000.0,
+            collateral={'AAPL': 1000},
+            accrued_interest=100.0,  # Already have some accrued
+            last_accrual_date=datetime(2024, 1, 1),
+            margin_call_amount=0.0,
+            margin_call_deadline=None,
+            liquidated=False,
+            origination_date=datetime(2024, 1, 1),
+            total_interest_paid=0.0,
+            total_principal_paid=0.0,
+        )
+
+        new_interest, total_accrued = calculate_interest_accrual(terms, state, days=30)
+
+        # Expected new: 100000 * 0.08 / 365 * 30 = 657.53
+        assert new_interest == pytest.approx(657.53, abs=0.01)
+        # Total = existing 100 + new 657.53
+        assert total_accrued == pytest.approx(757.53, abs=0.01)
+
+    def test_margin_status_result_is_typed(self):
+        """MarginStatusResult provides typed access to all fields."""
+        terms = MarginLoanTerms(
+            interest_rate=0.08,
+            initial_margin=1.5,
+            maintenance_margin=1.25,
+            haircuts={'AAPL': 0.80},
+            margin_call_deadline_days=3,
+            currency='USD',
+            borrower_wallet='alice',
+            lender_wallet='bank',
+        )
+
+        state = MarginLoanState(
+            loan_amount=100000.0,
+            collateral={'AAPL': 1000},
+            accrued_interest=0.0,
+            last_accrual_date=None,
+            margin_call_amount=0.0,
+            margin_call_deadline=None,
+            liquidated=False,
+            origination_date=datetime(2024, 1, 1),
+            total_interest_paid=0.0,
+            total_principal_paid=0.0,
+        )
+
+        result = calculate_margin_status(terms, state, {'AAPL': 200.0}, datetime(2024, 1, 15))
+
+        # All fields are typed - IDE autocomplete works
+        assert isinstance(result.collateral_value, float)
+        assert isinstance(result.total_debt, float)
+        assert isinstance(result.margin_ratio, float)
+        assert isinstance(result.status, str)
+        assert isinstance(result.shortfall, float)
+        assert isinstance(result.excess, float)
+        assert isinstance(result.pending_interest, float)
+
+    def test_parallel_scenario_analysis(self):
+        """Multiple scenarios can run in parallel - dataclasses are thread-safe."""
+        terms = MarginLoanTerms(
+            interest_rate=0.08,
+            initial_margin=1.5,
+            maintenance_margin=1.25,
+            haircuts={'AAPL': 0.80},
+            margin_call_deadline_days=3,
+            currency='USD',
+            borrower_wallet='alice',
+            lender_wallet='bank',
+        )
+
+        state = MarginLoanState(
+            loan_amount=100000.0,
+            collateral={'AAPL': 1000},
+            accrued_interest=0.0,
+            last_accrual_date=None,
+            margin_call_amount=0.0,
+            margin_call_deadline=None,
+            liquidated=False,
+            origination_date=datetime(2024, 1, 1),
+            total_interest_paid=0.0,
+            total_principal_paid=0.0,
+        )
+
+        now = datetime(2024, 1, 15)
+
+        # Run many scenarios - all share the same frozen terms/state
+        price_scenarios = [
+            {'AAPL': 250.0},  # Bull case
+            {'AAPL': 200.0},  # Base case
+            {'AAPL': 180.0},  # Mild drop
+            {'AAPL': 150.0},  # Significant drop
+            {'AAPL': 100.0},  # Crash
+        ]
+
+        results = [
+            calculate_margin_status(terms, state, prices, now)
+            for prices in price_scenarios
+        ]
+
+        # Verify each scenario produced correct result
+        assert results[0].status == MARGIN_STATUS_HEALTHY  # ratio = 2.0
+        assert results[1].status == MARGIN_STATUS_HEALTHY  # ratio = 1.6
+        assert results[2].status == MARGIN_STATUS_WARNING  # ratio = 1.44
+        assert results[3].status == MARGIN_STATUS_BREACH   # ratio = 1.2
+        assert results[4].status == MARGIN_STATUS_BREACH   # ratio = 0.8

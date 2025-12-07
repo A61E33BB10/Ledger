@@ -6,7 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [3.0] - December 2025 (Current)
+## [3.1] - December 2025 (Current)
+
+### Added - Pure Function Architecture for Margin Loans
+- **Frozen Dataclasses** (`margin_loan.py:65-131`)
+  - `MarginLoanTerms` - Immutable contract terms (interest_rate, margins, haircuts)
+  - `MarginLoanState` - Immutable lifecycle snapshot (loan_amount, collateral, accrued_interest)
+  - `MarginStatusResult` - Typed result with all margin status details
+- **Pure Calculation Functions** (all inputs explicit, no LedgerView)
+  - `calculate_collateral_value(collateral, prices, haircuts)`
+  - `calculate_pending_interest(loan_amount, interest_rate, last_accrual_date, current_time)`
+  - `calculate_total_debt(loan_amount, accrued_interest, pending_interest)`
+  - `calculate_margin_status(terms, state, prices, current_time)`
+  - `calculate_interest_accrual(terms, state, days)`
+- **Adapter Functions**
+  - `load_margin_loan(view, symbol)` - Loads LedgerView state into typed dataclasses
+  - `to_state_dict(terms, state)` - Converts back to dict for storage
+- **New Exports** in `__init__.py` for pure function pattern
+
+### Fixed - Agent Review Findings
+- Duplicate collateral calculation code now uses `calculate_collateral_value()` pure function
+- `compute_add_collateral()` now includes pending interest in margin cure check (Bug #4)
+- `_calculate_pending_interest()` was double-subtracting principal after partial repayment (Bug #5)
+
+### Changed
+- `margin_loan.py` refactored from 1,063 to ~1,490 lines (added pure function layer)
+- All margin calculations now support what-if analysis and stress testing without mutating state
+
+### Test Coverage
+- **907 tests** passing (31 new tests including pure function pattern tests)
+- `TestPureFunctionPattern` class demonstrates stress testing and scenario analysis
+- `TestPendingInterestAfterPartialRepayment` class tests edge cases after partial payments
+
+### Agent Verdicts
+| Agent | Verdict |
+|-------|---------|
+| Jane Street CTO | APPROVE |
+| FinOps Architect | APPROVE |
+| Karpathy | APPROVE WITH RECOMMENDATIONS (implemented) |
+
+---
+
+## [3.0] - December 2025
 
 ### Added - Phase 3: Complex Instruments
 - **Margin Loans** (`ledger/units/margin_loan.py`) - 1,063 lines
@@ -143,6 +184,7 @@ These principles have remained constant throughout development:
 
 | Version | Tests | Python | Breaking Changes                  |
 |---------|-------|--------|-----------------------------------|
+| 3.1     | 907   | 3.12+  | New pure function exports (backward compatible) |
 | 3.0     | 876   | 3.12+  | Liquidation now zeros loan_amount |
 | 2.0     | 589   | 3.12+  | None                              |
 | 1.0     | 464   | 3.12+  | Initial release                   |

@@ -1,38 +1,43 @@
 """
 margin_loan.py - Margin Loan Units for Secured Lending
 
-This module provides margin loan unit creation and lifecycle processing:
-1. create_margin_loan() - Factory for margin loans with collateral pools
-2. compute_collateral_value() - Calculate haircut-adjusted collateral value
-3. compute_margin_status() - Check margin ratio, shortfall, and status
-4. compute_interest_accrual() - Daily interest accrual on outstanding loan
-5. compute_margin_call() - Issue margin call when below maintenance
-6. compute_margin_cure() - Cure margin call with additional collateral/payment
-7. compute_liquidation() - Forced sale when margin call not met
-8. compute_repayment() - Full or partial loan repayment
-9. transact() - Event-driven interface for all margin loan events
-10. margin_loan_contract() - SmartContract for LifecycleEngine integration
+This module provides margin loan unit creation and lifecycle processing using
+a pure function architecture with explicit inputs.
 
-Margin loans represent secured debt with:
-- Collateral pool: Multiple assets as collateral
-- Haircuts: Asset-specific risk weights (higher haircut = more credit given)
-- Margin requirements: Initial (150%) and maintenance (125%) margin levels
-- Interest accrual: Daily interest on outstanding loan amount
-- Margin calls: Triggered when equity falls below maintenance margin
-- Liquidation: Forced sale when margin call deadline passes without cure
+ARCHITECTURE (Pure Function Pattern):
+=====================================
+
+1. FROZEN DATACLASSES (explicit inputs):
+   - MarginLoanTerms: Immutable term sheet (set at creation, never changes)
+   - MarginLoanState: Immutable state snapshot (changes over lifecycle)
+
+2. PURE CALCULATION FUNCTIONS (calculate_*):
+   - Take all inputs explicitly as parameters
+   - No LedgerView, no hidden state
+   - Trivially testable, stress-testable
+   - Example: calculate_collateral_value(collateral, prices, haircuts) -> float
+
+3. ADAPTER FUNCTIONS (load_margin_loan):
+   - Extract state from LedgerView once
+   - Convert to typed frozen dataclasses
+   - The ONLY place that touches LedgerView for reads
+
+4. CONVENIENCE FUNCTIONS (compute_*):
+   - Combine loading + pure calculation + result building
+   - Take (view, symbol, ...) for backward compatibility
+   - Internally call load_margin_loan() then calculate_*()
 
 Key Formulas:
     collateral_value = sum(quantity * price * haircut for each asset)
     total_debt = loan_amount + accrued_interest
     margin_ratio = collateral_value / total_debt
     shortfall = maintenance_margin * total_debt - collateral_value (if ratio < maintenance)
-
-All functions take LedgerView (read-only) and return immutable results.
 """
 
 from __future__ import annotations
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Mapping
 
 from ..core import (
     LedgerView, Move, ContractResult, Unit,
@@ -51,6 +56,418 @@ MARGIN_STATUS_HEALTHY = "HEALTHY"
 MARGIN_STATUS_WARNING = "WARNING"
 MARGIN_STATUS_BREACH = "BREACH"
 MARGIN_STATUS_LIQUIDATION = "LIQUIDATION"
+
+
+# ============================================================================
+# FROZEN DATACLASSES - Explicit Inputs for Pure Functions
+# ============================================================================
+
+@dataclass(frozen=True, slots=True)
+class MarginLoanTerms:
+    """
+    Immutable term sheet for a margin loan - set at creation, never changes.
+
+    This dataclass captures everything from the loan agreement that is fixed
+    at origination. These values define the contract but do not change over
+    the loan's lifecycle.
+
+    All fields are explicit - no hidden state. Pure functions take this
+    as a parameter, making all dependencies visible in the function signature.
+    """
+    interest_rate: float        # Annual interest rate (e.g., 0.08 for 8%)
+    initial_margin: float       # Required margin at origination (e.g., 1.5 for 150%)
+    maintenance_margin: float   # Required margin to avoid calls (e.g., 1.25 for 125%)
+    haircuts: Mapping[str, float]  # asset -> haircut factor (0-1, where 1=full credit)
+    margin_call_deadline_days: int  # Days to cure a margin call
+    currency: str               # Settlement currency
+    borrower_wallet: str        # Who owes the debt
+    lender_wallet: str          # Who is owed
+
+
+@dataclass(frozen=True, slots=True)
+class MarginLoanState:
+    """
+    Immutable snapshot of margin loan lifecycle state at a point in time.
+
+    This dataclass captures everything that changes over the loan's lifecycle.
+    Each state change creates a NEW instance (value semantics).
+
+    Combined with MarginLoanTerms, this provides all inputs needed for any
+    margin loan calculation - no hidden state, no LedgerView queries.
+    """
+    loan_amount: float               # Current outstanding principal (reduces with payments)
+    collateral: Mapping[str, float]  # asset -> quantity pledged
+    accrued_interest: float          # Accumulated unpaid interest
+    last_accrual_date: Optional[datetime]  # When interest was last calculated
+    margin_call_amount: float        # Amount needed to cure (0 if none)
+    margin_call_deadline: Optional[datetime]  # Deadline to cure
+    liquidated: bool                 # Whether loan has been liquidated
+    origination_date: Optional[datetime]  # When loan was created
+    total_interest_paid: float       # Cumulative interest paid
+    total_principal_paid: float      # Cumulative principal paid
+    # Liquidation details (only set after liquidation)
+    liquidation_date: Optional[datetime] = None
+    liquidation_proceeds: Optional[float] = None
+    liquidation_deficiency: Optional[float] = None
+
+
+@dataclass(frozen=True, slots=True)
+class MarginStatusResult:
+    """
+    Immutable result of margin status calculation.
+
+    Contains all outputs from assess_margin() in a typed, frozen structure.
+    No Dict[str, Any] - all fields are explicit and typed.
+    """
+    collateral_value: float
+    total_debt: float
+    margin_ratio: float
+    initial_margin: float
+    maintenance_margin: float
+    status: str  # HEALTHY, WARNING, BREACH, LIQUIDATION
+    shortfall: float
+    excess: float
+    pending_interest: float
+
+
+# ============================================================================
+# ADAPTER FUNCTIONS - Bridge Between LedgerView and Pure Functions
+# ============================================================================
+
+def load_margin_loan(view: LedgerView, symbol: str) -> Tuple[MarginLoanTerms, MarginLoanState]:
+    """
+    Load a margin loan from ledger state as typed frozen dataclasses.
+
+    This is the ONLY function that reads from LedgerView for margin loan
+    calculations. All pure calculation functions take the returned
+    dataclasses as explicit parameters.
+
+    Args:
+        view: Read-only ledger access
+        symbol: Margin loan unit symbol
+
+    Returns:
+        Tuple of (MarginLoanTerms, MarginLoanState) - both frozen/immutable
+
+    Example:
+        terms, state = load_margin_loan(view, "LOAN_001")
+        value = calculate_collateral_value(state.collateral, prices, terms.haircuts)
+    """
+    raw = view.get_unit_state(symbol)
+
+    terms = MarginLoanTerms(
+        interest_rate=raw.get('interest_rate', 0.0),
+        initial_margin=raw.get('initial_margin', 1.5),
+        maintenance_margin=raw.get('maintenance_margin', 1.25),
+        haircuts=dict(raw.get('haircuts', {})),
+        margin_call_deadline_days=raw.get('margin_call_deadline_days', 3),
+        currency=raw.get('currency', 'USD'),
+        borrower_wallet=raw.get('borrower_wallet', ''),
+        lender_wallet=raw.get('lender_wallet', ''),
+    )
+
+    state = MarginLoanState(
+        loan_amount=raw.get('loan_amount', 0.0),
+        collateral=dict(raw.get('collateral', {})),
+        accrued_interest=raw.get('accrued_interest', 0.0),
+        last_accrual_date=raw.get('last_accrual_date'),
+        margin_call_amount=raw.get('margin_call_amount', 0.0),
+        margin_call_deadline=raw.get('margin_call_deadline'),
+        liquidated=raw.get('liquidated', False),
+        origination_date=raw.get('origination_date'),
+        total_interest_paid=raw.get('total_interest_paid', 0.0),
+        total_principal_paid=raw.get('total_principal_paid', 0.0),
+        liquidation_date=raw.get('liquidation_date'),
+        liquidation_proceeds=raw.get('liquidation_proceeds'),
+        liquidation_deficiency=raw.get('liquidation_deficiency'),
+    )
+
+    return terms, state
+
+
+def to_state_dict(terms: MarginLoanTerms, state: MarginLoanState) -> Dict[str, Any]:
+    """
+    Convert typed dataclasses back to state dict for ledger storage.
+
+    This is the inverse of load_margin_loan() - used when building
+    ContractResult.state_updates.
+
+    Args:
+        terms: Immutable loan terms
+        state: Current loan state
+
+    Returns:
+        Dictionary suitable for state_updates in ContractResult
+    """
+    return {
+        'loan_amount': state.loan_amount,
+        'interest_rate': terms.interest_rate,
+        'initial_margin': terms.initial_margin,
+        'maintenance_margin': terms.maintenance_margin,
+        'haircuts': dict(terms.haircuts),
+        'margin_call_deadline_days': terms.margin_call_deadline_days,
+        'currency': terms.currency,
+        'borrower_wallet': terms.borrower_wallet,
+        'lender_wallet': terms.lender_wallet,
+        'collateral': dict(state.collateral),
+        'accrued_interest': state.accrued_interest,
+        'last_accrual_date': state.last_accrual_date,
+        'margin_call_amount': state.margin_call_amount,
+        'margin_call_deadline': state.margin_call_deadline,
+        'liquidated': state.liquidated,
+        'origination_date': state.origination_date,
+        'total_interest_paid': state.total_interest_paid,
+        'total_principal_paid': state.total_principal_paid,
+        'liquidation_date': state.liquidation_date,
+        'liquidation_proceeds': state.liquidation_proceeds,
+        'liquidation_deficiency': state.liquidation_deficiency,
+    }
+
+
+# ============================================================================
+# PURE CALCULATION FUNCTIONS - No LedgerView, All Inputs Explicit
+# ============================================================================
+
+def calculate_collateral_value(
+    collateral: Mapping[str, float],
+    prices: Mapping[str, float],
+    haircuts: Mapping[str, float],
+) -> float:
+    """
+    Calculate haircut-adjusted collateral value.
+
+    PURE FUNCTION - All inputs explicit, no hidden state.
+
+    This is the core collateral valuation formula:
+        value = sum(quantity * price * haircut for each asset)
+
+    Args:
+        collateral: Asset -> quantity mapping (what's pledged)
+        prices: Asset -> price mapping (current market prices)
+        haircuts: Asset -> haircut factor mapping (0-1, where 1=full credit)
+
+    Returns:
+        Total haircut-adjusted collateral value.
+        Missing prices are treated as 0.0 (asset not counted).
+
+    Example:
+        # Stress test with 10% more conservative haircuts
+        stressed_haircuts = {k: v * 0.9 for k, v in haircuts.items()}
+        stressed_value = calculate_collateral_value(collateral, prices, stressed_haircuts)
+    """
+    total_value = 0.0
+    for asset, quantity in collateral.items():
+        price = prices.get(asset, 0.0)
+        haircut = haircuts.get(asset, 0.0)
+        total_value += quantity * price * haircut
+    return total_value
+
+
+def calculate_pending_interest(
+    loan_amount: float,
+    interest_rate: float,
+    last_accrual_date: Optional[datetime],
+    current_time: Optional[datetime],
+) -> float:
+    """
+    Calculate interest accrued since last accrual date.
+
+    PURE FUNCTION - All inputs explicit, no hidden state.
+
+    This prevents race conditions where margin checks run before interest
+    accrual is persisted. By calculating pending interest on-the-fly,
+    all debt calculations reflect the true position.
+
+    Args:
+        loan_amount: Outstanding principal
+        interest_rate: Annual interest rate (e.g., 0.08 for 8%)
+        last_accrual_date: When interest was last calculated
+        current_time: Current timestamp
+
+    Returns:
+        Pending interest amount (0.0 if no time elapsed or zero rate)
+    """
+    if (
+        last_accrual_date is None
+        or current_time is None
+        or loan_amount <= QUANTITY_EPSILON
+        or interest_rate <= 0
+    ):
+        return 0.0
+
+    time_delta = current_time - last_accrual_date
+    days_elapsed = time_delta.total_seconds() / 86400.0
+
+    if days_elapsed <= 0:
+        return 0.0
+
+    return loan_amount * (interest_rate / 365.0) * days_elapsed
+
+
+def calculate_total_debt(
+    terms: MarginLoanTerms,
+    state: MarginLoanState,
+    current_time: Optional[datetime],
+) -> float:
+    """
+    Calculate total debt including pending interest.
+
+    PURE FUNCTION - All inputs explicit.
+
+    Args:
+        terms: Loan terms (for interest rate)
+        state: Current state (for loan_amount, accrued interest, last accrual date)
+        current_time: For calculating pending interest
+
+    Returns:
+        loan_amount + accrued_interest + pending_interest
+    """
+    pending = calculate_pending_interest(
+        loan_amount=state.loan_amount,
+        interest_rate=terms.interest_rate,
+        last_accrual_date=state.last_accrual_date,
+        current_time=current_time,
+    )
+
+    return state.loan_amount + state.accrued_interest + pending
+
+
+def calculate_margin_status(
+    terms: MarginLoanTerms,
+    state: MarginLoanState,
+    prices: Mapping[str, float],
+    current_time: Optional[datetime],
+) -> MarginStatusResult:
+    """
+    Compute margin status from explicit inputs.
+
+    PURE FUNCTION - All inputs explicit, no LedgerView.
+
+    This is the core margin assessment logic:
+    1. Calculate collateral value with haircuts
+    2. Calculate total debt (including pending interest)
+    3. Compute margin ratio
+    4. Determine status (HEALTHY/WARNING/BREACH/LIQUIDATION)
+
+    Args:
+        terms: Immutable loan terms
+        state: Current loan state snapshot
+        prices: Current market prices
+        current_time: For pending interest and deadline checking
+
+    Returns:
+        MarginStatusResult with all margin metrics
+
+    Example:
+        # Stress test with different prices
+        terms, state = load_margin_loan(view, symbol)
+        stressed_prices = {k: v * 0.8 for k, v in prices.items()}
+        result = calculate_margin_status(terms, state, stressed_prices, now)
+    """
+    # Check if liquidated
+    if state.liquidated:
+        return MarginStatusResult(
+            collateral_value=0.0,
+            total_debt=0.0,
+            margin_ratio=0.0,
+            initial_margin=terms.initial_margin,
+            maintenance_margin=terms.maintenance_margin,
+            status=MARGIN_STATUS_LIQUIDATION,
+            shortfall=0.0,
+            excess=0.0,
+            pending_interest=0.0,
+        )
+
+    # Calculate pending interest
+    pending_interest = calculate_pending_interest(
+        loan_amount=state.loan_amount,
+        interest_rate=terms.interest_rate,
+        last_accrual_date=state.last_accrual_date,
+        current_time=current_time,
+    )
+
+    # Calculate values
+    collateral_value = calculate_collateral_value(
+        state.collateral, prices, terms.haircuts
+    )
+    total_debt = state.loan_amount + state.accrued_interest + pending_interest
+
+    # Handle zero debt case
+    if total_debt < QUANTITY_EPSILON:
+        return MarginStatusResult(
+            collateral_value=collateral_value,
+            total_debt=0.0,
+            margin_ratio=float('inf'),
+            initial_margin=terms.initial_margin,
+            maintenance_margin=terms.maintenance_margin,
+            status=MARGIN_STATUS_HEALTHY,
+            shortfall=0.0,
+            excess=collateral_value,
+            pending_interest=0.0,
+        )
+
+    margin_ratio = collateral_value / total_debt
+
+    # Determine status
+    if margin_ratio >= terms.initial_margin:
+        status = MARGIN_STATUS_HEALTHY
+        shortfall = 0.0
+        excess = collateral_value - (terms.maintenance_margin * total_debt)
+    elif margin_ratio >= terms.maintenance_margin:
+        status = MARGIN_STATUS_WARNING
+        shortfall = 0.0
+        excess = collateral_value - (terms.maintenance_margin * total_debt)
+    else:
+        # Check if margin call deadline has passed
+        if state.margin_call_deadline and current_time and current_time >= state.margin_call_deadline:
+            status = MARGIN_STATUS_LIQUIDATION
+        else:
+            status = MARGIN_STATUS_BREACH
+        shortfall = (terms.maintenance_margin * total_debt) - collateral_value
+        excess = 0.0
+
+    return MarginStatusResult(
+        collateral_value=collateral_value,
+        total_debt=total_debt,
+        margin_ratio=margin_ratio,
+        initial_margin=terms.initial_margin,
+        maintenance_margin=terms.maintenance_margin,
+        status=status,
+        shortfall=shortfall,
+        excess=excess,
+        pending_interest=pending_interest,
+    )
+
+
+def calculate_interest_accrual(
+    terms: MarginLoanTerms,
+    state: MarginLoanState,
+    days: float,
+) -> Tuple[float, float]:
+    """
+    Calculate interest accrual for a number of days.
+
+    PURE FUNCTION - All inputs explicit.
+
+    Args:
+        terms: Loan terms (for interest rate)
+        state: Current state (for loan_amount)
+        days: Number of days to accrue
+
+    Returns:
+        Tuple of (new_interest_amount, total_accrued_after)
+    """
+    if days <= 0 or state.liquidated:
+        return 0.0, state.accrued_interest
+
+    if state.loan_amount < QUANTITY_EPSILON:
+        return 0.0, state.accrued_interest
+
+    # Simple interest: P * r * t
+    new_interest = state.loan_amount * (terms.interest_rate / 365.0) * days
+    total_accrued = state.accrued_interest + new_interest
+
+    return new_interest, total_accrued
 
 
 # ============================================================================
@@ -219,6 +636,35 @@ def create_margin_loan(
 
 
 # ============================================================================
+# LEGACY HELPER (delegates to pure function)
+# ============================================================================
+
+def _calculate_pending_interest(
+    state: Dict[str, Any],
+    current_time: Optional[datetime],
+) -> float:
+    """
+    Legacy helper - delegates to pure calculate_pending_interest().
+
+    This wrapper exists for backward compatibility with code that passes
+    raw state dicts. New code should use calculate_pending_interest() directly.
+
+    Note: loan_amount in state already represents the current outstanding
+    principal (it is reduced when payments are made), so we use it directly.
+    """
+    # loan_amount is already the outstanding principal - it gets reduced
+    # when principal payments are made (see compute_repayment, compute_margin_cure)
+    loan_amount = state.get('loan_amount', 0.0)
+
+    return calculate_pending_interest(
+        loan_amount=loan_amount,
+        interest_rate=state.get('interest_rate', 0.0),
+        last_accrual_date=state.get('last_accrual_date'),
+        current_time=current_time,
+    )
+
+
+# ============================================================================
 # COLLATERAL VALUE CALCULATION
 # ============================================================================
 
@@ -230,9 +676,13 @@ def compute_collateral_value(
     """
     Calculate the haircut-adjusted collateral value.
 
-    The collateral value is the sum of each asset's market value multiplied
-    by its haircut factor. This gives the "credit value" of the collateral
-    that can be borrowed against.
+    This is a convenience function that loads state and calls the pure
+    calculate_collateral_value() function.
+
+    For stress testing with different haircuts, use the pure function directly:
+        terms, state = load_margin_loan(view, symbol)
+        stressed_haircuts = {k: v * 0.9 for k, v in terms.haircuts.items()}
+        value = calculate_collateral_value(state.collateral, prices, stressed_haircuts)
 
     Args:
         view: Read-only ledger access
@@ -244,24 +694,10 @@ def compute_collateral_value(
         Missing prices are treated as zero (asset not counted).
 
     Example:
-        # Collateral: 1000 AAPL @ $150, haircut 0.70
-        # Collateral: 500 MSFT @ $300, haircut 0.75
-        # Value = 1000 * 150 * 0.70 + 500 * 300 * 0.75
-        #       = 105,000 + 112,500 = 217,500
         value = compute_collateral_value(view, "LOAN_001", prices)
     """
-    state = view.get_unit_state(loan_symbol)
-    collateral = state.get('collateral', {})
-    haircuts = state.get('haircuts', {})
-
-    total_value = 0.0
-    for asset, quantity in collateral.items():
-        price = prices.get(asset, 0.0)
-        haircut = haircuts.get(asset, 0.0)
-        asset_value = quantity * price * haircut
-        total_value += asset_value
-
-    return total_value
+    terms, state = load_margin_loan(view, loan_symbol)
+    return calculate_collateral_value(state.collateral, prices, terms.haircuts)
 
 
 # ============================================================================
@@ -276,25 +712,13 @@ def compute_margin_status(
     """
     Compute the current margin status of the loan.
 
-    This function calculates the margin ratio (collateral value / total debt)
-    and determines if the loan is healthy, in warning territory, or in breach
-    of margin requirements.
+    This is a convenience function that loads state and calls the pure
+    calculate_margin_status() function, then converts the result to a dict.
 
-    IMPORTANT - Race Condition Prevention:
-        This function includes pending interest accrued since the last
-        accrual date in the total_debt calculation. This prevents the
-        margin call timing vs accrual race condition where:
-
-        1. EOD margin check runs with stale accrued_interest
-        2. Overnight interest accrues
-        3. Next morning actual ratio is in breach
-
-        By calculating pending interest internally, the margin status
-        always reflects the true debt position at view.current_time.
-
-        Callers should still run compute_interest_accrual() to persist
-        the accrued interest to state, but margin checks will be accurate
-        even if accrual has not been persisted yet.
+    For stress testing with different parameters, use the pure function directly:
+        terms, state = load_margin_loan(view, symbol)
+        stressed_prices = {k: v * 0.8 for k, v in prices.items()}
+        result = calculate_margin_status(terms, state, stressed_prices, now)
 
     Args:
         view: Read-only ledger access
@@ -318,92 +742,20 @@ def compute_margin_status(
         if status["status"] == "BREACH":
             print(f"Margin call! Shortfall: ${status['shortfall']:.2f}")
     """
-    state = view.get_unit_state(loan_symbol)
+    terms, state = load_margin_loan(view, loan_symbol)
+    result = calculate_margin_status(terms, state, prices, view.current_time)
 
-    # Check if liquidated
-    if state.get('liquidated', False):
-        return {
-            'collateral_value': 0.0,
-            'total_debt': 0.0,
-            'margin_ratio': 0.0,
-            'initial_margin': state.get('initial_margin', 0.0),
-            'maintenance_margin': state.get('maintenance_margin', 0.0),
-            'status': MARGIN_STATUS_LIQUIDATION,
-            'shortfall': 0.0,
-            'excess': 0.0,
-            'pending_interest': 0.0,
-        }
-
-    loan_amount = state.get('loan_amount', 0.0)
-    accrued_interest = state.get('accrued_interest', 0.0)
-    initial_margin = state.get('initial_margin', 1.5)
-    maintenance_margin = state.get('maintenance_margin', 1.25)
-    interest_rate = state.get('interest_rate', 0.0)
-    last_accrual_date = state.get('last_accrual_date')
-
-    # Calculate pending interest since last accrual to prevent race condition
-    # where margin check runs before interest accrual is persisted
-    pending_interest = 0.0
-    if (
-        last_accrual_date is not None
-        and view.current_time is not None
-        and loan_amount > QUANTITY_EPSILON
-        and interest_rate > 0
-    ):
-        time_delta = view.current_time - last_accrual_date
-        days_elapsed = time_delta.total_seconds() / 86400.0
-        if days_elapsed > 0:
-            pending_interest = loan_amount * (interest_rate / 365.0) * days_elapsed
-
-    # Calculate values
-    collateral_value = compute_collateral_value(view, loan_symbol, prices)
-    total_debt = loan_amount + accrued_interest + pending_interest
-
-    # Handle zero debt case
-    if total_debt < QUANTITY_EPSILON:
-        return {
-            'collateral_value': collateral_value,
-            'total_debt': 0.0,
-            'margin_ratio': float('inf'),
-            'initial_margin': initial_margin,
-            'maintenance_margin': maintenance_margin,
-            'status': MARGIN_STATUS_HEALTHY,
-            'shortfall': 0.0,
-            'excess': collateral_value,
-            'pending_interest': 0.0,
-        }
-
-    margin_ratio = collateral_value / total_debt
-
-    # Determine status
-    if margin_ratio >= initial_margin:
-        status = MARGIN_STATUS_HEALTHY
-        shortfall = 0.0
-        excess = collateral_value - (maintenance_margin * total_debt)
-    elif margin_ratio >= maintenance_margin:
-        status = MARGIN_STATUS_WARNING
-        shortfall = 0.0
-        excess = collateral_value - (maintenance_margin * total_debt)
-    else:
-        # Check if margin call deadline has passed
-        margin_call_deadline = state.get('margin_call_deadline')
-        if margin_call_deadline and view.current_time >= margin_call_deadline:
-            status = MARGIN_STATUS_LIQUIDATION
-        else:
-            status = MARGIN_STATUS_BREACH
-        shortfall = (maintenance_margin * total_debt) - collateral_value
-        excess = 0.0
-
+    # Convert frozen dataclass to dict for backward compatibility
     return {
-        'collateral_value': collateral_value,
-        'total_debt': total_debt,
-        'margin_ratio': margin_ratio,
-        'initial_margin': initial_margin,
-        'maintenance_margin': maintenance_margin,
-        'status': status,
-        'shortfall': shortfall,
-        'excess': excess,
-        'pending_interest': pending_interest,
+        'collateral_value': result.collateral_value,
+        'total_debt': result.total_debt,
+        'margin_ratio': result.margin_ratio,
+        'initial_margin': result.initial_margin,
+        'maintenance_margin': result.maintenance_margin,
+        'status': result.status,
+        'shortfall': result.shortfall,
+        'excess': result.excess,
+        'pending_interest': result.pending_interest,
     }
 
 
@@ -595,7 +947,11 @@ def compute_margin_cure(
 
     loan_amount = state.get('loan_amount', 0.0)
     accrued_interest = state.get('accrued_interest', 0.0)
-    total_debt = loan_amount + accrued_interest
+
+    # CRITICAL FIX: Include pending interest in total debt calculation
+    # to ensure cure amount properly accounts for all accrued interest
+    pending_interest = _calculate_pending_interest(state, view.current_time)
+    total_debt = loan_amount + accrued_interest + pending_interest
 
     if cure_amount > total_debt + QUANTITY_EPSILON:
         raise ValueError(
@@ -606,11 +962,15 @@ def compute_margin_cure(
     lender = state['lender_wallet']
     currency = state['currency']
 
-    # Apply payment: first to accrued interest, then to principal
-    interest_payment = min(cure_amount, accrued_interest)
+    # Apply payment: first to pending interest, then accrued interest, then principal
+    # This ensures all interest (both persisted and pending) is paid before principal
+    total_interest = accrued_interest + pending_interest
+    interest_payment = min(cure_amount, total_interest)
     principal_payment = cure_amount - interest_payment
 
-    new_accrued = accrued_interest - interest_payment
+    # Pending interest is paid but not yet in accrued_interest state
+    # We add it to accrued_interest, then subtract the full interest payment
+    new_accrued = (accrued_interest + pending_interest) - interest_payment
     new_loan_amount = loan_amount - principal_payment
     total_interest_paid = state.get('total_interest_paid', 0.0) + interest_payment
     total_principal_paid = state.get('total_principal_paid', 0.0) + principal_payment
@@ -633,6 +993,7 @@ def compute_margin_cure(
         'accrued_interest': new_accrued,
         'total_interest_paid': total_interest_paid,
         'total_principal_paid': total_principal_paid,
+        'last_accrual_date': view.current_time,  # Update accrual date since we rolled in pending interest
     }
 
     # If cure brings debt to zero, clear margin call
@@ -643,14 +1004,10 @@ def compute_margin_cure(
         # Check if margin is restored
         # Create a temporary state to check margin status
         temp_state = dict(new_state)
-        # We need to manually compute since we can't update the view
-        collateral_value = 0.0
+        # Use pure function for collateral calculation
         collateral = temp_state.get('collateral', {})
         haircuts = temp_state.get('haircuts', {})
-        for asset, quantity in collateral.items():
-            price = prices.get(asset, 0.0)
-            haircut = haircuts.get(asset, 0.0)
-            collateral_value += quantity * price * haircut
+        collateral_value = calculate_collateral_value(collateral, prices, haircuts)
 
         new_total_debt = new_loan_amount + new_accrued
         if new_total_debt > QUANTITY_EPSILON:
@@ -690,6 +1047,19 @@ def compute_liquidation(
     the collateral to recover the debt. The sale_proceeds are applied to
     the debt, and any surplus is returned to the borrower.
 
+    CRITICAL - Borrower Rights Protection:
+        Liquidation is ONLY allowed when margin status is LIQUIDATION, which
+        means the margin_call_deadline has passed and the borrower failed to cure.
+
+        BREACH status means the borrower is below maintenance margin but the
+        cure deadline has NOT passed yet. Liquidating during BREACH violates
+        the borrower's contractual right to cure within the deadline period.
+
+        Status transitions:
+        - HEALTHY/WARNING: Above maintenance margin, no liquidation
+        - BREACH: Below maintenance, deadline NOT passed, NO liquidation allowed
+        - LIQUIDATION: Below maintenance, deadline PASSED, liquidation allowed
+
     Args:
         view: Read-only ledger access
         loan_symbol: Symbol of the margin loan unit
@@ -702,11 +1072,11 @@ def compute_liquidation(
         - state_updates: Marks loan as liquidated, clears collateral
 
     Raises:
-        ValueError: If loan not in liquidation status or already liquidated,
-                    or if sale_proceeds is negative.
+        ValueError: If loan not in LIQUIDATION status (deadline must have passed),
+                    if already liquidated, or if sale_proceeds is negative.
 
     Example:
-        # Liquidate collateral that sold for $80,000
+        # Liquidate collateral that sold for $80,000 (after deadline passed)
         result = compute_liquidation(view, "LOAN_001", prices, 80000.0)
         ledger.execute_contract(result)
         # Debt paid from proceeds, any surplus to borrower
@@ -721,22 +1091,25 @@ def compute_liquidation(
 
     margin_status = compute_margin_status(view, loan_symbol, prices)
 
-    # Allow liquidation if in breach/liquidation status or if explicitly forced
-    # (In practice, should verify margin_call_deadline has passed)
-    if margin_status['status'] not in (MARGIN_STATUS_BREACH, MARGIN_STATUS_LIQUIDATION):
-        # Check if deadline has passed
-        deadline = state.get('margin_call_deadline')
-        if deadline is None or view.current_time < deadline:
-            raise ValueError(
-                "Cannot liquidate: loan is not in liquidation status"
-            )
+    # CRITICAL FIX: Only allow liquidation when deadline has passed
+    # BREACH status means deadline has NOT passed - borrower still has cure rights
+    # LIQUIDATION status means deadline HAS passed - liquidation is allowed
+    if margin_status['status'] != MARGIN_STATUS_LIQUIDATION:
+        raise ValueError(
+            f"Cannot liquidate: loan status is {margin_status['status']}. "
+            f"Liquidation only allowed when status is LIQUIDATION (deadline passed)."
+        )
 
     borrower = state['borrower_wallet']
     lender = state['lender_wallet']
     currency = state['currency']
     loan_amount = state.get('loan_amount', 0.0)
     accrued_interest = state.get('accrued_interest', 0.0)
-    total_debt = loan_amount + accrued_interest
+
+    # CRITICAL FIX: Include pending interest in total debt calculation
+    # to ensure lenders receive full accrued-but-not-persisted interest
+    pending_interest = _calculate_pending_interest(state, view.current_time)
+    total_debt = loan_amount + accrued_interest + pending_interest
 
     moves: List[Move] = []
 
@@ -841,7 +1214,11 @@ def compute_repayment(
 
     loan_amount = state.get('loan_amount', 0.0)
     accrued_interest = state.get('accrued_interest', 0.0)
-    total_debt = loan_amount + accrued_interest
+
+    # CRITICAL FIX: Include pending interest in total debt calculation
+    # to ensure lenders receive full accrued-but-not-persisted interest on repayment
+    pending_interest = _calculate_pending_interest(state, view.current_time)
+    total_debt = loan_amount + accrued_interest + pending_interest
 
     if total_debt < QUANTITY_EPSILON:
         raise ValueError("No outstanding debt to repay")
@@ -855,11 +1232,15 @@ def compute_repayment(
     lender = state['lender_wallet']
     currency = state['currency']
 
-    # Apply payment: first to accrued interest, then to principal
-    interest_payment = min(repayment_amount, accrued_interest)
+    # Apply payment: first to pending interest, then accrued interest, then principal
+    # This ensures all interest (both persisted and pending) is paid before principal
+    total_interest = accrued_interest + pending_interest
+    interest_payment = min(repayment_amount, total_interest)
     principal_payment = repayment_amount - interest_payment
 
-    new_accrued = accrued_interest - interest_payment
+    # Pending interest is paid but not yet in accrued_interest state
+    # We add it to accrued_interest, then subtract the full interest payment
+    new_accrued = (accrued_interest + pending_interest) - interest_payment
     new_loan_amount = loan_amount - principal_payment
     total_interest_paid = state.get('total_interest_paid', 0.0) + interest_payment
     total_principal_paid = state.get('total_principal_paid', 0.0) + principal_payment
@@ -882,6 +1263,7 @@ def compute_repayment(
         'accrued_interest': new_accrued,
         'total_interest_paid': total_interest_paid,
         'total_principal_paid': total_principal_paid,
+        'last_accrual_date': view.current_time,  # Update accrual date since we rolled in pending interest
     }
 
     # Clear margin call if loan is fully repaid
@@ -954,15 +1336,15 @@ def compute_add_collateral(
 
     # Check if margin call is cured
     if prices is not None and state.get('margin_call_deadline') is not None:
-        collateral_value = 0.0
-        for a, q in collateral.items():
-            price = prices.get(a, 0.0)
-            haircut = haircuts.get(a, 0.0)
-            collateral_value += q * price * haircut
+        # Use pure function for collateral calculation
+        collateral_value = calculate_collateral_value(collateral, prices, haircuts)
 
         loan_amount = state.get('loan_amount', 0.0)
         accrued_interest = state.get('accrued_interest', 0.0)
-        total_debt = loan_amount + accrued_interest
+        # Include pending interest to prevent race condition where margin call
+        # is incorrectly cleared when pending interest would keep ratio below maintenance
+        pending_interest = _calculate_pending_interest(state, view.current_time)
+        total_debt = loan_amount + accrued_interest + pending_interest
 
         if total_debt > QUANTITY_EPSILON:
             margin_ratio = collateral_value / total_debt
