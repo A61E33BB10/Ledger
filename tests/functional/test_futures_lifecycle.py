@@ -1,284 +1,199 @@
 """
-test_futures_lifecycle.py - End-to-end lifecycle tests for futures contracts
+test_futures_lifecycle.py - End-to-end lifecycle tests for multi-holder futures
 
-Tests complete futures lifecycle scenarios:
-- Multi-day trading with daily settlement
-- Intraday margin calls
-- Expiry settlement
-- Multi-currency futures
-- LifecycleEngine integration
+Tests complete futures lifecycle:
+- Trading with algebraic quantity (positive=buy, negative=sell)
+- Automatic MTM via future_contract() SmartContract
+- Expiry settlement via LifecycleEngine
+- Multi-holder with different entry prices
+- Multi-currency
+
+=== THE VIRTUAL CASH MODEL ===
+
+Per-wallet state:
+    virtual_cash: Sum of (-qty * price * mult) for all trades
+
+On TRADE: virtual_cash -= qty * price * mult
+On MTM: vm = virtual_cash - (-position * price * mult), then reset
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime
 from ledger import (
-    Ledger, Move,
-    cash,
-    create_future_unit,
-    execute_futures_trade,
-    compute_daily_settlement,
-    compute_intraday_margin,
-    compute_expiry,
-    LifecycleEngine,
-    future_contract,
+    Ledger, cash, create_future, future_transact, future_contract, LifecycleEngine,
 )
 
 
-class TestFuturesMultiDayLifecycle:
-    """Tests for multi-day futures trading and settlement."""
+class TestMultiDayLifecycle:
+    """Multi-day trading with automatic daily MTM."""
 
-    def test_buy_hold_settle_three_days(self):
-        """Buy futures, hold through 3 daily settlements, verify margin flows."""
-        expiry = datetime(2024, 12, 20, 16, 0)
-
+    def test_buy_hold_daily_mtm(self):
+        """Buy futures, automatic MTM over 3 days."""
         ledger = Ledger("test", datetime(2024, 11, 1), verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
-
-        future = create_future_unit(
-            symbol="ESZ24",
-            name="E-mini S&P 500 Dec 2024",
-            underlying="SPX",
-            expiry=expiry,
-            multiplier=50.0,
-            settlement_currency="USD",
-            exchange="CME",
-            holder_wallet="trader",
-            clearinghouse_wallet="clearinghouse",
-        )
-        ledger.register_unit(future)
-
+        ledger.register_unit(create_future(
+            "ESZ24", "E-mini Dec 24", "SPX", datetime(2024, 12, 20), 50.0, "USD", "clearing"
+        ))
         ledger.register_wallet("trader")
-        ledger.register_wallet("clearinghouse")
-
-        # Initial cash positions
+        ledger.register_wallet("clearing")
         ledger.set_balance("trader", "USD", 500_000)
-        ledger.set_balance("clearinghouse", "USD", 10_000_000)
+        ledger.set_balance("clearing", "USD", 10_000_000)
+        ledger.set_balance("clearing", "ESZ24", 1000)
 
-        trader_initial = ledger.get_balance("trader", "USD")
+        # Buy 10 at 4500 (positive qty)
+        # virtual_cash = -10 * 4500 * 50 = -2,250,000
+        ledger.execute_contract(future_transact(ledger, "ESZ24", "trader", qty=10, price=4500.0))
+        assert ledger.get_balance("trader", "ESZ24") == 10.0
+        assert ledger.get_unit_state("ESZ24")["wallets"]["trader"]["virtual_cash"] == -2_250_000.0
 
-        # Day 1: Buy 10 contracts at 4500
-        result1 = execute_futures_trade(ledger, "ESZ24", 10.0, 4500.00)
-        ledger.execute_contract(result1)
+        # Day 1 EOD: MTM at 4505 (up $5)
+        # target = -10 * 4505 * 50 = -2,252,500
+        # vm = -2,250,000 - (-2,252,500) = +2,500
+        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4505.0}))
+        assert ledger.get_balance("trader", "USD") == 502_500.0
 
-        # Verify virtual ledger updated
-        state1 = ledger.get_unit_state("ESZ24")
-        assert state1["virtual_quantity"] == 10.0
-        assert state1["virtual_cash"] == -2_250_000.0
+        # Day 2 EOD: MTM at 4520 (up $15 from day 1)
+        # target = -10 * 4520 * 50 = -2,260,000
+        # vm = -2,252,500 - (-2,260,000) = +7,500
+        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 2), {"SPX": 4520.0}))
+        assert ledger.get_balance("trader", "USD") == 510_000.0
 
-        # Day 1 EOD: Settlement at 4505 (up $5)
-        result_settle1 = compute_daily_settlement(ledger, "ESZ24", 4505.00)
-        ledger.execute_contract(result_settle1)
+        # Day 3 EOD: MTM at 4510 (down $10 from day 2)
+        # target = -10 * 4510 * 50 = -2,255,000
+        # vm = -2,260,000 - (-2,255,000) = -5,000
+        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 3), {"SPX": 4510.0}))
+        assert ledger.get_balance("trader", "USD") == 505_000.0
 
-        state_after1 = ledger.get_unit_state("ESZ24")
-        # margin_call = -2,250,000 + (10 × 4505 × 50) = 2,500
-        # Check that virtual_cash was reset
-        expected_virtual_cash = -(10.0 * 4505.0 * 50.0)
-        assert state_after1["virtual_cash"] == expected_virtual_cash
-        assert state_after1["last_settlement_price"] == 4505.0
-
-        # Day 2 EOD: Settlement at 4520 (up $15 from yesterday)
-        result_settle2 = compute_daily_settlement(ledger, "ESZ24", 4520.00)
-        ledger.execute_contract(result_settle2)
-
-        state_after2 = ledger.get_unit_state("ESZ24")
-        assert state_after2["last_settlement_price"] == 4520.0
-
-        # Day 3 EOD: Settlement at 4510 (down $10 from yesterday)
-        result_settle3 = compute_daily_settlement(ledger, "ESZ24", 4510.00)
-        ledger.execute_contract(result_settle3)
-
-        state_after3 = ledger.get_unit_state("ESZ24")
-        assert state_after3["last_settlement_price"] == 4510.0
-
-        # Overall: bought at 4500, now at 4510
-        # Net gain: (4510 - 4500) × 10 × 50 = 5,000
-        # But due to the virtual ledger pattern with margin call direction,
-        # the actual cash flow depends on the specific implementation
+        # Net: (4510-4500) * 10 * 50 = +5000
+        assert ledger.get_balance("trader", "USD") == 500_000 + 5000
 
     def test_buy_and_sell_same_day(self):
-        """Buy and partially sell on the same day before settlement."""
+        """Buy then partially sell before EOD MTM."""
         ledger = Ledger("test", datetime(2024, 11, 1), verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
-
-        future = create_future_unit(
-            symbol="ESZ24",
-            name="E-mini S&P 500",
-            underlying="SPX",
-            expiry=datetime(2024, 12, 20),
-            multiplier=50.0,
-            settlement_currency="USD",
-            exchange="CME",
-            holder_wallet="trader",
-            clearinghouse_wallet="clearinghouse",
-        )
-        ledger.register_unit(future)
-
+        ledger.register_unit(create_future(
+            "ESZ24", "E-mini Dec 24", "SPX", datetime(2024, 12, 20), 50.0, "USD", "clearing"
+        ))
         ledger.register_wallet("trader")
-        ledger.register_wallet("clearinghouse")
+        ledger.register_wallet("clearing")
         ledger.set_balance("trader", "USD", 500_000)
-        ledger.set_balance("clearinghouse", "USD", 10_000_000)
+        ledger.set_balance("clearing", "USD", 10_000_000)
+        ledger.set_balance("clearing", "ESZ24", 1000)
 
         # Buy 10 at 4500
-        result1 = execute_futures_trade(ledger, "ESZ24", 10.0, 4500.00)
-        ledger.execute_contract(result1)
+        # vcash = -10 * 4500 * 50 = -2,250,000
+        ledger.execute_contract(future_transact(ledger, "ESZ24", "trader", qty=10, price=4500.0))
+        assert ledger.get_balance("trader", "ESZ24") == 10.0
 
-        # Sell 3 at 4510 (profit on those 3)
-        result2 = execute_futures_trade(ledger, "ESZ24", -3.0, 4510.00)
-        ledger.execute_contract(result2)
+        # Sell 3 at 4510 (negative qty)
+        # vcash = -2,250,000 + 3 * 4510 * 50 = -2,250,000 + 676,500 = -1,573,500
+        ledger.execute_contract(future_transact(ledger, "ESZ24", "trader", qty=-3, price=4510.0))
+        assert ledger.get_balance("trader", "ESZ24") == 7.0
 
-        state = ledger.get_unit_state("ESZ24")
-        assert state["virtual_quantity"] == 7.0
-        # virtual_cash = -10×4500×50 + 3×4510×50 = -2,250,000 + 676,500 = -1,573,500
-        assert state["virtual_cash"] == -1_573_500.0
-
-        # EOD settlement at 4520
-        result_settle = compute_daily_settlement(ledger, "ESZ24", 4520.00)
-        ledger.execute_contract(result_settle)
-
-        state_after = ledger.get_unit_state("ESZ24")
-        # margin_call = -1,573,500 + (7 × 4520 × 50) = -1,573,500 + 1,582,000 = 8,500
-        assert state_after["virtual_quantity"] == 7.0
-        assert state_after["virtual_cash"] == -(7.0 * 4520.0 * 50.0)
+        # EOD MTM at 4520 - only 7 contracts now
+        # target = -7 * 4520 * 50 = -1,582,000
+        # vm = -1,573,500 - (-1,582,000) = +8,500
+        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4520.0}))
+        assert ledger.get_unit_state("ESZ24")["wallets"]["trader"]["virtual_cash"] == -1_582_000.0
 
 
-class TestFuturesIntradayMargin:
-    """Tests for intraday margin calls."""
+class TestMultiHolder:
+    """Multiple holders with different entry prices."""
 
-    def test_intraday_margin_on_adverse_move(self):
-        """Intraday margin call when price moves against position."""
+    def test_alice_and_bob(self):
+        """Alice profits, Bob loses at same settlement price."""
         ledger = Ledger("test", datetime(2024, 11, 1), verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
+        ledger.register_unit(create_future(
+            "ESZ24", "E-mini Dec 24", "SPX", datetime(2024, 12, 20), 50.0, "USD", "clearing"
+        ))
+        for w in ["alice", "bob", "clearing"]:
+            ledger.register_wallet(w)
+        ledger.set_balance("alice", "USD", 500_000)
+        ledger.set_balance("bob", "USD", 500_000)
+        ledger.set_balance("clearing", "USD", 10_000_000)
+        ledger.set_balance("clearing", "ESZ24", 1000)
 
-        future = create_future_unit(
-            symbol="ESZ24",
-            name="E-mini S&P 500",
-            underlying="SPX",
-            expiry=datetime(2024, 12, 20),
-            multiplier=50.0,
-            settlement_currency="USD",
-            exchange="CME",
-            holder_wallet="trader",
-            clearinghouse_wallet="clearinghouse",
-        )
-        ledger.register_unit(future)
+        # Alice buys 10 at 4500
+        ledger.execute_contract(future_transact(ledger, "ESZ24", "alice", qty=10, price=4500.0))
 
-        ledger.register_wallet("trader")
-        ledger.register_wallet("clearinghouse")
-        ledger.set_balance("trader", "USD", 500_000)
-        ledger.set_balance("clearinghouse", "USD", 10_000_000)
+        # Bob buys 5 at 4550
+        ledger.execute_contract(future_transact(ledger, "ESZ24", "bob", qty=5, price=4550.0))
 
-        # Buy 10 at 4500
-        result1 = execute_futures_trade(ledger, "ESZ24", 10.0, 4500.00)
-        ledger.execute_contract(result1)
+        # MTM at 4520
+        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4520.0}))
 
-        # Intraday margin call at 4450 (down $50)
-        result_margin = compute_intraday_margin(ledger, "ESZ24", 4450.00)
-        ledger.execute_contract(result_margin)
+        # Alice: (4520-4500)*10*50 = +10,000
+        assert ledger.get_balance("alice", "USD") == 510_000.0
 
-        state = ledger.get_unit_state("ESZ24")
-        # variation_margin = -2,250,000 + (10 × 4450 × 50) = -2,250,000 + 2,225,000 = -25,000
-        # Negative means holder has LOSS, so holder pays clearinghouse $25,000
+        # Bob: (4520-4550)*5*50 = -7,500
+        assert ledger.get_balance("bob", "USD") == 492_500.0
 
-        # Verify intraday_postings tracks the margin posted
-        assert state["intraday_postings"] == 25_000.0
-
-        # Virtual cash IS reset after intraday margin to prevent double-counting at EOD
-        # new_virtual_cash = -(10 * 4450 * 50) = -2,225,000
-        assert state["virtual_cash"] == -2_225_000.0
-
-        # Verify the audit trail
-        assert state["last_intraday_price"] == 4450.00
-
-        # Verify balances: trader paid 25k, clearinghouse received 25k
-        assert ledger.get_balance("trader", "USD") == 475_000.0
-        assert ledger.get_balance("clearinghouse", "USD") == 10_025_000.0
+        # Conservation
+        total = sum(ledger.get_balance(w, "USD") for w in ["alice", "bob", "clearing"])
+        assert total == 500_000 + 500_000 + 10_000_000
 
 
-class TestFuturesExpiry:
-    """Tests for futures expiry settlement."""
+class TestExpiry:
+    """Expiry settlement via SmartContract."""
 
-    def test_expiry_closes_position(self):
-        """Expiry settles position and marks contract settled."""
-        expiry = datetime(2024, 12, 20, 16, 0)
-
-        ledger = Ledger("test", datetime(2024, 12, 20, 10, 0), verbose=False)
+    def test_expiry_settles_and_marks_settled(self):
+        """At expiry, final MTM + mark as settled."""
+        expiry = datetime(2024, 12, 20)
+        ledger = Ledger("test", expiry, verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
-
-        future = create_future_unit(
-            symbol="ESZ24",
-            name="E-mini S&P 500",
-            underlying="SPX",
-            expiry=expiry,
-            multiplier=50.0,
-            settlement_currency="USD",
-            exchange="CME",
-            holder_wallet="trader",
-            clearinghouse_wallet="clearinghouse",
-        )
-        ledger.register_unit(future)
-
+        ledger.register_unit(create_future(
+            "ESZ24", "E-mini Dec 24", "SPX", expiry, 50.0, "USD", "clearing"
+        ))
         ledger.register_wallet("trader")
-        ledger.register_wallet("clearinghouse")
+        ledger.register_wallet("clearing")
         ledger.set_balance("trader", "USD", 500_000)
-        ledger.set_balance("clearinghouse", "USD", 10_000_000)
+        ledger.set_balance("clearing", "USD", 10_000_000)
 
-        # Setup: position from previous day's settlement
-        # Simulate having 10 contracts with virtual_cash matching 4500 settlement
+        # Setup position directly with correct virtual_cash
+        # Simulating entry at 4500: vcash = -10 * 4500 * 50 = -2,250,000
+        ledger.set_balance("trader", "ESZ24", 10.0)
+        ledger.set_balance("clearing", "ESZ24", -10.0)
         ledger.update_unit_state("ESZ24", {
             **ledger.get_unit_state("ESZ24"),
-            'virtual_quantity': 10.0,
-            'virtual_cash': -(10.0 * 4500.0 * 50.0),  # -2,250,000
-            'last_settlement_price': 4500.0,
+            'wallets': {'trader': {'position': 10, 'virtual_cash': -2_250_000.0}},
         })
 
-        # Move to expiry time
-        ledger.advance_time(expiry)
-
-        # Expiry settlement at 4550
-        result = compute_expiry(ledger, "ESZ24", 4550.00)
-        ledger.execute_contract(result)
+        # Expiry settlement via future_contract at 4550
+        # target = -10 * 4550 * 50 = -2,275,000
+        # vm = -2,250,000 - (-2,275,000) = +25,000
+        ledger.execute_contract(future_contract(ledger, "ESZ24", expiry, {"SPX": 4550.0}))
 
         state = ledger.get_unit_state("ESZ24")
         assert state["settled"] is True
-        assert state["virtual_quantity"] == 0.0
-        assert state["virtual_cash"] == 0.0
-        assert state["settlement_price"] == 4550.00
+        assert state["settlement_price"] == 4550.0
+
+        # VM = (4550-4500)*10*50 = 25,000
+        assert ledger.get_balance("trader", "USD") == 525_000.0
 
 
-class TestFuturesLifecycleEngine:
-    """Tests for futures with LifecycleEngine."""
+class TestLifecycleEngine:
+    """LifecycleEngine integration."""
 
-    def test_auto_expiry_via_lifecycle_engine(self):
-        """LifecycleEngine automatically settles futures at expiry."""
+    def test_auto_expiry(self):
+        """LifecycleEngine auto-expires at expiry date."""
         expiry = datetime(2024, 12, 20)
-
         ledger = Ledger("test", datetime(2024, 12, 15), verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
-
-        future = create_future_unit(
-            symbol="ESZ24",
-            name="E-mini S&P 500",
-            underlying="SPX",
-            expiry=expiry,
-            multiplier=50.0,
-            settlement_currency="USD",
-            exchange="CME",
-            holder_wallet="trader",
-            clearinghouse_wallet="clearinghouse",
-        )
-        ledger.register_unit(future)
-
+        ledger.register_unit(create_future(
+            "ESZ24", "E-mini Dec 24", "SPX", expiry, 50.0, "USD", "clearing"
+        ))
         ledger.register_wallet("trader")
-        ledger.register_wallet("clearinghouse")
+        ledger.register_wallet("clearing")
         ledger.set_balance("trader", "USD", 500_000)
-        ledger.set_balance("clearinghouse", "USD", 10_000_000)
+        ledger.set_balance("clearing", "USD", 10_000_000)
 
-        # Setup position
+        # Setup position with correct virtual_cash (entered at 4500)
+        ledger.set_balance("trader", "ESZ24", 10.0)
+        ledger.set_balance("clearing", "ESZ24", -10.0)
         ledger.update_unit_state("ESZ24", {
             **ledger.get_unit_state("ESZ24"),
-            'virtual_quantity': 10.0,
-            'virtual_cash': -(10.0 * 4500.0 * 50.0),
-            'last_settlement_price': 4500.0,
+            'wallets': {'trader': {'position': 10, 'virtual_cash': -2_250_000.0}},
         })
 
         engine = LifecycleEngine(ledger)
@@ -288,180 +203,104 @@ class TestFuturesLifecycleEngine:
         for day in range(15, 22):
             date = datetime(2024, 12, day)
             ledger.advance_time(date)
-            # SPX at 4550 at expiry
-            engine.step(date, {"SPX": 4550.00})
+            engine.step(date, {"SPX": 4550.0})
 
-        # Verify settled
-        state = ledger.get_unit_state("ESZ24")
-        assert state["settled"] is True
+        assert ledger.get_unit_state("ESZ24")["settled"] is True
 
 
-class TestFuturesMultiCurrency:
-    """Tests for futures in different currencies."""
+class TestMultiCurrency:
+    """Futures in different currencies."""
 
-    def test_euro_futures_lifecycle(self):
-        """Euro-denominated futures settle correctly."""
-        expiry = datetime(2024, 12, 20)
-
+    def test_eur_futures(self):
+        """Euro-denominated futures settle in EUR."""
         ledger = Ledger("test", datetime(2024, 11, 1), verbose=False)
         ledger.register_unit(cash("EUR", "Euro"))
+        ledger.register_unit(create_future(
+            "FESX", "Euro STOXX 50", "SX5E", datetime(2024, 12, 20), 10.0, "EUR", "eurex"
+        ))
+        ledger.register_wallet("trader")
+        ledger.register_wallet("eurex")
+        ledger.set_balance("trader", "EUR", 100_000)
+        ledger.set_balance("eurex", "EUR", 10_000_000)
+        ledger.set_balance("eurex", "FESX", 1000)
 
-        future = create_future_unit(
-            symbol="FESX",
-            name="Euro STOXX 50",
-            underlying="SX5E",
-            expiry=expiry,
-            multiplier=10.0,
-            settlement_currency="EUR",
-            exchange="EUREX",
-            holder_wallet="eu_trader",
-            clearinghouse_wallet="eurex_clearing",
-        )
-        ledger.register_unit(future)
+        # Buy 5 at 5000
+        ledger.execute_contract(future_transact(ledger, "FESX", "trader", qty=5, price=5000.0))
 
-        ledger.register_wallet("eu_trader")
-        ledger.register_wallet("eurex_clearing")
-        ledger.set_balance("eu_trader", "EUR", 100_000)
-        ledger.set_balance("eurex_clearing", "EUR", 10_000_000)
+        # MTM at 5050
+        ledger.execute_contract(future_contract(ledger, "FESX", datetime(2024, 11, 1), {"SX5E": 5050.0}))
 
-        # Buy 5 contracts at 5000
-        result1 = execute_futures_trade(ledger, "FESX", 5.0, 5000.00)
-        ledger.execute_contract(result1)
+        # VM = (5050-5000)*5*10 = 2,500 EUR
+        assert ledger.get_balance("trader", "EUR") == 102_500.0
 
-        # EOD settlement at 5050
-        result_settle = compute_daily_settlement(ledger, "FESX", 5050.00)
-        ledger.execute_contract(result_settle)
-
-        # Verify EUR is used in margin move
-        if result_settle.moves:
-            assert result_settle.moves[0].unit == "EUR"
-
-    def test_yen_futures_large_notional(self):
-        """Yen-denominated futures handle large notional values."""
-        expiry = datetime(2024, 12, 13)
-
+    def test_jpy_large_notional(self):
+        """Yen futures handle large numbers."""
         ledger = Ledger("test", datetime(2024, 11, 1), verbose=False)
         ledger.register_unit(cash("JPY", "Japanese Yen"))
+        ledger.register_unit(create_future(
+            "NK225", "Nikkei 225", "NI225", datetime(2024, 12, 13), 1000.0, "JPY", "jpx"
+        ))
+        ledger.register_wallet("trader")
+        ledger.register_wallet("jpx")
+        ledger.set_balance("trader", "JPY", 100_000_000)
+        ledger.set_balance("jpx", "JPY", 10_000_000_000)
+        ledger.set_balance("jpx", "NK225", 1000)
 
-        future = create_future_unit(
-            symbol="NK225",
-            name="Nikkei 225",
-            underlying="NI225",
-            expiry=expiry,
-            multiplier=1000.0,
-            settlement_currency="JPY",
-            exchange="OSE",
-            holder_wallet="jp_trader",
-            clearinghouse_wallet="jpx_clearing",
-        )
-        ledger.register_unit(future)
+        # Buy 2 at 38000
+        ledger.execute_contract(future_transact(ledger, "NK225", "trader", qty=2, price=38000.0))
 
-        ledger.register_wallet("jp_trader")
-        ledger.register_wallet("jpx_clearing")
-        ledger.set_balance("jp_trader", "JPY", 100_000_000)
-        ledger.set_balance("jpx_clearing", "JPY", 10_000_000_000)
+        # MTM at 38500
+        ledger.execute_contract(future_contract(ledger, "NK225", datetime(2024, 11, 1), {"NI225": 38500.0}))
 
-        # Buy 2 contracts at 38000
-        result1 = execute_futures_trade(ledger, "NK225", 2.0, 38000.00)
-        ledger.execute_contract(result1)
-
-        state = ledger.get_unit_state("NK225")
-        # Notional: 2 × 38000 × 1000 = 76,000,000 JPY
-        assert state["virtual_cash"] == -76_000_000.0
+        # VM = (38500-38000)*2*1000 = 1,000,000 JPY
+        assert ledger.get_balance("trader", "JPY") == 101_000_000
 
 
-class TestFuturesConservation:
-    """Tests verifying conservation laws for futures."""
+class TestConservation:
+    """Total cash must be conserved."""
 
-    def test_settlement_conserves_total_cash(self):
-        """Daily settlement moves conserve total cash in system."""
+    def test_mtm_conserves_cash(self):
+        """Daily MTM is zero-sum."""
         ledger = Ledger("test", datetime(2024, 11, 1), verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
-
-        future = create_future_unit(
-            symbol="ESZ24",
-            name="E-mini S&P 500",
-            underlying="SPX",
-            expiry=datetime(2024, 12, 20),
-            multiplier=50.0,
-            settlement_currency="USD",
-            exchange="CME",
-            holder_wallet="trader",
-            clearinghouse_wallet="clearinghouse",
-        )
-        ledger.register_unit(future)
-
+        ledger.register_unit(create_future(
+            "ESZ24", "E-mini Dec 24", "SPX", datetime(2024, 12, 20), 50.0, "USD", "clearing"
+        ))
         ledger.register_wallet("trader")
-        ledger.register_wallet("clearinghouse")
+        ledger.register_wallet("clearing")
         ledger.set_balance("trader", "USD", 500_000)
-        ledger.set_balance("clearinghouse", "USD", 10_000_000)
+        ledger.set_balance("clearing", "USD", 10_000_000)
+        ledger.set_balance("clearing", "ESZ24", 1000)
 
-        initial_total = (
-            ledger.get_balance("trader", "USD") +
-            ledger.get_balance("clearinghouse", "USD")
-        )
+        initial = ledger.get_balance("trader", "USD") + ledger.get_balance("clearing", "USD")
 
-        # Buy 10 at 4500
-        result1 = execute_futures_trade(ledger, "ESZ24", 10.0, 4500.00)
-        ledger.execute_contract(result1)
+        ledger.execute_contract(future_transact(ledger, "ESZ24", "trader", qty=10, price=4500.0))
+        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4510.0}))
 
-        # Settle at 4510
-        result_settle = compute_daily_settlement(ledger, "ESZ24", 4510.00)
-        ledger.execute_contract(result_settle)
+        final = ledger.get_balance("trader", "USD") + ledger.get_balance("clearing", "USD")
+        assert final == initial
 
-        final_total = (
-            ledger.get_balance("trader", "USD") +
-            ledger.get_balance("clearinghouse", "USD")
-        )
-
-        # Total cash should be conserved
-        assert final_total == initial_total
-
-    def test_expiry_conserves_total_cash(self):
-        """Expiry settlement conserves total cash in system."""
+    def test_expiry_conserves_cash(self):
+        """Expiry settlement is zero-sum."""
         expiry = datetime(2024, 12, 20)
-
-        ledger = Ledger("test", datetime(2024, 12, 20), verbose=False)
+        ledger = Ledger("test", expiry, verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
-
-        future = create_future_unit(
-            symbol="ESZ24",
-            name="E-mini S&P 500",
-            underlying="SPX",
-            expiry=expiry,
-            multiplier=50.0,
-            settlement_currency="USD",
-            exchange="CME",
-            holder_wallet="trader",
-            clearinghouse_wallet="clearinghouse",
-        )
-        ledger.register_unit(future)
-
+        ledger.register_unit(create_future(
+            "ESZ24", "E-mini Dec 24", "SPX", expiry, 50.0, "USD", "clearing"
+        ))
         ledger.register_wallet("trader")
-        ledger.register_wallet("clearinghouse")
+        ledger.register_wallet("clearing")
         ledger.set_balance("trader", "USD", 500_000)
-        ledger.set_balance("clearinghouse", "USD", 10_000_000)
-
-        # Setup position
+        ledger.set_balance("clearing", "USD", 10_000_000)
+        ledger.set_balance("trader", "ESZ24", 10.0)
+        ledger.set_balance("clearing", "ESZ24", -10.0)
         ledger.update_unit_state("ESZ24", {
             **ledger.get_unit_state("ESZ24"),
-            'virtual_quantity': 10.0,
-            'virtual_cash': -(10.0 * 4500.0 * 50.0),
-            'last_settlement_price': 4500.0,
+            'wallets': {'trader': {'position': 10, 'virtual_cash': -2_250_000.0}},
         })
 
-        initial_total = (
-            ledger.get_balance("trader", "USD") +
-            ledger.get_balance("clearinghouse", "USD")
-        )
+        initial = ledger.get_balance("trader", "USD") + ledger.get_balance("clearing", "USD")
+        ledger.execute_contract(future_contract(ledger, "ESZ24", expiry, {"SPX": 4550.0}))
+        final = ledger.get_balance("trader", "USD") + ledger.get_balance("clearing", "USD")
 
-        # Expiry at 4550
-        result = compute_expiry(ledger, "ESZ24", 4550.00)
-        ledger.execute_contract(result)
-
-        final_total = (
-            ledger.get_balance("trader", "USD") +
-            ledger.get_balance("clearinghouse", "USD")
-        )
-
-        assert final_total == initial_total
+        assert final == initial

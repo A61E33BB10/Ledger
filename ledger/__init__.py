@@ -125,14 +125,10 @@ from .units.bond import (
 
 # Futures
 from .units.future import (
-    create_future_unit,
-    execute_futures_trade,
-    compute_daily_settlement,
-    compute_intraday_margin,
-    compute_expiry,
+    create_future,
+    mark_to_market as future_mark_to_market,
     future_contract,
     transact as future_transact,
-    UNIT_TYPE_FUTURE,
 )
 
 # Autocallables
@@ -253,8 +249,7 @@ __all__ = [
     'compute_redemption', 'bond_transact', 'bond_contract',
     'generate_coupon_schedule', 'year_fraction',
     # Futures
-    'create_future_unit', 'execute_futures_trade', 'compute_daily_settlement',
-    'compute_intraday_margin', 'compute_expiry', 'future_contract', 'future_transact',
+    'create_future', 'future_mark_to_market', 'future_contract', 'future_transact',
     # Autocallables
     'create_autocallable', 'compute_observation', 'compute_maturity_payoff',
     'autocallable_contract', 'autocallable_transact',

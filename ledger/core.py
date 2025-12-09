@@ -132,6 +132,10 @@ class LedgerView(Protocol):
         """Return the set of all registered wallet IDs."""
         ...
 
+    def get_unit(self, symbol: str) -> 'Unit':
+        """Return the Unit object for a given symbol."""
+        ...
+
 
 # ============================================================================
 # ENUMS

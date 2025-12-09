@@ -175,6 +175,12 @@ class Ledger:
         """List all registered unit symbols."""
         return sorted(self.units.keys())
 
+    def get_unit(self, symbol: str) -> Unit:
+        """Return the Unit object for a given symbol."""
+        if symbol not in self.units:
+            raise UnitNotRegistered(f"Unit {symbol} not registered")
+        return self.units[symbol]
+
     def get_wallet_balances(self, wallet: str) -> BalanceMap:
         """Get all balances for a wallet."""
         if wallet not in self.registered_wallets:

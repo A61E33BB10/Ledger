@@ -24,8 +24,7 @@ from ledger import (
 )
 from ledger.core import QUANTITY_EPSILON
 from ledger.units.future import (
-    create_future_unit, execute_futures_trade, compute_daily_settlement,
-    compute_intraday_margin, compute_expiry
+    create_future, transact as future_transact,
 )
 from ledger.units.bond import (
     create_bond_unit, compute_coupon_payment, compute_accrued_interest,
@@ -388,72 +387,79 @@ class TestAutocallableLifecycle:
 class TestFuturesLifecycle:
     """Tests for futures lifecycle identified by Quant Risk Manager."""
 
-    def test_virtual_ledger_pattern(self):
-        """Verify virtual ledger pattern for futures trades."""
-        ledger = Ledger("futures_test", initial_time=datetime(2024, 12, 1))
-        ledger.register_unit(cash("USD", "US Dollar"))
+    def test_multi_holder_pattern(self):
+        """Verify multi-holder pattern for futures trades."""
+        from tests.fake_view import FakeView
 
-        future = create_future_unit(
-            symbol="ESZ24",
-            name="E-mini S&P 500 Dec 2024",
-            underlying="SPX",
-            expiry=datetime(2024, 12, 20),
-            multiplier=50.0,
-            settlement_currency="USD",
-            exchange="CME",
-            holder_wallet="trader",
-            clearinghouse_wallet="clearinghouse"
+        state = {
+            'underlying': 'SPX',
+            'expiry': datetime(2024, 12, 20),
+            'multiplier': 50.0,
+            'currency': 'USD',
+            'clearinghouse': 'clearing',
+            'wallets': {},
+            'settled': False,
+            'last_settle_date': None,
+        }
+        view = FakeView(
+            balances={
+                'trader': {'USD': 100000},
+                'clearing': {'USD': 1000000, 'ESZ24': 100},
+            },
+            states={'ESZ24': state},
+            time=datetime(2024, 12, 1),
         )
-        ledger.register_unit(future)
-        ledger.register_wallet("trader")
-        ledger.register_wallet("clearinghouse")
-        ledger.set_balance("trader", "USD", 100000.0)
-        ledger.set_balance("clearinghouse", "USD", 1000000.0)
 
-        # Execute trade - updates virtual ledger only
-        result = execute_futures_trade(ledger, "ESZ24", 10.0, 4500.0)
-        ledger.execute_contract(result)
+        # Execute trade - creates position and sets per-wallet state
+        result = future_transact(view, "ESZ24", "trader", qty=10.0, price=4500.0)
 
-        state = ledger.get_unit_state("ESZ24")
-        assert state.get('virtual_quantity') == 10.0
-        # virtual_cash = -(quantity * price * multiplier)
-        expected_cash = -(10.0 * 4500.0 * 50.0)
-        assert abs(state.get('virtual_cash') - expected_cash) < 0.01
+        # Verify move created
+        assert len(result.moves) == 1
+        assert result.moves[0].quantity == 10.0
 
-    def test_daily_settlement_resets_virtual_cash(self):
-        """Verify EOD settlement resets virtual cash correctly."""
-        ledger = Ledger("eod_test", initial_time=datetime(2024, 12, 1))
-        ledger.register_unit(cash("USD", "US Dollar"))
+        # Verify per-wallet state (virtual_cash model)
+        # virtual_cash = -qty * price * mult = -10 * 4500 * 50 = -2,250,000
+        updated_state = result.state_updates['ESZ24']
+        assert updated_state['wallets']['trader']['virtual_cash'] == -2_250_000.0
 
-        future = create_future_unit(
-            symbol="ESZ24",
-            name="E-mini S&P 500",
-            underlying="SPX",
-            expiry=datetime(2024, 12, 20),
-            multiplier=50.0,
-            settlement_currency="USD",
-            exchange="CME",
-            holder_wallet="trader",
-            clearinghouse_wallet="clearinghouse"
+    def test_daily_settlement_updates_virtual_cash(self):
+        """Verify EOD settlement updates wallet virtual_cash correctly."""
+        from tests.fake_view import FakeView
+
+        # Trader has 10 contracts, entered at 4500
+        # virtual_cash = -10 * 4500 * 50 = -2,250,000
+        state = {
+            'underlying': 'SPX',
+            'expiry': datetime(2024, 12, 20),
+            'multiplier': 50.0,
+            'currency': 'USD',
+            'clearinghouse': 'clearing',
+            'wallets': {'trader': {'position': 10, 'virtual_cash': -2_250_000.0}},
+            'settled': False,
+            'last_settle_date': None,
+        }
+        view = FakeView(
+            balances={
+                'trader': {'USD': 100000, 'ESZ24': 10},
+                'clearing': {'USD': 1000000},
+            },
+            states={'ESZ24': state},
+            time=datetime(2024, 12, 1),
         )
-        ledger.register_unit(future)
-        ledger.register_wallet("trader")
-        ledger.register_wallet("clearinghouse")
-        ledger.set_balance("trader", "USD", 100000.0)
-        ledger.set_balance("clearinghouse", "USD", 1000000.0)
-
-        # Trade at 4500
-        trade_result = execute_futures_trade(ledger, "ESZ24", 10.0, 4500.0)
-        ledger.execute_contract(trade_result)
 
         # EOD settlement at 4510 (profit for holder)
-        settlement_result = compute_daily_settlement(ledger, "ESZ24", 4510.0)
-        ledger.execute_contract(settlement_result)
+        # target_vcash = -10 * 4510 * 50 = -2,255,000
+        # vm = -2,250,000 - (-2,255,000) = +5,000
+        from ledger import future_contract
+        result = future_contract(view, "ESZ24", datetime(2024, 12, 1), {"SPX": 4510.0})
 
-        state = ledger.get_unit_state("ESZ24")
-        # virtual_cash resets to break-even at settlement price
-        expected_virtual_cash = -(10.0 * 4510.0 * 50.0)
-        assert abs(state.get('virtual_cash') - expected_virtual_cash) < 0.01
+        # Verify VM move: profit of 5000
+        assert len(result.moves) == 1
+        assert result.moves[0].quantity == 5000.0
+
+        # Verify virtual_cash updated to target
+        updated_state = result.state_updates['ESZ24']
+        assert updated_state['wallets']['trader']['virtual_cash'] == -2_255_000.0
 
 
 class TestMarginLoanLifecycle:

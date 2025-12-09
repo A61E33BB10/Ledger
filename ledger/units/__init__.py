@@ -62,14 +62,9 @@ from .bond import (
 
 # Future contracts
 from .future import (
-    create_future_unit,
-    execute_futures_trade,
-    compute_daily_settlement,
-    compute_intraday_margin,
-    compute_expiry,
+    create_future,
     future_contract,
     transact as future_transact,
-    UNIT_TYPE_FUTURE,
 )
 
 # Structured notes
@@ -122,14 +117,9 @@ __all__ = [
     'generate_coupon_schedule',
     'year_fraction',
     # Futures
-    'create_future_unit',
-    'execute_futures_trade',
-    'compute_daily_settlement',
-    'compute_intraday_margin',
-    'compute_expiry',
+    'create_future',
     'future_contract',
     'future_transact',
-    'UNIT_TYPE_FUTURE',
     # Structured Notes
     'create_structured_note',
     'compute_performance',

@@ -10,11 +10,20 @@ from datetime import datetime
 from typing import Dict, Set, Optional, Any
 
 from ledger import LedgerView
+from ledger.core import Unit
 
 
 # Type aliases (matching core.py)
 Positions = Dict[str, float]
 UnitState = Dict[str, Any]
+
+
+class FakeUnit:
+    """Minimal Unit for testing - provides min_balance and max_balance."""
+    def __init__(self, symbol: str, min_balance: float = -1_000_000.0, max_balance: float = 1_000_000.0):
+        self.symbol = symbol
+        self.min_balance = min_balance
+        self.max_balance = max_balance
 
 
 class FakeView:
@@ -36,11 +45,13 @@ class FakeView:
         self,
         balances: Dict[str, Dict[str, float]],
         states: Optional[Dict[str, UnitState]] = None,
-        time: Optional[datetime] = None
+        time: Optional[datetime] = None,
+        units: Optional[Dict[str, Any]] = None
     ):
         self._balances = balances
         self._states = states or {}
         self._time = time or datetime.now()
+        self._units = units or {}
 
     @property
     def current_time(self) -> datetime:
@@ -61,3 +72,10 @@ class FakeView:
 
     def list_wallets(self) -> Set[str]:
         return set(self._balances.keys())
+
+    def get_unit(self, symbol: str) -> Any:
+        """Return unit or a FakeUnit with default position limits."""
+        if symbol in self._units:
+            return self._units[symbol]
+        # Return a FakeUnit with default futures position limits
+        return FakeUnit(symbol)
