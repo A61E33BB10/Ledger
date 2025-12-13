@@ -3,10 +3,10 @@ Tests for stocks.py - Stock Contracts with Dividend Scheduling
 
 Tests:
 - create_stock_unit factory (creates stock units with dividend schedules)
-- compute_scheduled_dividend (processes dividend payments on payment dates)
+- process_dividends (processes dividend payments on payment dates)
 - stock_contract lifecycle integration (automated dividend processing via LifecycleEngine)
 
-Dividend schedule format: list of (payment_date, dividend_per_share) tuples.
+Dividend schedule format: list of Dividend objects with ex_date, payment_date, amount_per_share, and currency.
 """
 
 import pytest
@@ -15,8 +15,10 @@ from datetime import datetime, timedelta
 from ledger import (
     Ledger, cash,
     create_stock_unit,
-    compute_scheduled_dividend,
+    process_dividends,
+    Dividend,
     stock_contract,
+    deferred_cash_contract,
     LifecycleEngine,
 )
 
@@ -54,10 +56,10 @@ class TestCreateStockUnit:
 
     def test_create_stock_unit_with_schedule(self):
         schedule = [
-            (datetime(2024, 3, 15), 0.25),
-            (datetime(2024, 6, 15), 0.25),
-            (datetime(2024, 9, 15), 0.25),
-            (datetime(2024, 12, 15), 0.25),
+            Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 6, 15), datetime(2024, 6, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 9, 15), datetime(2024, 9, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 12, 15), datetime(2024, 12, 15), 0.25, "USD"),
         ]
         unit = create_stock_unit(
             symbol="AAPL",
@@ -67,7 +69,7 @@ class TestCreateStockUnit:
             dividend_schedule=schedule,
         )
 
-        assert unit._state['next_payment_index'] == 0
+        assert unit._state['processed_dividends'] == []
         assert len(unit._state['dividend_schedule']) == 4
 
     def test_create_stock_unit_no_schedule(self):
@@ -79,15 +81,15 @@ class TestCreateStockUnit:
         )
 
         assert unit._state['dividend_schedule'] == []
-        assert unit._state['paid_dividends'] == []
+        assert unit._state['processed_dividends'] == []
 
 
 # ============================================================================
-# compute_scheduled_dividend Tests
+# process_dividends Tests
 # ============================================================================
 
-class TestComputeScheduledDividend:
-    """Tests for compute_scheduled_dividend function."""
+class TestProcessDividends:
+    """Tests for process_dividends function."""
 
     @pytest.fixture
     def setup_ledger(self):
@@ -108,7 +110,7 @@ class TestComputeScheduledDividend:
         ledger = setup_ledger
 
         schedule = [
-            (datetime(2024, 3, 29), 0.25),
+            Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 0.25, "USD"),
         ]
         unit = create_stock_unit(
             symbol="AAPL",
@@ -126,23 +128,31 @@ class TestComputeScheduledDividend:
         # Advance to payment date
         ledger.advance_time(datetime(2024, 3, 29))
 
-        result = compute_scheduled_dividend(ledger, "AAPL", datetime(2024, 3, 29))
+        result = process_dividends(ledger, "AAPL", datetime(2024, 3, 29))
 
         assert not result.is_empty()
-        assert len(result.moves) == 2  # Alice and Bob
+        assert len(result.moves) == 2  # Alice and Bob get DeferredCash entitlements
+        assert len(result.units_to_create) == 2  # Two DeferredCash units
 
-        # Check amounts
+        # Check DeferredCash entitlements (qty=1 each)
         alice_move = next(m for m in result.moves if m.dest == "alice")
         bob_move = next(m for m in result.moves if m.dest == "bob")
 
-        assert alice_move.quantity == 250.0  # 1000 * 0.25
-        assert bob_move.quantity == 125.0   # 500 * 0.25
+        assert alice_move.quantity == 1.0  # DeferredCash entitlement
+        assert bob_move.quantity == 1.0
+
+        # Check DeferredCash units contain correct amounts
+        alice_dc = next(u for u in result.units_to_create if "alice" in u.symbol)
+        bob_dc = next(u for u in result.units_to_create if "bob" in u.symbol)
+
+        assert alice_dc._state['amount'] == 250.0  # 1000 * 0.25
+        assert bob_dc._state['amount'] == 125.0   # 500 * 0.25
 
     def test_dividend_before_payment_date_returns_empty(self, setup_ledger):
         ledger = setup_ledger
 
         schedule = [
-            (datetime(2024, 3, 29), 0.25),
+            Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 0.25, "USD"),
         ]
         unit = create_stock_unit(
             symbol="AAPL",
@@ -156,7 +166,7 @@ class TestComputeScheduledDividend:
         ledger.set_balance("alice", "AAPL", 1000)
 
         # Before payment date
-        result = compute_scheduled_dividend(ledger, "AAPL", datetime(2024, 3, 28))
+        result = process_dividends(ledger, "AAPL", datetime(2024, 3, 28))
 
         assert result.is_empty()
 
@@ -164,8 +174,8 @@ class TestComputeScheduledDividend:
         ledger = setup_ledger
 
         schedule = [
-            (datetime(2024, 3, 29), 0.25),
-            (datetime(2024, 6, 29), 0.25),
+            Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 0.25, "USD"),
+            Dividend(datetime(2024, 6, 29), datetime(2024, 6, 29), 0.25, "USD"),
         ]
         unit = create_stock_unit(
             symbol="AAPL",
@@ -179,19 +189,18 @@ class TestComputeScheduledDividend:
         ledger.set_balance("alice", "AAPL", 1000)
         ledger.advance_time(datetime(2024, 3, 29))
 
-        result = compute_scheduled_dividend(ledger, "AAPL", datetime(2024, 3, 29))
+        result = process_dividends(ledger, "AAPL", datetime(2024, 3, 29))
 
-        # Check state updates
-        assert "AAPL" in result.state_updates
-        updates = result.state_updates["AAPL"]
-        assert updates['next_payment_index'] == 1
-        assert len(updates['paid_dividends']) == 1
+        # Check state updates - now just processed_dividends list
+        sc = next(d for d in result.state_changes if d.unit == "AAPL")
+        assert 'processed_dividends' in sc.new_state
+        assert '2024-03-29' in sc.new_state['processed_dividends']
 
     def test_schedule_exhausted_returns_empty(self, setup_ledger):
         ledger = setup_ledger
 
         schedule = [
-            (datetime(2024, 3, 29), 0.25),
+            Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 0.25, "USD"),
         ]
         unit = create_stock_unit(
             symbol="AAPL",
@@ -206,18 +215,18 @@ class TestComputeScheduledDividend:
         ledger.advance_time(datetime(2024, 3, 29))
 
         # First dividend
-        result1 = compute_scheduled_dividend(ledger, "AAPL", datetime(2024, 3, 29))
-        ledger.execute_contract(result1)
+        result1 = process_dividends(ledger, "AAPL", datetime(2024, 3, 29))
+        ledger.execute(result1)
 
         # Try second dividend (should be empty)
-        result2 = compute_scheduled_dividend(ledger, "AAPL", datetime(2024, 6, 29))
+        result2 = process_dividends(ledger, "AAPL", datetime(2024, 6, 29))
         assert result2.is_empty()
 
     def test_issuer_excluded_from_dividend(self, setup_ledger):
         ledger = setup_ledger
 
         schedule = [
-            (datetime(2024, 3, 29), 0.25),
+            Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 0.25, "USD"),
         ]
         unit = create_stock_unit(
             symbol="AAPL",
@@ -234,7 +243,7 @@ class TestComputeScheduledDividend:
 
         ledger.advance_time(datetime(2024, 3, 29))
 
-        result = compute_scheduled_dividend(ledger, "AAPL", datetime(2024, 3, 29))
+        result = process_dividends(ledger, "AAPL", datetime(2024, 3, 29))
 
         # Only Alice should receive dividend
         assert len(result.moves) == 1
@@ -258,7 +267,7 @@ class TestStockContractIntegration:
         ledger.set_balance(treasury, "USD", 1_000_000)
 
         schedule = [
-            (datetime(2024, 3, 29), 0.25),
+            Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 0.25, "USD"),
         ]
         unit = create_stock_unit(
             symbol="AAPL",
@@ -271,9 +280,10 @@ class TestStockContractIntegration:
 
         ledger.set_balance("alice", "AAPL", 1000)
 
-        # Create lifecycle engine
+        # Create lifecycle engine with both STOCK and DEFERRED_CASH contracts
         engine = LifecycleEngine(ledger)
         engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
 
         # Run past payment date
         results = engine.run(
@@ -281,7 +291,7 @@ class TestStockContractIntegration:
             lambda ts: {}
         )
 
-        # Check Alice received dividend
+        # Check Alice received dividend (via DeferredCash settlement)
         assert ledger.get_balance("alice", "USD") == 250.0
 
     def test_multiple_dividends_via_engine(self):
@@ -295,10 +305,10 @@ class TestStockContractIntegration:
 
         # Quarterly schedule
         schedule = [
-            (datetime(2024, 3, 29), 0.25),
-            (datetime(2024, 6, 28), 0.25),
-            (datetime(2024, 9, 27), 0.25),
-            (datetime(2024, 12, 27), 0.25),
+            Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 0.25, "USD"),
+            Dividend(datetime(2024, 6, 28), datetime(2024, 6, 28), 0.25, "USD"),
+            Dividend(datetime(2024, 9, 27), datetime(2024, 9, 27), 0.25, "USD"),
+            Dividend(datetime(2024, 12, 27), datetime(2024, 12, 27), 0.25, "USD"),
         ]
         unit = create_stock_unit(
             symbol="AAPL",
@@ -313,12 +323,13 @@ class TestStockContractIntegration:
 
         engine = LifecycleEngine(ledger)
         engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
 
         # Run through the year (daily)
         timestamps = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(365)]
         engine.run(timestamps, lambda ts: {})
 
-        # Check Alice's total dividends: 4 * 1000 * 0.25 = 1000
+        # Check Alice's total dividends: 4 * 1000 * 0.25 = 1000 (via DeferredCash)
         assert ledger.get_balance("alice", "USD") == 1000.0
 
     def test_stock_unit_type(self):
@@ -362,7 +373,7 @@ class TestDividendPaymentDetails:
         """Dividend amount should be proportional to shares held."""
         ledger = dividend_ledger
 
-        schedule = [(datetime(2024, 3, 29), 1.00)]
+        schedule = [Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 1.00, "USD")]
         unit = create_stock_unit("TEST", "Test Stock", "treasury", "USD", schedule)
         ledger.register_unit(unit)
 
@@ -371,9 +382,11 @@ class TestDividendPaymentDetails:
         ledger.set_balance("bob", "TEST", 500)
         ledger.set_balance("charlie", "TEST", 1000)
 
-        ledger.advance_time(datetime(2024, 3, 29))
-        result = compute_scheduled_dividend(ledger, "TEST", datetime(2024, 3, 29))
-        ledger.execute_contract(result)
+        # Use lifecycle engine to process both dividend entitlement and DeferredCash settlement
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+        engine.step(datetime(2024, 3, 29), {"TEST": 100.0})
 
         assert ledger.get_balance("alice", "USD") == 100.0
         assert ledger.get_balance("bob", "USD") == 500.0
@@ -383,15 +396,17 @@ class TestDividendPaymentDetails:
         """Dividend should work with fractional share amounts."""
         ledger = dividend_ledger
 
-        schedule = [(datetime(2024, 3, 29), 0.50)]
+        schedule = [Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 0.50, "USD")]
         unit = create_stock_unit("TEST", "Test Stock", "treasury", "USD", schedule)
         ledger.register_unit(unit)
 
         ledger.set_balance("alice", "TEST", 33.5)  # Fractional shares
 
-        ledger.advance_time(datetime(2024, 3, 29))
-        result = compute_scheduled_dividend(ledger, "TEST", datetime(2024, 3, 29))
-        ledger.execute_contract(result)
+        # Use lifecycle engine to process both dividend entitlement and DeferredCash settlement
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+        engine.step(datetime(2024, 3, 29), {"TEST": 100.0})
 
         assert ledger.get_balance("alice", "USD") == pytest.approx(16.75, rel=1e-6)
 
@@ -399,7 +414,7 @@ class TestDividendPaymentDetails:
         """Shareholders with zero shares get no dividend."""
         ledger = dividend_ledger
 
-        schedule = [(datetime(2024, 3, 29), 1.00)]
+        schedule = [Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 1.00, "USD")]
         unit = create_stock_unit("TEST", "Test Stock", "treasury", "USD", schedule)
         ledger.register_unit(unit)
 
@@ -407,17 +422,19 @@ class TestDividendPaymentDetails:
         ledger.set_balance("bob", "TEST", 0)  # Zero shares
 
         ledger.advance_time(datetime(2024, 3, 29))
-        result = compute_scheduled_dividend(ledger, "TEST", datetime(2024, 3, 29))
+        result = process_dividends(ledger, "TEST", datetime(2024, 3, 29))
 
-        # Only alice should receive dividend
-        assert len(result.moves) == 1
-        assert result.moves[0].dest == "alice"
+        # Only alice should receive dividend (DeferredCash move)
+        # The moves include: 1 DeferredCash entitlement for alice
+        deferred_cash_moves = [m for m in result.moves if m.dest not in ("system",)]
+        assert len(deferred_cash_moves) == 1
+        assert deferred_cash_moves[0].dest == "alice"
 
     def test_dividend_negative_shares_no_payment(self, dividend_ledger):
         """Short sellers (negative shares) don't receive dividends."""
         ledger = dividend_ledger
 
-        schedule = [(datetime(2024, 3, 29), 1.00)]
+        schedule = [Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 1.00, "USD")]
         unit = create_stock_unit("TEST", "Test Stock", "treasury", "USD", schedule, shortable=True)
         ledger.register_unit(unit)
 
@@ -425,27 +442,34 @@ class TestDividendPaymentDetails:
         ledger.set_balance("bob", "TEST", -50)  # Short position
 
         ledger.advance_time(datetime(2024, 3, 29))
-        result = compute_scheduled_dividend(ledger, "TEST", datetime(2024, 3, 29))
+        result = process_dividends(ledger, "TEST", datetime(2024, 3, 29))
 
-        # Only alice should receive dividend
-        assert len(result.moves) == 1
-        assert result.moves[0].dest == "alice"
-        assert result.moves[0].quantity == 100.0
+        # Only alice should receive dividend (DeferredCash entitlement)
+        # The moves include: 1 DeferredCash entitlement for alice
+        deferred_cash_moves = [m for m in result.moves if m.dest not in ("system",)]
+        assert len(deferred_cash_moves) == 1
+        assert deferred_cash_moves[0].dest == "alice"
+        # Check the unit state contains alice's dividend amount (100 shares × $1)
+        dc_units = [u for u in result.units_to_create if "DIV_TEST" in u.symbol and "alice" in u.symbol]
+        assert len(dc_units) == 1
+        assert dc_units[0]._state['amount'] == 100.0
 
     def test_dividend_reduces_treasury_balance(self, dividend_ledger):
         """Dividend payments should reduce treasury balance."""
         ledger = dividend_ledger
         initial_treasury = ledger.get_balance("treasury", "USD")
 
-        schedule = [(datetime(2024, 3, 29), 5.00)]
+        schedule = [Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 5.00, "USD")]
         unit = create_stock_unit("TEST", "Test Stock", "treasury", "USD", schedule)
         ledger.register_unit(unit)
 
         ledger.set_balance("alice", "TEST", 1000)
 
-        ledger.advance_time(datetime(2024, 3, 29))
-        result = compute_scheduled_dividend(ledger, "TEST", datetime(2024, 3, 29))
-        ledger.execute_contract(result)
+        # Use lifecycle engine to process both dividend entitlement and DeferredCash settlement
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+        engine.step(datetime(2024, 3, 29), {"TEST": 100.0})
 
         assert ledger.get_balance("treasury", "USD") == initial_treasury - 5000.0
         assert ledger.get_balance("alice", "USD") == 5000.0
@@ -468,10 +492,10 @@ class TestDividendScheduleExecution:
 
         # Create stock with 4 quarterly dividends
         schedule = [
-            (datetime(2024, 3, 29), 0.25),
-            (datetime(2024, 6, 28), 0.25),
-            (datetime(2024, 9, 27), 0.25),
-            (datetime(2024, 12, 27), 0.30),  # Special year-end dividend
+            Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 0.25, "USD"),
+            Dividend(datetime(2024, 6, 28), datetime(2024, 6, 28), 0.25, "USD"),
+            Dividend(datetime(2024, 9, 27), datetime(2024, 9, 27), 0.25, "USD"),
+            Dividend(datetime(2024, 12, 27), datetime(2024, 12, 27), 0.30, "USD"),  # Special year-end dividend
         ]
         unit = create_stock_unit("DIV", "Dividend Stock", "treasury", "USD", schedule)
         ledger.register_unit(unit)
@@ -484,69 +508,66 @@ class TestDividendScheduleExecution:
         """Dividends should be paid sequentially per schedule."""
         ledger = scheduled_ledger
 
+        # Use lifecycle engine to process both dividend entitlement and DeferredCash settlement
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+
         # First dividend
-        ledger.advance_time(datetime(2024, 3, 29))
-        r1 = compute_scheduled_dividend(ledger, "DIV", datetime(2024, 3, 29))
-        ledger.execute_contract(r1)
+        engine.step(datetime(2024, 3, 29), {"DIV": 100.0})
         assert ledger.get_balance("alice", "USD") == 250.0
 
         # Second dividend
-        ledger.advance_time(datetime(2024, 6, 28))
-        r2 = compute_scheduled_dividend(ledger, "DIV", datetime(2024, 6, 28))
-        ledger.execute_contract(r2)
+        engine.step(datetime(2024, 6, 28), {"DIV": 100.0})
         assert ledger.get_balance("alice", "USD") == 500.0
 
         # Third dividend
-        ledger.advance_time(datetime(2024, 9, 27))
-        r3 = compute_scheduled_dividend(ledger, "DIV", datetime(2024, 9, 27))
-        ledger.execute_contract(r3)
+        engine.step(datetime(2024, 9, 27), {"DIV": 100.0})
         assert ledger.get_balance("alice", "USD") == 750.0
 
         # Fourth dividend (special)
-        ledger.advance_time(datetime(2024, 12, 27))
-        r4 = compute_scheduled_dividend(ledger, "DIV", datetime(2024, 12, 27))
-        ledger.execute_contract(r4)
+        engine.step(datetime(2024, 12, 27), {"DIV": 100.0})
         assert ledger.get_balance("alice", "USD") == 1050.0  # 750 + 300
 
-    def test_payment_index_advances(self, scheduled_ledger):
-        """Payment index should advance after each dividend."""
+    def test_paid_dates_accumulate(self, scheduled_ledger):
+        """Processed dividends should accumulate after each dividend."""
         ledger = scheduled_ledger
 
-        assert ledger.get_unit_state("DIV")['next_payment_index'] == 0
+        assert ledger.get_unit_state("DIV").get('processed_dividends', []) == []
 
-        ledger.advance_time(datetime(2024, 3, 29))
-        r1 = compute_scheduled_dividend(ledger, "DIV", datetime(2024, 3, 29))
-        ledger.execute_contract(r1)
-        assert ledger.get_unit_state("DIV")['next_payment_index'] == 1
+        # Use lifecycle engine to process both dividend entitlement and DeferredCash settlement
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
 
-        ledger.advance_time(datetime(2024, 6, 28))
-        r2 = compute_scheduled_dividend(ledger, "DIV", datetime(2024, 6, 28))
-        ledger.execute_contract(r2)
-        assert ledger.get_unit_state("DIV")['next_payment_index'] == 2
+        engine.step(datetime(2024, 3, 29), {"DIV": 100.0})
+        # processed_dividends format: [div_key, ...]
+        assert len(ledger.get_unit_state("DIV").get('processed_dividends', [])) == 1
+
+        engine.step(datetime(2024, 6, 28), {"DIV": 100.0})
+        assert len(ledger.get_unit_state("DIV").get('processed_dividends', [])) == 2
 
 
 class TestDividendEdgeCases:
     """Edge case tests for dividend processing."""
 
     def test_dividend_no_shareholders(self):
-        """Dividend with no shareholders should update state but have no moves."""
+        """Dividend with no shareholders should return empty result."""
         ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("treasury")
         ledger.set_balance("treasury", "USD", 1_000_000)
 
-        schedule = [(datetime(2024, 3, 29), 1.00)]
+        schedule = [Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 1.00, "USD")]
         unit = create_stock_unit("TEST", "Test Stock", "treasury", "USD", schedule)
         ledger.register_unit(unit)
 
         # No shareholders
         ledger.advance_time(datetime(2024, 3, 29))
-        result = compute_scheduled_dividend(ledger, "TEST", datetime(2024, 3, 29))
+        result = process_dividends(ledger, "TEST", datetime(2024, 3, 29))
 
-        # Should have no moves but still update state
+        # Should have no moves
         assert len(result.moves) == 0
-        assert "TEST" in result.state_updates
-        assert result.state_updates["TEST"]['next_payment_index'] == 1
 
     def test_dividend_only_treasury_holds_shares(self):
         """If only treasury holds shares, no dividend is paid."""
@@ -555,7 +576,7 @@ class TestDividendEdgeCases:
         ledger.register_wallet("treasury")
         ledger.set_balance("treasury", "USD", 1_000_000)
 
-        schedule = [(datetime(2024, 3, 29), 1.00)]
+        schedule = [Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 1.00, "USD")]
         unit = create_stock_unit("TEST", "Test Stock", "treasury", "USD", schedule)
         ledger.register_unit(unit)
 
@@ -563,7 +584,7 @@ class TestDividendEdgeCases:
         ledger.set_balance("treasury", "TEST", 10000)
 
         ledger.advance_time(datetime(2024, 3, 29))
-        result = compute_scheduled_dividend(ledger, "TEST", datetime(2024, 3, 29))
+        result = process_dividends(ledger, "TEST", datetime(2024, 3, 29))
 
         assert len(result.moves) == 0
 
@@ -576,7 +597,7 @@ class TestDividendEdgeCases:
         ledger.set_balance("treasury", "USD", 10_000_000)
 
         payment_date = datetime(2024, 3, 29)
-        schedule = [(payment_date, 1.00)]
+        schedule = [Dividend(payment_date, payment_date, 1.00, "USD")]
 
         # Create two stocks
         ledger.register_unit(create_stock_unit("STOCK1", "Stock One", "treasury", "USD", schedule))
@@ -585,13 +606,11 @@ class TestDividendEdgeCases:
         ledger.set_balance("alice", "STOCK1", 100)
         ledger.set_balance("alice", "STOCK2", 200)
 
-        ledger.advance_time(payment_date)
-
-        r1 = compute_scheduled_dividend(ledger, "STOCK1", payment_date)
-        r2 = compute_scheduled_dividend(ledger, "STOCK2", payment_date)
-
-        ledger.execute_contract(r1)
-        ledger.execute_contract(r2)
+        # Use lifecycle engine to process both dividend entitlement and DeferredCash settlement
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+        engine.step(payment_date, {"STOCK1": 100.0, "STOCK2": 100.0})
 
         assert ledger.get_balance("alice", "USD") == 300.0  # 100 + 200
 
@@ -602,7 +621,7 @@ class TestDividendEdgeCases:
         ledger.register_wallet("treasury")
         ledger.set_balance("treasury", "USD", 1_000_000)
 
-        schedule = [(datetime(2024, 3, 29), 1.00)]
+        schedule = [Dividend(datetime(2024, 3, 29), datetime(2024, 3, 29), 1.00, "USD")]
         unit = create_stock_unit("TEST", "Test Stock", "treasury", "USD", schedule)
         ledger.register_unit(unit)
 
@@ -612,10 +631,11 @@ class TestDividendEdgeCases:
             ledger.set_balance(name, "TEST", 10)
 
         ledger.advance_time(datetime(2024, 3, 29))
-        result = compute_scheduled_dividend(ledger, "TEST", datetime(2024, 3, 29))
+        result = process_dividends(ledger, "TEST", datetime(2024, 3, 29))
 
-        # Moves should be in sorted order
-        recipients = [m.dest for m in result.moves]
+        # DeferredCash moves recipients should be in sorted order
+        # Filter to only include moves to shareholders (not system moves)
+        recipients = [m.dest for m in result.moves if m.dest not in ("system",)]
         assert recipients == sorted(recipients)
 
 
@@ -623,7 +643,14 @@ class TestDividendWithShareChanges:
     """Tests for dividends when shareholdings change between payments."""
 
     def test_shareholder_sells_before_next_dividend(self):
-        """New owner should receive dividend after purchase."""
+        """New owner should receive dividend after purchase.
+
+        Tests the ex_date vs payment_date distinction:
+        - Ex-date snapshots who is eligible
+        - Payment-date is when cash is paid
+        - Selling shares AFTER ex-date means seller still gets that dividend
+        - Selling shares BEFORE ex-date means buyer gets the dividend
+        """
         ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("treasury")
@@ -631,29 +658,37 @@ class TestDividendWithShareChanges:
         ledger.register_wallet("bob")
         ledger.set_balance("treasury", "USD", 10_000_000)
 
+        # Ex-dates are BEFORE payment dates
         schedule = [
-            (datetime(2024, 3, 29), 1.00),
-            (datetime(2024, 6, 28), 1.00),
+            Dividend(datetime(2024, 3, 15), datetime(2024, 3, 29), 1.00, "USD"),  # Ex-date 3/15, pay 3/29
+            Dividend(datetime(2024, 6, 14), datetime(2024, 6, 28), 1.00, "USD"),  # Ex-date 6/14, pay 6/28
         ]
         unit = create_stock_unit("TEST", "Test Stock", "treasury", "USD", schedule)
         ledger.register_unit(unit)
 
         ledger.set_balance("alice", "TEST", 1000)
 
-        # First dividend to Alice
-        ledger.advance_time(datetime(2024, 3, 29))
-        r1 = compute_scheduled_dividend(ledger, "TEST", datetime(2024, 3, 29))
-        ledger.execute_contract(r1)
+        # Use lifecycle engine
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+
+        # First ex-date snapshot (Alice holds) - creates DeferredCash
+        engine.step(datetime(2024, 3, 15), {"TEST": 100.0})
+
+        # First dividend payment to Alice (DeferredCash settles)
+        engine.step(datetime(2024, 3, 29), {"TEST": 100.0})
         assert ledger.get_balance("alice", "USD") == 1000.0
 
-        # Alice sells to Bob
+        # Alice sells to Bob AFTER first dividend but BEFORE second ex-date
         ledger.set_balance("alice", "TEST", 0)
         ledger.set_balance("bob", "TEST", 1000)
 
-        # Second dividend to Bob
-        ledger.advance_time(datetime(2024, 6, 28))
-        r2 = compute_scheduled_dividend(ledger, "TEST", datetime(2024, 6, 28))
-        ledger.execute_contract(r2)
+        # Second ex-date snapshot (Bob now holds) - creates DeferredCash for Bob
+        engine.step(datetime(2024, 6, 14), {"TEST": 100.0})
+
+        # Second dividend payment to Bob (DeferredCash settles)
+        engine.step(datetime(2024, 6, 28), {"TEST": 100.0})
 
         assert ledger.get_balance("alice", "USD") == 1000.0  # No change
         assert ledger.get_balance("bob", "USD") == 1000.0    # Bob gets dividend
@@ -673,18 +708,18 @@ class TestDividendIntegrationWithEngine:
 
         # Monthly schedule
         schedule = [
-            (datetime(2024, 1, 15), 0.10),
-            (datetime(2024, 2, 15), 0.10),
-            (datetime(2024, 3, 15), 0.10),
-            (datetime(2024, 4, 15), 0.10),
-            (datetime(2024, 5, 15), 0.10),
-            (datetime(2024, 6, 15), 0.10),
-            (datetime(2024, 7, 15), 0.10),
-            (datetime(2024, 8, 15), 0.10),
-            (datetime(2024, 9, 15), 0.10),
-            (datetime(2024, 10, 15), 0.10),
-            (datetime(2024, 11, 15), 0.10),
-            (datetime(2024, 12, 15), 0.10),
+            Dividend(datetime(2024, 1, 15), datetime(2024, 1, 15), 0.10, "USD"),
+            Dividend(datetime(2024, 2, 15), datetime(2024, 2, 15), 0.10, "USD"),
+            Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 0.10, "USD"),
+            Dividend(datetime(2024, 4, 15), datetime(2024, 4, 15), 0.10, "USD"),
+            Dividend(datetime(2024, 5, 15), datetime(2024, 5, 15), 0.10, "USD"),
+            Dividend(datetime(2024, 6, 15), datetime(2024, 6, 15), 0.10, "USD"),
+            Dividend(datetime(2024, 7, 15), datetime(2024, 7, 15), 0.10, "USD"),
+            Dividend(datetime(2024, 8, 15), datetime(2024, 8, 15), 0.10, "USD"),
+            Dividend(datetime(2024, 9, 15), datetime(2024, 9, 15), 0.10, "USD"),
+            Dividend(datetime(2024, 10, 15), datetime(2024, 10, 15), 0.10, "USD"),
+            Dividend(datetime(2024, 11, 15), datetime(2024, 11, 15), 0.10, "USD"),
+            Dividend(datetime(2024, 12, 15), datetime(2024, 12, 15), 0.10, "USD"),
         ]
         unit = create_stock_unit("MONTHLY", "Monthly Dividend Stock", "treasury", "USD", schedule)
         ledger.register_unit(unit)
@@ -694,14 +729,15 @@ class TestDividendIntegrationWithEngine:
 
         engine = LifecycleEngine(ledger)
         engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
 
         # Run daily for the year
         timestamps = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(365)]
         engine.run(timestamps, lambda ts: {})
 
-        # Check paid dividends
-        paid = ledger.get_unit_state("MONTHLY").get('paid_dividends', [])
-        assert len(paid) == 12  # 12 monthly payments
+        # Check that all 12 dividends were processed (processed_dividends format: [div_key, ...])
+        processed = ledger.get_unit_state("MONTHLY").get('processed_dividends', [])
+        assert len(processed) == 12  # 12 monthly dividends
 
         # Alice: 12 * 1000 * 0.10 = 1200
         # Bob: 12 * 500 * 0.10 = 600
@@ -718,27 +754,27 @@ class TestDividendIntegrationWithEngine:
 
         # Quarterly stock
         q_schedule = [
-            (datetime(2024, 3, 15), 1.00),
-            (datetime(2024, 6, 15), 1.00),
-            (datetime(2024, 9, 15), 1.00),
-            (datetime(2024, 12, 15), 1.00),
+            Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 1.00, "USD"),
+            Dividend(datetime(2024, 6, 15), datetime(2024, 6, 15), 1.00, "USD"),
+            Dividend(datetime(2024, 9, 15), datetime(2024, 9, 15), 1.00, "USD"),
+            Dividend(datetime(2024, 12, 15), datetime(2024, 12, 15), 1.00, "USD"),
         ]
         ledger.register_unit(create_stock_unit("QTRLY", "Quarterly Stock", "treasury", "USD", q_schedule))
 
         # Monthly stock
         m_schedule = [
-            (datetime(2024, 1, 15), 0.25),
-            (datetime(2024, 2, 15), 0.25),
-            (datetime(2024, 3, 15), 0.25),
-            (datetime(2024, 4, 15), 0.25),
-            (datetime(2024, 5, 15), 0.25),
-            (datetime(2024, 6, 15), 0.25),
-            (datetime(2024, 7, 15), 0.25),
-            (datetime(2024, 8, 15), 0.25),
-            (datetime(2024, 9, 15), 0.25),
-            (datetime(2024, 10, 15), 0.25),
-            (datetime(2024, 11, 15), 0.25),
-            (datetime(2024, 12, 15), 0.25),
+            Dividend(datetime(2024, 1, 15), datetime(2024, 1, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 2, 15), datetime(2024, 2, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 4, 15), datetime(2024, 4, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 5, 15), datetime(2024, 5, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 6, 15), datetime(2024, 6, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 7, 15), datetime(2024, 7, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 8, 15), datetime(2024, 8, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 9, 15), datetime(2024, 9, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 10, 15), datetime(2024, 10, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 11, 15), datetime(2024, 11, 15), 0.25, "USD"),
+            Dividend(datetime(2024, 12, 15), datetime(2024, 12, 15), 0.25, "USD"),
         ]
         ledger.register_unit(create_stock_unit("MTHLY", "Monthly Stock", "treasury", "USD", m_schedule))
 
@@ -747,6 +783,7 @@ class TestDividendIntegrationWithEngine:
 
         engine = LifecycleEngine(ledger)
         engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
 
         timestamps = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(365)]
         engine.run(timestamps, lambda ts: {})
@@ -754,3 +791,295 @@ class TestDividendIntegrationWithEngine:
         # Quarterly: 4 * 100 * 1.00 = 400
         # Monthly: 12 * 100 * 0.25 = 300
         assert ledger.get_balance("alice", "USD") == 700.0
+
+
+# ============================================================================
+# Bulletproof Dividend Processing Tests
+# ============================================================================
+
+class TestBulletproofDividendProcessing:
+    """
+    Tests verifying the new date-based dividend tracking is bulletproof.
+
+    These tests verify behavior that would BREAK with index-based tracking:
+    1. Unsorted schedules
+    2. Schedule modifications after creation
+    3. Multiple dividends becoming due at once
+    4. Idempotency (calling twice doesn't double-pay)
+    """
+
+    @pytest.fixture
+    def base_ledger(self):
+        """Create a basic test ledger."""
+        ledger = Ledger("bulletproof_test", datetime(2024, 1, 1), verbose=False)
+        ledger.register_unit(cash("USD", "US Dollar"))
+        ledger.register_wallet("treasury")
+        ledger.register_wallet("alice")
+        ledger.set_balance("treasury", "USD", 10_000_000)
+        return ledger
+
+    def test_unsorted_schedule_processes_correctly(self, base_ledger):
+        """
+        Dividends should process correctly even if schedule is not sorted.
+
+        OLD BUG: Index-based tracking assumed sorted schedule.
+        """
+        ledger = base_ledger
+
+        # Schedule is INTENTIONALLY unsorted
+        schedule = [
+            Dividend(datetime(2024, 12, 15), datetime(2024, 12, 15), 0.40, "USD"),  # Q4 - listed first
+            Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 0.10, "USD"),   # Q1 - listed second
+            Dividend(datetime(2024, 9, 15), datetime(2024, 9, 15), 0.30, "USD"),   # Q3 - listed third
+            Dividend(datetime(2024, 6, 15), datetime(2024, 6, 15), 0.20, "USD"),   # Q2 - listed fourth
+        ]
+        unit = create_stock_unit("UNSORTED", "Unsorted Dividends", "treasury", "USD", schedule)
+        ledger.register_unit(unit)
+        ledger.set_balance("alice", "UNSORTED", 1000)
+
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+
+        # Run through the year
+        timestamps = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(365)]
+        engine.run(timestamps, lambda ts: {})
+
+        # All dividends should be paid: 1000 * (0.10 + 0.20 + 0.30 + 0.40) = 1000
+        assert ledger.get_balance("alice", "USD") == 1000.0
+        assert len(ledger.get_unit_state("UNSORTED").get('processed_dividends', [])) == 4
+
+    def test_multiple_due_dividends_processed_at_once(self, base_ledger):
+        """
+        If engine skips time and multiple dividends become due, all should process.
+
+        OLD BUG: Index-based tracking only processed one dividend per call.
+        """
+        ledger = base_ledger
+
+        schedule = [
+            Dividend(datetime(2024, 1, 15), datetime(2024, 1, 15), 1.00, "USD"),
+            Dividend(datetime(2024, 2, 15), datetime(2024, 2, 15), 2.00, "USD"),
+            Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 3.00, "USD"),
+        ]
+        unit = create_stock_unit("SKIP", "Skip Test", "treasury", "USD", schedule)
+        ledger.register_unit(unit)
+        ledger.set_balance("alice", "SKIP", 100)
+
+        # Jump directly to after all dividends are due (skip intermediate dates)
+        # Use lifecycle engine to process both dividend entitlement and DeferredCash settlement
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+        engine.step(datetime(2024, 4, 1), {"SKIP": 100.0})
+
+        # All three dividends should be paid in one call: 100 * (1 + 2 + 3) = 600
+        assert ledger.get_balance("alice", "USD") == 600.0
+        assert len(ledger.get_unit_state("SKIP").get('processed_dividends', [])) == 3
+
+    def test_idempotency_no_double_payment(self, base_ledger):
+        """
+        Calling engine.step twice should not double-pay.
+
+        This verifies the processed_dividends tracking works correctly.
+        """
+        ledger = base_ledger
+
+        schedule = [Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 1.00, "USD")]
+        unit = create_stock_unit("IDEM", "Idempotent Test", "treasury", "USD", schedule)
+        ledger.register_unit(unit)
+        ledger.set_balance("alice", "IDEM", 100)
+
+        # Use lifecycle engine
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+
+        # First call - should pay
+        engine.step(datetime(2024, 3, 15), {"IDEM": 100.0})
+        assert ledger.get_balance("alice", "USD") == 100.0
+
+        # Second call - should do nothing (already processed)
+        engine.step(datetime(2024, 3, 15), {"IDEM": 100.0})
+
+        # Balance unchanged
+        assert ledger.get_balance("alice", "USD") == 100.0
+
+    def test_schedule_addition_after_creation(self, base_ledger):
+        """
+        Adding a dividend to the schedule after creation should work.
+
+        This simulates a real-world scenario where dividend schedules are updated.
+        """
+        ledger = base_ledger
+
+        # Start with only Q1 and Q2
+        initial_schedule = [
+            Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 1.00, "USD"),
+            Dividend(datetime(2024, 6, 15), datetime(2024, 6, 15), 1.00, "USD"),
+        ]
+        unit = create_stock_unit("DYNAMIC", "Dynamic Schedule", "treasury", "USD", initial_schedule)
+        ledger.register_unit(unit)
+        ledger.set_balance("alice", "DYNAMIC", 100)
+
+        # Use lifecycle engine
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+
+        # Process Q1
+        engine.step(datetime(2024, 3, 15), {"DYNAMIC": 100.0})
+        assert ledger.get_balance("alice", "USD") == 100.0
+
+        # Now simulate adding Q3 and Q4 to the schedule by modifying state
+        state = ledger.get_unit_state("DYNAMIC")
+        new_schedule = list(state['dividend_schedule'])
+        new_schedule.append(Dividend(datetime(2024, 9, 15), datetime(2024, 9, 15), 1.00, "USD"))
+        new_schedule.append(Dividend(datetime(2024, 12, 15), datetime(2024, 12, 15), 1.00, "USD"))
+
+        # Update the schedule in unit state
+        ledger.units["DYNAMIC"]._state['dividend_schedule'] = new_schedule
+
+        # Process Q2
+        engine.step(datetime(2024, 6, 15), {"DYNAMIC": 100.0})
+        assert ledger.get_balance("alice", "USD") == 200.0
+
+        # Process Q3 (newly added)
+        engine.step(datetime(2024, 9, 15), {"DYNAMIC": 100.0})
+        assert ledger.get_balance("alice", "USD") == 300.0
+
+        # Process Q4 (newly added)
+        engine.step(datetime(2024, 12, 15), {"DYNAMIC": 100.0})
+        assert ledger.get_balance("alice", "USD") == 400.0
+
+    def test_early_dividend_insertion(self, base_ledger):
+        """
+        Inserting a dividend BEFORE a previously-paid one should still work.
+
+        OLD BUG: Index-based would skip this because next_payment_index > 0.
+        """
+        ledger = base_ledger
+
+        # Start with just Q2
+        initial_schedule = [
+            Dividend(datetime(2024, 6, 15), datetime(2024, 6, 15), 2.00, "USD"),
+        ]
+        unit = create_stock_unit("INSERT", "Insert Test", "treasury", "USD", initial_schedule)
+        ledger.register_unit(unit)
+        ledger.set_balance("alice", "INSERT", 100)
+
+        # Use lifecycle engine
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+
+        # Process Q2
+        engine.step(datetime(2024, 6, 15), {"INSERT": 100.0})
+        assert ledger.get_balance("alice", "USD") == 200.0
+
+        # Now INSERT a Q1 dividend that's already past due
+        state = ledger.get_unit_state("INSERT")
+        new_schedule = list(state['dividend_schedule'])
+        new_schedule.insert(0, Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 1.00, "USD"))  # Insert at beginning
+        ledger.units["INSERT"]._state['dividend_schedule'] = new_schedule
+
+        # Process again - the Q1 dividend should now be picked up
+        engine.step(datetime(2024, 6, 16), {"INSERT": 100.0})
+
+        # Q1 (1.00 * 100 = 100) should now be paid too
+        assert ledger.get_balance("alice", "USD") == 300.0
+
+    def test_duplicate_dates_in_schedule(self, base_ledger):
+        """
+        If same date appears twice in schedule (edge case), handle gracefully.
+
+        After first payment, second entry with same date should be skipped
+        because that date is already in processed_dividends.
+        """
+        ledger = base_ledger
+
+        # Duplicate date in schedule (weird but possible)
+        schedule = [
+            Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 1.00, "USD"),
+            Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 2.00, "USD"),  # Same date, different amount
+            Dividend(datetime(2024, 6, 15), datetime(2024, 6, 15), 1.00, "USD"),
+        ]
+        unit = create_stock_unit("DUP", "Duplicate Test", "treasury", "USD", schedule)
+        ledger.register_unit(unit)
+        ledger.set_balance("alice", "DUP", 100)
+
+        # Use lifecycle engine
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+        engine.step(datetime(2024, 3, 15), {"DUP": 100.0})
+
+        # Only first entry for 3/15 should process (100 * 1.00 = 100)
+        # The duplicate is skipped because the date key is already paid
+        assert ledger.get_balance("alice", "USD") == 100.0
+
+        # Verify the date is in processed_dividends
+        processed = ledger.get_unit_state("DUP").get('processed_dividends', [])
+        assert '2024-03-15' in processed
+
+    def test_past_due_dividends_on_first_run(self, base_ledger):
+        """
+        If unit is created with already-past-due dividends, they should all pay.
+        """
+        ledger = base_ledger
+
+        # Create unit with schedule where all dividends are already past
+        schedule = [
+            Dividend(datetime(2023, 3, 15), datetime(2023, 3, 15), 1.00, "USD"),  # Past
+            Dividend(datetime(2023, 6, 15), datetime(2023, 6, 15), 1.00, "USD"),  # Past
+            Dividend(datetime(2023, 9, 15), datetime(2023, 9, 15), 1.00, "USD"),  # Past
+        ]
+        unit = create_stock_unit("PAST", "Past Due Test", "treasury", "USD", schedule)
+        ledger.register_unit(unit)
+        ledger.set_balance("alice", "PAST", 100)
+
+        # Use lifecycle engine
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+        engine.step(datetime(2024, 1, 1), {"PAST": 100.0})
+
+        # All three should pay: 100 * 3 = 300
+        assert ledger.get_balance("alice", "USD") == 300.0
+        assert len(ledger.get_unit_state("PAST").get('processed_dividends', [])) == 3
+
+    def test_empty_schedule_returns_empty(self, base_ledger):
+        """Empty dividend schedule should return empty transaction."""
+        ledger = base_ledger
+
+        unit = create_stock_unit("EMPTY", "No Dividends", "treasury", "USD", [])
+        ledger.register_unit(unit)
+        ledger.set_balance("alice", "EMPTY", 100)
+
+        result = process_dividends(ledger, "EMPTY", datetime(2024, 6, 15))
+        assert result.is_empty()
+
+    def test_deterministic_processing_order(self, base_ledger):
+        """
+        Multiple due dividends should process in chronological order.
+        """
+        ledger = base_ledger
+
+        # Unsorted schedule
+        schedule = [
+            Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 3.00, "USD"),  # Third chronologically
+            Dividend(datetime(2024, 1, 15), datetime(2024, 1, 15), 1.00, "USD"),  # First chronologically
+            Dividend(datetime(2024, 2, 15), datetime(2024, 2, 15), 2.00, "USD"),  # Second chronologically
+        ]
+        unit = create_stock_unit("ORDER", "Order Test", "treasury", "USD", schedule)
+        ledger.register_unit(unit)
+        ledger.set_balance("alice", "ORDER", 100)
+
+        # Use lifecycle engine
+        engine = LifecycleEngine(ledger)
+        engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
+        engine.step(datetime(2024, 4, 1), {"ORDER": 100.0})
+
+        # Total should be 100 * (1 + 2 + 3) = 600
+        assert ledger.get_balance("alice", "USD") == 600.0

@@ -14,11 +14,11 @@ from datetime import datetime, timedelta
 
 from ledger import (
     Ledger, cash,
-    Move, ContractResult,
+    Move,
     LifecycleEngine,
     create_deferred_cash_unit,
     compute_deferred_cash_settlement,
-    deferred_cash_transact as transact,
+    deferred_cash_transact,
     deferred_cash_contract,
     SYSTEM_WALLET,
 )
@@ -164,7 +164,6 @@ class TestComputeDeferredCashSettlement:
         # Register wallets
         ledger.register_wallet("buyer")
         ledger.register_wallet("seller")
-        ledger.register_wallet(SYSTEM_WALLET)
 
         # Fund buyer with cash
         ledger.set_balance("buyer", "USD", 50000.0)
@@ -199,20 +198,20 @@ class TestComputeDeferredCashSettlement:
         assert len(result.moves) == 2
 
         # Check cash payment
-        cash_move = next(m for m in result.moves if m.unit == "USD")
+        cash_move = next(m for m in result.moves if m.unit_symbol == "USD")
         assert cash_move.source == "buyer"
         assert cash_move.dest == "seller"
         assert cash_move.quantity == 15000.0
 
         # Check extinguishment
-        extinguish_move = next(m for m in result.moves if m.unit == "DC_trade_123")
+        extinguish_move = next(m for m in result.moves if m.unit_symbol == "DC_trade_123")
         assert extinguish_move.source == "buyer"
         assert extinguish_move.dest == SYSTEM_WALLET
         assert extinguish_move.quantity == 1.0
 
         # Check state update
-        assert "DC_trade_123" in result.state_updates
-        assert result.state_updates["DC_trade_123"]['settled'] is True
+        sc = next(d for d in result.state_changes if d.unit == "DC_trade_123")
+        assert sc.new_state['settled'] is True
 
     def test_settlement_before_payment_date_returns_empty(self, setup_ledger):
         """Settlement should not execute before payment date."""
@@ -252,7 +251,7 @@ class TestComputeDeferredCashSettlement:
         # First settlement
         ledger.advance_time(datetime(2024, 3, 17))
         result1 = compute_deferred_cash_settlement(ledger, "DC_trade_123", datetime(2024, 3, 17))
-        ledger.execute_contract(result1)
+        ledger.execute(result1)
 
         # Try second settlement
         result2 = compute_deferred_cash_settlement(ledger, "DC_trade_123", datetime(2024, 3, 17))
@@ -302,75 +301,13 @@ class TestComputeDeferredCashSettlement:
         # Execute settlement
         ledger.advance_time(datetime(2024, 3, 17))
         result = compute_deferred_cash_settlement(ledger, "DC_trade_123", datetime(2024, 3, 17))
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # Post-settlement balances
         assert ledger.get_balance("buyer", "USD") == 35000.0  # -15000
         assert ledger.get_balance("seller", "USD") == 15000.0  # +15000
         assert ledger.get_balance("buyer", "DC_trade_123") == 0.0  # Extinguished
         assert ledger.get_balance(SYSTEM_WALLET, "DC_trade_123") == 1.0  # Returned to system
-
-
-# ============================================================================
-# transact() Tests
-# ============================================================================
-
-class TestTransact:
-    """Tests for transact() event-driven interface."""
-
-    @pytest.fixture
-    def setup_ledger(self):
-        """Create a test ledger with DeferredCash obligation."""
-        ledger = Ledger("test", datetime(2024, 3, 15), verbose=False)
-        ledger.register_unit(cash("USD", "US Dollar"))
-        ledger.register_wallet("buyer")
-        ledger.register_wallet("seller")
-        ledger.register_wallet(SYSTEM_WALLET)
-        ledger.set_balance("buyer", "USD", 50000.0)
-        return ledger
-
-    def test_transact_settlement_event(self, setup_ledger):
-        """transact with SETTLEMENT event executes payment."""
-        ledger = setup_ledger
-
-        dc_unit = create_deferred_cash_unit(
-            symbol="DC_trade_123",
-            amount=10000.0,
-            currency="USD",
-            payment_date=datetime(2024, 3, 17),
-            payer_wallet="buyer",
-            payee_wallet="seller",
-        )
-        ledger.register_unit(dc_unit)
-        ledger.set_balance("buyer", "DC_trade_123", 1)
-
-        # Trigger settlement via transact
-        ledger.advance_time(datetime(2024, 3, 17))
-        result = transact(ledger, "DC_trade_123", "SETTLEMENT", datetime(2024, 3, 17))
-
-        assert not result.is_empty()
-        assert len(result.moves) == 2
-
-        # Execute
-        ledger.execute_contract(result)
-        assert ledger.get_balance("seller", "USD") == 10000.0
-
-    def test_transact_unknown_event_raises_error(self, setup_ledger):
-        """transact with unknown event type raises ValueError."""
-        ledger = setup_ledger
-
-        dc_unit = create_deferred_cash_unit(
-            symbol="DC_trade_123",
-            amount=10000.0,
-            currency="USD",
-            payment_date=datetime(2024, 3, 17),
-            payer_wallet="buyer",
-            payee_wallet="seller",
-        )
-        ledger.register_unit(dc_unit)
-
-        with pytest.raises(ValueError, match="Unknown event_type"):
-            transact(ledger, "DC_trade_123", "INVALID_EVENT", datetime(2024, 3, 17))
 
 
 # ============================================================================
@@ -387,7 +324,6 @@ class TestDeferredCashContractIntegration:
 
         ledger.register_wallet("buyer")
         ledger.register_wallet("seller")
-        ledger.register_wallet(SYSTEM_WALLET)
         ledger.set_balance("buyer", "USD", 100000.0)
 
         # Create DeferredCash
@@ -432,7 +368,6 @@ class TestDeferredCashContractIntegration:
 
         ledger.register_wallet("buyer")
         ledger.register_wallet("seller")
-        ledger.register_wallet(SYSTEM_WALLET)
         ledger.set_balance("buyer", "USD", 100000.0)
 
         # Create multiple DeferredCash obligations
@@ -499,7 +434,6 @@ class TestConservationLaws:
 
         ledger.register_wallet("buyer")
         ledger.register_wallet("seller")
-        ledger.register_wallet(SYSTEM_WALLET)
 
         # Initial USD supply
         ledger.set_balance("buyer", "USD", 100000.0)
@@ -526,7 +460,7 @@ class TestConservationLaws:
         # Execute settlement
         ledger.advance_time(datetime(2024, 3, 17))
         result = compute_deferred_cash_settlement(ledger, "DC_trade_123", datetime(2024, 3, 17))
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # USD supply unchanged after settlement
         assert ledger.total_supply("USD") == initial_usd_supply
@@ -542,7 +476,6 @@ class TestConservationLaws:
 
         ledger.register_wallet("buyer")
         ledger.register_wallet("seller")
-        ledger.register_wallet(SYSTEM_WALLET)
         ledger.set_balance("buyer", "USD", 100000.0)
 
         # Create DeferredCash
@@ -569,7 +502,7 @@ class TestConservationLaws:
         # Execute settlement
         ledger.advance_time(datetime(2024, 3, 17))
         result = compute_deferred_cash_settlement(ledger, "DC_trade_123", datetime(2024, 3, 17))
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # After extinguishment: buyer has 0, system has 1
         assert ledger.get_balance("buyer", "DC_trade_123") == 0.0
@@ -596,7 +529,6 @@ class TestT2SettlementPattern:
         # Register participants
         ledger.register_wallet("buyer")
         ledger.register_wallet("seller")
-        ledger.register_wallet(SYSTEM_WALLET)
 
         # Initial positions
         ledger.set_balance("buyer", "USD", 100000.0)
@@ -642,7 +574,7 @@ class TestT2SettlementPattern:
             "DC_trade_AAPL_20240315",
             settlement_date
         )
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # After settlement: cash paid, obligation extinguished
         assert ledger.get_balance("buyer", "USD") == 85000.0  # -15000
@@ -664,7 +596,6 @@ class TestT2SettlementPattern:
 
         ledger.register_wallet("buyer")
         ledger.register_wallet("seller")
-        ledger.register_wallet(SYSTEM_WALLET)
 
         ledger.set_balance("buyer", "USD", 200000.0)
         ledger.set_balance("seller", "AAPL", 100.0)
@@ -714,7 +645,6 @@ class TestDividendDeferredCashPattern:
 
         ledger.register_wallet("alice")
         ledger.register_wallet("treasury")
-        ledger.register_wallet(SYSTEM_WALLET)
 
         ledger.set_balance("treasury", "USD", 1000000.0)
 
@@ -748,7 +678,7 @@ class TestDividendDeferredCashPattern:
         # Execute payment on payment date
         ledger.advance_time(payment_date)
         result = compute_deferred_cash_settlement(ledger, dc_unit.symbol, payment_date)
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # Cash received, entitlement extinguished
         assert ledger.get_balance("alice", "USD") == 500.0
@@ -766,7 +696,6 @@ class TestDividendDeferredCashPattern:
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
         ledger.register_wallet("treasury")
-        ledger.register_wallet(SYSTEM_WALLET)
 
         ledger.set_balance("treasury", "USD", 1000000.0)
         ledger.set_balance("alice", "AAPL", 1000.0)
@@ -801,7 +730,7 @@ class TestDividendDeferredCashPattern:
         # Payment date: Alice still receives dividend
         ledger.advance_time(payment_date)
         result = compute_deferred_cash_settlement(ledger, dc_unit.symbol, payment_date)
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # Alice receives full dividend despite selling shares
         assert ledger.get_balance("alice", "USD") == 500.0

@@ -26,9 +26,11 @@ import random
 
 from ledger import (
     # Core
-    Ledger, Unit, Move, ExecuteResult, ContractResult,
-    StateDelta,
+    Ledger, Unit, Move, ExecuteResult,
+    UnitStateChange,
     cash,
+    build_transaction,
+    SYSTEM_WALLET,
     bilateral_transfer_rule,
 
     # Stock module
@@ -37,9 +39,9 @@ from ledger import (
 
     # Options module
     create_option_unit,
-    build_option_trade,
     compute_option_settlement,
     option_contract,
+    option_transact,
 
     # Forwards module
     create_forward_unit,
@@ -66,8 +68,6 @@ def example_basic_operations():
         name="demo",
         initial_time=datetime(2024, 1, 1, 9, 30, 0),
         verbose=True,
-        fast_mode=False,
-        no_log=False
     )
 
     # Register units (asset types)
@@ -86,31 +86,37 @@ def example_basic_operations():
     alice = ledger.register_wallet("alice")
     bob = ledger.register_wallet("bob")
     charlie = ledger.register_wallet("charlie")
-    mint = ledger.register_wallet("mint")
     market = ledger.register_wallet("market")
+    # SYSTEM_WALLET is auto-registered by the ledger
     print(f"Registered: {ledger.list_wallets()}\n")
 
-    # Issue currency (mint -> alice)
+    # Issue currency via SYSTEM_WALLET
     print("--- Transaction 1: Issue currency ---")
-    tx1 = ledger.create_transaction([
-        Move(source=mint, dest=alice, unit="USD", quantity=10000.0, contract_id="initial_funding")
+    tx1 = build_transaction(ledger, [
+        Move(quantity=10000.0, unit_symbol="USD", source=SYSTEM_WALLET, dest=alice, contract_id="initial_funding")
     ])
     ledger.execute(tx1)
 
     # Simple payment (alice -> bob)
     print("--- Transaction 2: Payment ---")
     ledger.advance_time(datetime(2024, 1, 1, 9, 31, 0))
-    tx2 = ledger.create_transaction([
-        Move(source=alice, dest=bob, unit="USD", quantity=150.75, contract_id="payment_001")
+    tx2 = build_transaction(ledger, [
+        Move(quantity=150.75, unit_symbol="USD", source=alice, dest=bob, contract_id="payment_001")
     ])
     ledger.execute(tx2)
+
+    # Fund market with stock via SYSTEM_WALLET
+    fund_market = build_transaction(ledger, [
+        Move(quantity=100.0, unit_symbol="AAPL", source=SYSTEM_WALLET, dest=market, contract_id="fund_market_aapl")
+    ])
+    ledger.execute(fund_market)
 
     # Multi-move transaction (stock purchase)
     print("--- Transaction 3: Stock Purchase (multi-move) ---")
     ledger.advance_time(datetime(2024, 1, 1, 9, 32, 0))
-    tx3 = ledger.create_transaction([
-        Move(source=alice, dest=market, unit="USD", quantity=5000.0, contract_id="trade_001"),
-        Move(source=market, dest=alice, unit="AAPL", quantity=25.0, contract_id="trade_001")
+    tx3 = build_transaction(ledger, [
+        Move(quantity=5000.0, unit_symbol="USD", source=alice, dest=market, contract_id="trade_001"),
+        Move(quantity=25.0, unit_symbol="AAPL", source=market, dest=alice, contract_id="trade_001")
     ])
     ledger.execute(tx3)
 
@@ -130,8 +136,8 @@ def example_basic_operations():
     # Rejection test
     print("\n--- Transaction 5: Insufficient Funds Test ---")
     ledger.advance_time(datetime(2024, 1, 1, 9, 33, 0))
-    tx_bad = ledger.create_transaction([
-        Move(source=charlie, dest=alice, unit="MSFT", quantity=10.0, contract_id="bad_trade")
+    tx_bad = build_transaction(ledger, [
+        Move(quantity=10.0, unit_symbol="MSFT", source=charlie, dest=alice, contract_id="bad_trade")
     ])
     result_bad = ledger.execute(tx_bad)
     print(f"Result: {result_bad}")
@@ -154,7 +160,7 @@ def example_memory_monitoring():
     print("="*80 + "\n")
 
     print("Creating ledger with sample data...")
-    mem_ledger = Ledger("memory_test", verbose=False, fast_mode=True, no_log=False)
+    mem_ledger = Ledger("memory_test", verbose=False)
     mem_ledger.register_unit(cash("USD", "US Dollar"))
     mem_ledger.register_unit(stock("AAPL", "Apple Inc.", issuer="AAPL"))
 
@@ -164,37 +170,13 @@ def example_memory_monitoring():
     print("Executing 10,000 transactions...")
     for i in range(10_000):
         mem_ledger.advance_time(mem_ledger.current_time + timedelta(microseconds=1))
-        tx = mem_ledger.create_transaction([
-            Move(source=trader, dest=broker, unit="USD", quantity=100.0, contract_id=f"trade_{i}")
+        tx = build_transaction(mem_ledger, [
+            Move(quantity=100.0, unit_symbol="USD", source=trader, dest=broker, contract_id=f"trade_{i}")
         ])
         mem_ledger.execute(tx)
 
     stats = mem_ledger.get_memory_stats()
     print(f"Memory stats: {stats}")
-
-    # Compare with no_log mode
-    print("\n--- Comparing with no_log=True ---")
-    nolog_ledger = Ledger("memory_test_nolog", verbose=False, fast_mode=True, no_log=True)
-    nolog_ledger.register_unit(cash("USD", "US Dollar"))
-    nolog_ledger.register_unit(stock("AAPL", "Apple Inc.", issuer="AAPL"))
-    nolog_trader = nolog_ledger.register_wallet("trader")
-    nolog_broker = nolog_ledger.register_wallet("broker")
-
-    print("Executing 10,000 transactions with no_log=True...")
-    for i in range(10_000):
-        nolog_ledger.advance_time(nolog_ledger.current_time + timedelta(microseconds=1))
-        tx = nolog_ledger.create_transaction([
-            Move(source=nolog_trader, dest=nolog_broker, unit="USD", quantity=100.0, contract_id=f"trade_{i}")
-        ])
-        nolog_ledger.execute(tx)
-
-    stats_no_log = nolog_ledger.get_memory_stats()
-    print(f"Memory stats (no_log): {stats_no_log}")
-
-    savings = stats['total'] - stats_no_log['total']
-    savings_pct = (savings / stats['total']) * 100 if stats['total'] > 0 else 0
-
-    print(f"Memory savings with no_log=True: {savings:,} bytes ({savings_pct:.1f}%)")
 
 
 def example_ledger_operations(ledger: Ledger):
@@ -210,8 +192,8 @@ def example_ledger_operations(ledger: Ledger):
     ledger_clone.verbose = False
 
     ledger_clone.advance_time(datetime(2024, 1, 1, 9, 34, 0))
-    tx_clone = ledger_clone.create_transaction([
-        Move(source="alice", dest="bob", unit="USD", quantity=100.0, contract_id="clone_payment")
+    tx_clone = build_transaction(ledger_clone, [
+        Move(quantity=100.0, unit_symbol="USD", source="alice", dest="bob", contract_id="clone_payment")
     ])
     ledger_clone.execute(tx_clone)
 
@@ -222,7 +204,7 @@ def example_ledger_operations(ledger: Ledger):
     # Replay ledger
     print("--- Replaying Ledger History ---")
     print("Creating new ledger by replaying all transactions...")
-    ledger_replay = ledger.replay(from_tx=0, fast_mode=True, no_log=False)
+    ledger_replay = ledger.replay(from_tx=0)
     ledger_replay.verbose = False
 
     print(f"Original Alice balance: ${ledger.get_balance('alice', 'USD'):.2f}")
@@ -239,18 +221,19 @@ def example_smart_contracts():
     print("Demonstrating the stock contract with scheduled dividends.")
     print("Dividends are scheduled at unit creation and paid automatically via LifecycleEngine.\n")
 
-    # Create quarterly dividend schedule as simple (date, amount) tuples
+    # Create quarterly dividend schedule using Dividend dataclass
+    from ledger import Dividend
     start_date = datetime(2024, 1, 1)
     schedule = [
-        (datetime(2024, 3, 29), 0.25),  # Q1 payment
-        (datetime(2024, 6, 28), 0.25),  # Q2 payment
-        (datetime(2024, 9, 27), 0.25),  # Q3 payment
-        (datetime(2024, 12, 27), 0.25), # Q4 payment
+        Dividend(ex_date=datetime(2024, 3, 29), payment_date=datetime(2024, 3, 29), amount_per_share=0.25, currency="USD"),
+        Dividend(ex_date=datetime(2024, 6, 28), payment_date=datetime(2024, 6, 28), amount_per_share=0.25, currency="USD"),
+        Dividend(ex_date=datetime(2024, 9, 27), payment_date=datetime(2024, 9, 27), amount_per_share=0.25, currency="USD"),
+        Dividend(ex_date=datetime(2024, 12, 27), payment_date=datetime(2024, 12, 27), amount_per_share=0.25, currency="USD"),
     ]
 
     print(f"Created dividend schedule with {len(schedule)} payments:")
-    for payment_date, amount in schedule:
-        print(f"  Payment: {payment_date.date()}, Amount: ${amount}")
+    for div in schedule:
+        print(f"  Payment: {div.payment_date.date()}, Amount: ${div.amount_per_share}")
 
     sc_ledger = Ledger("smart_contract_demo", initial_time=start_date, verbose=True)
     sc_ledger.register_unit(cash("USD", "US Dollar"))
@@ -269,25 +252,29 @@ def example_smart_contracts():
     alice = sc_ledger.register_wallet("alice")
     bob = sc_ledger.register_wallet("bob")
     charlie = sc_ledger.register_wallet("charlie")
-    mint = sc_ledger.register_wallet("mint")
+    # SYSTEM_WALLET is auto-registered by the ledger
 
-    tx = sc_ledger.create_transaction([
-        Move(source=mint, dest=treasury, unit="USD", quantity=100000.0, contract_id="treasury_funding")
+    tx = build_transaction(sc_ledger, [
+        Move(quantity=100000.0, unit_symbol="USD", source=SYSTEM_WALLET, dest=treasury, contract_id="treasury_funding"),
+        Move(quantity=175.0, unit_symbol="AAPL", source=SYSTEM_WALLET, dest=treasury, contract_id="treasury_shares"),
     ])
     sc_ledger.execute(tx)
 
     print("\n--- Distributing shares ---")
     sc_ledger.advance_time(datetime(2024, 1, 2, 9, 0, 0))
-    tx = sc_ledger.create_transaction([
-        Move(source=treasury, dest=alice, unit="AAPL", quantity=100.0, contract_id="initial_dist"),
-        Move(source=treasury, dest=bob, unit="AAPL", quantity=50.0, contract_id="initial_dist"),
-        Move(source=treasury, dest=charlie, unit="AAPL", quantity=25.0, contract_id="initial_dist")
+    tx = build_transaction(sc_ledger, [
+        Move(quantity=100.0, unit_symbol="AAPL", source=treasury, dest=alice, contract_id="initial_dist"),
+        Move(quantity=50.0, unit_symbol="AAPL", source=treasury, dest=bob, contract_id="initial_dist"),
+        Move(quantity=25.0, unit_symbol="AAPL", source=treasury, dest=charlie, contract_id="initial_dist")
     ])
     sc_ledger.execute(tx)
 
-    # Setup engine with stock_contract
+    # Setup engine with stock_contract and deferred_cash_contract
+    # The new dividend model: ex-date creates DeferredCash, which settles on payment_date
+    from ledger import deferred_cash_contract
     engine = LifecycleEngine(sc_ledger)
     engine.register("STOCK", stock_contract)
+    engine.register("DEFERRED_CASH", deferred_cash_contract)
 
     # Check balances BEFORE dividend
     print(f"\nBefore dividend payment:")
@@ -296,11 +283,12 @@ def example_smart_contracts():
 
     # Run engine to the first payment date (March 29, 2024)
     print("\n--- Running Engine to First Dividend Payment ---")
-    payment_date = schedule[0][0]
+    payment_date = schedule[0].payment_date
     txs = engine.step(payment_date, {})
 
     print(f"Executed {len(txs)} transaction(s) at {payment_date}")
-    assert len(txs) == 1, f"Expected 1 dividend transaction, got {len(txs)}"
+    # 4 transactions: 1 creates DeferredCash entitlements, 3 settle each holder
+    assert len(txs) == 4, f"Expected 4 dividend transactions, got {len(txs)}"
 
     # Check balances AFTER execution
     print(f"\nAfter dividend payment:")
@@ -320,11 +308,11 @@ def example_smart_contracts():
     assert charlie_usd == 6.25, f"Charlie should have $6.25, got ${charlie_usd}"
     print("\nAll dividend amounts verified!")
 
-    # Check that state was updated
+    # Check that state was updated (now tracks 'processed_dividends' instead of 'paid_dividends')
     state = sc_ledger.get_unit_state('AAPL')
-    paid_count = len(state.get('paid_dividends', []))
-    print(f"\nState updated: paid_dividends = {paid_count} record(s)")
-    assert paid_count == 1, f"Expected 1 paid dividend, got {paid_count}"
+    processed_count = len(state.get('processed_dividends', []))
+    print(f"\nState updated: processed_dividends = {processed_count} record(s)")
+    assert processed_count == 1, f"Expected 1 processed dividend, got {processed_count}"
 
 
 def example_load_test(
@@ -360,8 +348,6 @@ def example_load_test(
     load_ledger = Ledger(
         name="load_test",
         verbose=False,
-        fast_mode=True,  # Use fast mode for load testing
-        no_log=True      # Skip logging for maximum throughput
     )
 
     # Phase 1: Register units
@@ -419,8 +405,8 @@ def example_load_test(
 
     for i, (source, dest, unit, quantity) in enumerate(random_moves):
         load_ledger.advance_time(load_ledger.current_time + timedelta(microseconds=1))
-        tx = load_ledger.create_transaction([
-            Move(source=source, dest=dest, unit=unit, quantity=quantity, contract_id=f"trade_{i}")
+        tx = build_transaction(load_ledger, [
+            Move(quantity=quantity, unit_symbol=unit, source=source, dest=dest, contract_id=f"trade_{i}")
         ])
         load_ledger.execute(tx)
 
@@ -436,7 +422,7 @@ def example_load_test(
 
     # Results
     print("\n" + "=" * 80)
-    print("LOAD TEST RESULTS (fast_mode=True, no_log=True)")
+    print("LOAD TEST RESULTS")
     print("=" * 80)
     print(f"{'Phase':<40} {'Time':>10} {'Rate':>20}")
     print("-" * 80)
@@ -490,7 +476,7 @@ def example_precision():
     print("Demonstrating that unit rounding prevents floating-point drift...")
     print("Test: Transfer 0.01 USD 100 times (should equal exactly 1.00)\n")
 
-    precision_ledger = Ledger("precision_test", verbose=False, fast_mode=True)
+    precision_ledger = Ledger("precision_test", verbose=False)
     precision_ledger.register_unit(cash("USD", "US Dollar", decimal_places=2))
 
     a = precision_ledger.register_wallet("a")
@@ -498,8 +484,8 @@ def example_precision():
 
     for i in range(100):
         precision_ledger.advance_time(precision_ledger.current_time + timedelta(seconds=1))
-        tx = precision_ledger.create_transaction([
-            Move(source=a, dest=b, unit="USD", quantity=0.01, contract_id=f"t{i}")
+        tx = build_transaction(precision_ledger, [
+            Move(quantity=0.01, unit_symbol="USD", source=a, dest=b, contract_id=f"t{i}")
         ])
         precision_ledger.execute(tx)
 
@@ -520,8 +506,8 @@ def example_precision():
 
     for i in range(1000):
         precision_ledger.advance_time(precision_ledger.current_time + timedelta(microseconds=1))
-        tx = precision_ledger.create_transaction([
-            Move(source=trader1, dest=trader2, unit="AAPL", quantity=0.000001, contract_id=f"micro_{i}")
+        tx = build_transaction(precision_ledger, [
+            Move(quantity=0.000001, unit_symbol="AAPL", source=trader1, dest=trader2, contract_id=f"micro_{i}")
         ])
         precision_ledger.execute(tx)
 
@@ -544,13 +530,11 @@ def example_performance_benchmark():
     print("="*80 + "\n")
 
     print("Running performance benchmark with 50,000 transactions...")
-    print("(Testing different performance modes)\n")
 
     N = 50_000
 
-    def run_benchmark(fast_mode: bool, no_log: bool):
-        bench = Ledger("bench", initial_time=datetime(2024, 1, 1),
-                       verbose=False, fast_mode=fast_mode, no_log=no_log)
+    def run_benchmark():
+        bench = Ledger("bench", initial_time=datetime(2024, 1, 1), verbose=False)
         bench.register_unit(cash("USD", "US Dollar"))
         buyer = bench.register_wallet("buyer")
         seller = bench.register_wallet("seller")
@@ -558,43 +542,25 @@ def example_performance_benchmark():
         start = time.perf_counter()
         for i in range(N):
             bench.advance_time(bench.current_time + timedelta(microseconds=1))
-            tx = bench.create_transaction([
-                Move(source=buyer, dest=seller, unit="USD", quantity=100.0, contract_id=f"trade_{i}")
+            tx = build_transaction(bench, [
+                Move(quantity=100.0, unit_symbol="USD", source=buyer, dest=seller, contract_id=f"trade_{i}")
             ])
             bench.execute(tx)
         elapsed = time.perf_counter() - start
         return N / elapsed
 
-    print("1. Standard mode (validation + logging)...", end=" ", flush=True)
-    tps_std = run_benchmark(False, False)
-    print(f"{tps_std:,.0f} tx/sec")
-    time.sleep(1)
-
-    print("2. Fast mode (skip validation)...", end=" ", flush=True)
-    tps_fast = run_benchmark(True, False)
-    print(f"{tps_fast:,.0f} tx/sec ({tps_fast/tps_std:.2f}x)")
-    time.sleep(1)
-
-    print("3. No-log mode (skip logging)...", end=" ", flush=True)
-    tps_nolog = run_benchmark(False, True)
-    print(f"{tps_nolog:,.0f} tx/sec ({tps_nolog/tps_std:.2f}x)")
-    time.sleep(1)
-
-    print("4. Maximum speed (fast + no-log)...", end=" ", flush=True)
-    tps_max = run_benchmark(True, True)
-    print(f"{tps_max:,.0f} tx/sec ({tps_max/tps_std:.2f}x)")
+    print("Running benchmark...", end=" ", flush=True)
+    tps = run_benchmark()
+    print(f"{tps:,.0f} tx/sec")
 
     print("\n" + "="*80)
     print("PERFORMANCE SUMMARY")
     print("="*80)
-    print(f"{'Configuration':<35} {'Throughput':<20} {'Speedup':<15}")
-    print("-"*80)
-    print(f"{'Standard (validate + log)':<35} {f'{tps_std:,.0f} tx/sec':<20} {'1.00x baseline':<15}")
-    print(f"{'Fast mode (skip validation)':<35} {f'{tps_fast:,.0f} tx/sec':<20} {f'{tps_fast/tps_std:.2f}x faster':<15}")
-    print(f"{'No-log mode (skip logging)':<35} {f'{tps_nolog:,.0f} tx/sec':<20} {f'{tps_nolog/tps_std:.2f}x faster':<15}")
-    print(f"{'Maximum (fast + no-log)':<35} {f'{tps_max:,.0f} tx/sec':<20} {f'{tps_max/tps_std:.2f}x faster':<15}")
+    print(f"{'Configuration':<35} {'Throughput':<20}")
+    print("-"*60)
+    print(f"{'Standard mode':<35} {f'{tps:,.0f} tx/sec':<20}")
 
-    return tps_max
+    return tps
 
 
 def example_bilateral_options():
@@ -614,7 +580,7 @@ def example_bilateral_options():
     alice = ledger.register_wallet("alice")
     bob = ledger.register_wallet("bob")
     charlie = ledger.register_wallet("charlie")
-    mint = ledger.register_wallet("mint")
+    # SYSTEM_WALLET is auto-registered by the ledger
 
     # Create bilateral option using direct parameters
     otc_call = create_option_unit(
@@ -632,19 +598,19 @@ def example_bilateral_options():
     ledger.register_unit(otc_call)
 
     print("\n--- Initial Funding ---")
-    tx = ledger.create_transaction([
-        Move(source=mint, dest=alice, unit="USD", quantity=100000, contract_id="fund_alice"),
-        Move(source=mint, dest=bob, unit="USD", quantity=100000, contract_id="fund_bob"),
-        Move(source=mint, dest=charlie, unit="USD", quantity=100000, contract_id="fund_charlie"),
+    tx = build_transaction(ledger, [
+        Move(quantity=100000, unit_symbol="USD", source=SYSTEM_WALLET, dest=alice, contract_id="fund_alice"),
+        Move(quantity=100000, unit_symbol="USD", source=SYSTEM_WALLET, dest=bob, contract_id="fund_bob"),
+        Move(quantity=100000, unit_symbol="USD", source=SYSTEM_WALLET, dest=charlie, contract_id="fund_charlie"),
     ])
     ledger.execute(tx)
 
     print("\n--- Bob writes option to Alice (ALLOWED) ---")
     ledger.advance_time(datetime(2024, 6, 1))
     premium = 850.0
-    tx = ledger.create_transaction([
-        Move(source=alice, dest=bob, unit="USD", quantity=premium, contract_id="premium"),
-        Move(source=bob, dest=alice, unit="OTC_AAPL_CALL_150", quantity=1, contract_id="option_trade")
+    tx = build_transaction(ledger, [
+        Move(quantity=premium, unit_symbol="USD", source=alice, dest=bob, contract_id="premium"),
+        Move(quantity=1, unit_symbol="OTC_AAPL_CALL_150", source=bob, dest=alice, contract_id="option_trade")
     ])
     result = ledger.execute(tx)
     print(f"Result: {result}\n")
@@ -655,16 +621,16 @@ def example_bilateral_options():
 
     print("\n--- Alice tries to sell option to Charlie (REJECTED) ---")
     ledger.advance_time(datetime(2024, 6, 2))
-    tx_illegal = ledger.create_transaction([
-        Move(source=alice, dest=charlie, unit="OTC_AAPL_CALL_150", quantity=1, contract_id="illegal_transfer")
+    tx_illegal = build_transaction(ledger, [
+        Move(quantity=1, unit_symbol="OTC_AAPL_CALL_150", source=alice, dest=charlie, contract_id="illegal_transfer")
     ])
     result = ledger.execute(tx_illegal)
     print(f"Result: {result}")
 
     print("\n--- Alice closes position with Bob (ALLOWED) ---")
     ledger.advance_time(datetime(2024, 6, 3))
-    close_tx = ledger.create_transaction([
-        Move(source=alice, dest=bob, unit="OTC_AAPL_CALL_150", quantity=1, contract_id="close_position")
+    close_tx = build_transaction(ledger, [
+        Move(quantity=1, unit_symbol="OTC_AAPL_CALL_150", source=alice, dest=bob, contract_id="close_position")
     ])
     result = ledger.execute(close_tx)
     print(f"Result: {result}")
@@ -690,10 +656,14 @@ def example_clone_and_clone_at():
 
     alice = ledger.register_wallet("alice")
     bob = ledger.register_wallet("bob")
+    # SYSTEM_WALLET is auto-registered by the ledger
 
-    # Initial funding
-    ledger.balances[alice]["USD"] = 10_000
-    ledger.balances[alice]["AAPL"] = 100
+    # Initial funding via SYSTEM_WALLET
+    funding_tx = build_transaction(ledger, [
+        Move(10_000.0, "USD", SYSTEM_WALLET, alice, "fund_alice_usd"),
+        Move(100.0, "AAPL", SYSTEM_WALLET, alice, "fund_alice_aapl"),
+    ])
+    ledger.execute(funding_tx)
 
     print("--- Initial State (Jan 1) ---")
     clone_t0 = ledger.clone()
@@ -703,9 +673,9 @@ def example_clone_and_clone_at():
     # Day 1: Transfer
     print("\n--- Day 1 Transaction ---")
     ledger.advance_time(datetime(2025, 1, 2))
-    tx1 = ledger.create_transaction([
-        Move(alice, bob, "USD", 1000.0, "payment_1"),
-        Move(alice, bob, "AAPL", 25.0, "trade_1"),
+    tx1 = build_transaction(ledger, [
+        Move(1000.0, "USD", alice, bob, "payment_1"),
+        Move(25.0, "AAPL", alice, bob, "trade_1"),
     ])
     ledger.execute(tx1)
     print(f"Alice sends $1000 and 25 AAPL to Bob")
@@ -713,8 +683,8 @@ def example_clone_and_clone_at():
     # Day 2: Another transfer
     print("\n--- Day 2 Transaction ---")
     ledger.advance_time(datetime(2025, 1, 3))
-    tx2 = ledger.create_transaction([
-        Move(alice, bob, "USD", 500.0, "payment_2"),
+    tx2 = build_transaction(ledger, [
+        Move(500.0, "USD", alice, bob, "payment_2"),
     ])
     ledger.execute(tx2)
     print(f"Alice sends $500 to Bob")
@@ -755,7 +725,7 @@ def example_clone_and_clone_at():
     print("\n--- Divergent Timeline Demo ---")
     print("clone_at() returns a full Ledger that can execute new transactions.")
     clone_t1.advance_time(datetime(2025, 1, 2, 12, 0))
-    alt_tx = clone_t1.create_transaction([Move(bob, alice, "USD", 500.0, "refund")])
+    alt_tx = build_transaction(clone_t1, [Move(500.0, "USD", bob, alice, "refund")])
     clone_t1.execute(alt_tx)
     print(f"In alternate timeline: Bob refunds $500 to Alice")
     print(f"  Alternate Alice USD: ${clone_t1.get_balance('alice', 'USD'):,.2f}")
@@ -780,11 +750,15 @@ def example_lifecycle_engine():
 
     alice = ledger.register_wallet("alice")
     bob = ledger.register_wallet("bob")
+    # SYSTEM_WALLET is auto-registered by the ledger
 
-    # Fund wallets
-    ledger.balances[alice]["USD"] = 100_000
-    ledger.balances[bob]["USD"] = 100_000
-    ledger.balances[bob]["AAPL"] = 500
+    # Fund wallets via SYSTEM_WALLET
+    funding_tx = build_transaction(ledger, [
+        Move(100_000.0, "USD", SYSTEM_WALLET, alice, "fund_alice"),
+        Move(100_000.0, "USD", SYSTEM_WALLET, bob, "fund_bob"),
+        Move(500.0, "AAPL", SYSTEM_WALLET, bob, "fund_bob_aapl"),
+    ])
+    ledger.execute(funding_tx)
 
     # Create an option expiring on Jan 5
     print("--- Creating Option (maturity: Jan 5) ---")
@@ -817,9 +791,9 @@ def example_lifecycle_engine():
 
     # Trade: Bob writes option and forward to Alice
     print("\n--- Initial Trade ---")
-    trade_tx = ledger.create_transaction([
-        Move(bob, alice, "AAPL_C150", 2, "option_trade"),
-        Move(bob, alice, "AAPL_FWD", 1, "forward_trade"),
+    trade_tx = build_transaction(ledger, [
+        Move(2, "AAPL_C150", bob, alice, "option_trade"),
+        Move(1, "AAPL_FWD", bob, alice, "forward_trade"),
     ])
     ledger.execute(trade_tx)
     print(f"Alice: {ledger.get_balance(alice, 'AAPL_C150')} options, "
@@ -868,19 +842,16 @@ def print_summary():
 LEDGER MODES:
 
   Production (full audit trail):
-      ledger = Ledger("prod", verbose=False, fast_mode=False, no_log=False)
-
-  Monte Carlo simulations (maximum speed):
-      ledger = Ledger("mc", verbose=False, fast_mode=True, no_log=True)
+      ledger = Ledger("prod", verbose=False)
 
   Debugging:
-      ledger = Ledger("debug", verbose=True, fast_mode=False, no_log=False)
+      ledger = Ledger("debug", verbose=True)
 
 SPECIALIZED MODULES:
 
   Options (options.py):
     - create_option_unit(): Create bilateral option with transfer rules
-    - build_option_trade(): Build premium + option transfer moves
+    - option_transact(): Trade option contracts with premium payment
     - compute_option_settlement(): Compute settlement at maturity
 
   Forwards (forwards.py):

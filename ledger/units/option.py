@@ -12,9 +12,11 @@ import math
 from typing import Dict, Any, List
 
 from ..core import (
-    LedgerView, Move, ContractResult, Unit,
+    LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     bilateral_transfer_rule,
+    TransferRuleViolation,
     UNIT_TYPE_BILATERAL_OPTION,
+    build_transaction, empty_pending_transaction,
 )
 
 
@@ -79,58 +81,12 @@ def create_option_unit(
     )
 
 
-def build_option_trade(
-    option_symbol: str,
-    num_contracts: float,
-    premium_per_contract: float,
-    buyer: str,
-    seller: str,
-    premium_currency: str,
-    trade_id: str,
-) -> ContractResult:
-    """
-    Build moves for an option trade (premium payment + option transfer).
-
-    Args:
-        option_symbol: Symbol of the option to trade
-        num_contracts: Number of option contracts
-        premium_per_contract: Premium amount per contract
-        buyer: Wallet address of the buyer (long party)
-        seller: Wallet address of the seller (short party)
-        premium_currency: Currency for premium payment
-        trade_id: Unique identifier for this trade
-
-    Returns:
-        ContractResult containing moves for premium payment and option transfer.
-    """
-    total_premium = num_contracts * premium_per_contract
-
-    moves = [
-        Move(
-            source=buyer,
-            dest=seller,
-            unit=premium_currency,
-            quantity=total_premium,
-            contract_id=f"{trade_id}_premium",
-        ),
-        Move(
-            source=seller,
-            dest=buyer,
-            unit=option_symbol,
-            quantity=num_contracts,
-            contract_id=f"{trade_id}_option",
-        ),
-    ]
-
-    return ContractResult(moves=tuple(moves))
-
-
 def compute_option_settlement(
     view: LedgerView,
     option_symbol: str,
     settlement_price: float,
     force_settlement: bool = False,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Compute physical delivery settlement for a bilateral option.
 
@@ -141,7 +97,7 @@ def compute_option_settlement(
         force_settlement: If True, settle before maturity
 
     Returns:
-        ContractResult containing settlement moves and state updates.
+        PendingTransaction containing settlement moves and state updates.
 
     Settlement logic:
         CALL (ITM when settlement_price > strike):
@@ -163,18 +119,18 @@ def compute_option_settlement(
     state = view.get_unit_state(option_symbol)
 
     if state.get('settled'):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     maturity = state['maturity']
     if view.current_time < maturity and not force_settlement:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     long_wallet = state['long_wallet']
     short_wallet = state['short_wallet']
     long_position = view.get_balance(long_wallet, option_symbol)
 
     if long_position <= 0:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     strike = state['strike']
     quantity = state['quantity']
@@ -192,55 +148,54 @@ def compute_option_settlement(
 
         if option_type == 'call':
             moves.append(Move(
+                quantity=cash_amount,
+                unit_symbol=currency,
                 source=long_wallet,
                 dest=short_wallet,
-                unit=currency,
-                quantity=cash_amount,
                 contract_id=f'settle_{option_symbol}_cash',
             ))
             moves.append(Move(
+                quantity=underlying_amount,
+                unit_symbol=underlying,
                 source=short_wallet,
                 dest=long_wallet,
-                unit=underlying,
-                quantity=underlying_amount,
                 contract_id=f'settle_{option_symbol}_delivery',
             ))
         else:
             moves.append(Move(
+                quantity=underlying_amount,
+                unit_symbol=underlying,
                 source=long_wallet,
                 dest=short_wallet,
-                unit=underlying,
-                quantity=underlying_amount,
                 contract_id=f'settle_{option_symbol}_delivery',
             ))
             moves.append(Move(
+                quantity=cash_amount,
+                unit_symbol=currency,
                 source=short_wallet,
                 dest=long_wallet,
-                unit=currency,
-                quantity=cash_amount,
                 contract_id=f'settle_{option_symbol}_cash',
             ))
 
     # Close out option positions
     moves.append(Move(
+        quantity=long_position,
+        unit_symbol=option_symbol,
         source=long_wallet,
         dest=short_wallet,
-        unit=option_symbol,
-        quantity=long_position,
         contract_id=f'close_{option_symbol}',
     ))
 
     # Mark option as settled in unit state
-    state_updates = {
-        option_symbol: {
-            **state,
-            'settled': True,
-            'settlement_price': settlement_price,
-            'exercised': is_itm,
-        }
+    new_state = {
+        **state,
+        'settled': True,
+        'settlement_price': settlement_price,
+        'exercised': is_itm,
     }
+    state_changes = [UnitStateChange(unit=option_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 def get_option_intrinsic_value(
@@ -312,7 +267,7 @@ def compute_option_exercise(
     view: LedgerView,
     option_symbol: str,
     settlement_price: float,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Compute early exercise of an option (before maturity).
 
@@ -322,7 +277,7 @@ def compute_option_exercise(
         settlement_price: Current market price of the underlying
 
     Returns:
-        ContractResult with exercise settlement moves and state updates.
+        PendingTransaction with exercise settlement moves and state updates.
     """
     return compute_option_settlement(view, option_symbol, settlement_price, force_settlement=True)
 
@@ -330,56 +285,108 @@ def compute_option_exercise(
 def transact(
     view: LedgerView,
     symbol: str,
-    event_type: str,
-    event_date: datetime,
-    **kwargs
-) -> ContractResult:
+    seller: str,
+    buyer: str,
+    qty: float,
+    price: float,
+) -> PendingTransaction:
     """
-    Generate moves and state updates for an option lifecycle event.
+    Transfer option contracts from seller to buyer with premium payment.
 
-    This is the unified entry point for all option lifecycle events, routing
-    to the appropriate handler based on event_type.
+    This is the unified transaction interface for option trades. It creates
+    direct transfers between the seller and buyer, with proper validation
+    against the bilateral transfer rule.
 
     Args:
-        view: Read-only ledger access
+        view: Read-only ledger view
         symbol: Option symbol
-        event_type: Type of event (EXERCISE, EXPIRY, ASSIGNMENT)
-        event_date: When the event occurs
-        **kwargs: Event-specific parameters:
-            - For EXERCISE: settlement_price (float, required)
-            - For EXPIRY: settlement_price (float, required)
-            - For ASSIGNMENT: settlement_price (float, required)
+        seller: Wallet address of the seller (transferring contracts)
+        buyer: Wallet address of the buyer (receiving contracts)
+        qty: Number of option contracts to transfer (must be positive)
+        price: Premium per contract (must be non-negative)
 
     Returns:
-        ContractResult with moves and state_updates, or empty result
-        if event_type is unknown.
+        PendingTransaction containing moves for the option transfer and premium payment.
+
+    Raises:
+        ValueError: If qty <= 0, price < 0, price is not finite, seller == buyer,
+                   or option is already settled
+        TransferRuleViolation: If seller or buyer are not authorized counterparties
 
     Example:
-        # Exercise an option early
-        result = transact(ledger, "AAPL_CALL_150", "EXERCISE",
-                         datetime(2024, 6, 1), settlement_price=155.0)
-
-        # Expire an option at maturity
-        result = transact(ledger, "AAPL_CALL_150", "EXPIRY",
-                         datetime(2024, 12, 20), settlement_price=160.0)
+        # Trade 5 option contracts at $2.50 premium per contract
+        result = transact(view, "AAPL_CALL_150", "alice", "bob", 5.0, 2.50)
     """
-    settlement_price = kwargs.get('settlement_price')
+    # Validate inputs
+    if qty <= 0:
+        raise ValueError(f"qty must be positive, got {qty}")
+    if price < 0:
+        raise ValueError(f"price must be non-negative, got {price}")
+    if not math.isfinite(price):
+        raise ValueError(f"price must be finite, got {price}")
+    if seller == buyer:
+        raise ValueError(f"seller and buyer must be different, got {seller}")
 
-    if settlement_price is None:
-        # Cannot process option events without a settlement price
-        return ContractResult()
+    # Get option state
+    state = view.get_unit_state(symbol)
 
-    handlers = {
-        'EXERCISE': lambda: compute_option_exercise(view, symbol, settlement_price),
-        'EXPIRY': lambda: compute_option_settlement(view, symbol, settlement_price, force_settlement=False),
-        'ASSIGNMENT': lambda: compute_option_settlement(view, symbol, settlement_price, force_settlement=True),
-    }
+    # Check if option is settled
+    if state.get('settled'):
+        raise ValueError(f"Option {symbol} is already settled and cannot be traded")
 
-    handler = handlers.get(event_type)
-    if handler is None:
-        return ContractResult()  # Unknown event type - no action
+    # Validate bilateral transfer rule
+    long_wallet = state.get('long_wallet')
+    short_wallet = state.get('short_wallet')
 
-    return handler()
+    if not long_wallet or not short_wallet:
+        raise TransferRuleViolation(
+            f"Bilateral unit {symbol} missing counterparty state"
+        )
+
+    # Build set of authorized wallets (includes novation source if present)
+    novation_from = state.get('_novation_from')
+    authorized = {long_wallet, short_wallet}
+    if novation_from:
+        authorized.add(novation_from)
+
+    # Check if seller and buyer are authorized
+    if seller not in authorized:
+        raise TransferRuleViolation(
+            f"Bilateral {symbol}: {seller} not authorized to trade"
+        )
+    if buyer not in authorized:
+        raise TransferRuleViolation(
+            f"Bilateral {symbol}: {buyer} not authorized to trade"
+        )
+
+    # Get currency from state
+    currency = state.get('currency', 'USD')
+
+    # Build moves
+    moves: List[Move] = []
+
+    # Move 1: Transfer option contracts from seller to buyer
+    moves.append(Move(
+        quantity=qty,
+        unit_symbol=symbol,
+        source=seller,
+        dest=buyer,
+        contract_id=f"option_trade_{symbol}_contract",
+    ))
+
+    # Move 2: Premium payment from buyer to seller (if price > 0)
+    # Skip premium payment if price is effectively zero
+    if price > 0:
+        total_premium = qty * price
+        moves.append(Move(
+            quantity=total_premium,
+            unit_symbol=currency,
+            source=buyer,
+            dest=seller,
+            contract_id=f"option_trade_{symbol}_premium",
+        ))
+
+    return build_transaction(view, moves)
 
 
 def option_contract(
@@ -387,7 +394,7 @@ def option_contract(
     symbol: str,
     timestamp: datetime,
     prices: Dict[str, float]
-) -> ContractResult:
+) -> PendingTransaction:
     """
     SmartContract function for bilateral options.
 
@@ -402,20 +409,20 @@ def option_contract(
         prices: Dictionary mapping asset symbols to their current prices
 
     Returns:
-        ContractResult with settlement moves if conditions are met, empty otherwise.
+        PendingTransaction with settlement moves if conditions are met, empty otherwise.
     """
     state = view.get_unit_state(symbol)
 
     if state.get('settled'):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     maturity = state.get('maturity')
     if not maturity or timestamp < maturity:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     underlying = state.get('underlying')
     settlement_price = prices.get(underlying)
     if settlement_price is None:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     return compute_option_settlement(view, symbol, settlement_price)

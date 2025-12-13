@@ -9,7 +9,7 @@ Key responsibilities:
     - Executes transactions atomically (all moves succeed or all fail)
     - Maintains wallet balances and unit (asset) definitions
     - Tracks time and provides temporal operations (clone_at, replay)
-    - Provides performance modes (fast_mode, no_log) for different use cases
+    - Always validates and always logs - no exceptions
 """
 
 from __future__ import annotations
@@ -22,8 +22,9 @@ import sys
 
 from .core import (
     # Types
-    Move, Transaction, ContractResult, Unit,
-    ExecuteResult, LedgerView, StateDelta,
+    Move, Transaction, Unit,
+    PendingTransaction,
+    ExecuteResult, LedgerView,
     Positions, UnitState, BalanceMap,
     # Constants
     QUANTITY_EPSILON, SYSTEM_WALLET,
@@ -35,46 +36,28 @@ from .core import (
 
 class Ledger:
     """
-    High-performance double-entry accounting ledger.
+    Double-entry accounting ledger with full validation and audit trail.
 
     Implements the LedgerView protocol, allowing the ledger to be passed to pure
     functions that access only read-only methods.
 
-    Performance Modes:
-        fast_mode=True: Skip validation checks for approximately 30% performance gain.
-            Skipped validations include:
-            - Balance constraint checks (min/max balance limits)
-            - Transfer rule enforcement
-            - Timestamp validation
-
-            Note: Wallet and unit registration are always validated, even in fast_mode.
-
-            WARNING: Invalid transactions will corrupt state silently in fast_mode.
-            Use this mode only when all inputs are trusted (e.g., replaying verified
-            transaction logs).
-
-        no_log=True: Disable transaction logging for approximately 25% performance gain.
-            Consequences:
-            - clone_at() and replay() will raise LedgerError
-            - No audit trail is maintained
-
-            Use this mode for simulations or scenarios where historical state
-            reconstruction is not required.
-
-        Combined modes: Using both fast_mode and no_log provides approximately 2x
-        performance improvement over full validation and logging.
+    Design Principles:
+        - Always validates: Every transaction is validated against balance constraints,
+          transfer rules, and timestamp requirements. No shortcuts.
+        - Always logs: Every transaction is recorded in the audit trail, enabling
+          clone_at() and replay() for historical state reconstruction.
 
     Thread Safety:
         Not thread-safe. Each thread should maintain its own Ledger instance.
 
     Example:
-        ledger = Ledger("main", fast_mode=True, no_log=True)
+        ledger = Ledger("main")
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
 
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "USD", 100.0, "payment_001")
+        tx = build_transaction(ledger, [
+            Move(100.0, "USD", "alice", "bob", "payment_001")
         ])
         result = ledger.execute(tx)
     """
@@ -85,22 +68,32 @@ class Ledger:
         self,
         name: str,
         initial_time: Optional[datetime] = None,
-        verbose: bool = True,
-        fast_mode: bool = False,
-        no_log: bool = False
+        verbose: bool = True
     ):
+        """
+        Create a ledger.
+
+        Args:
+            name: Ledger identifier
+            initial_time: Starting time for the ledger (default: 1970-01-01)
+            verbose: Enable debug output (default: True)
+        """
         self.name = name
         self.balances: Dict[str, Dict[str, float]] = {}
         self.units: Dict[str, Unit] = {}
         self.registered_wallets: Set[str] = set()
-        self.seen_tx_ids: Set[str] = set()
+        self.seen_intent_ids: Set[str] = set()  # For idempotency (content-based)
         self.transaction_log: List[Transaction] = []
         self._current_time: datetime = initial_time or datetime(1970, 1, 1)
         self.verbose = verbose
-        self.fast_mode = fast_mode
-        self.no_log = no_log
+        # Monotonic sequence counter for execution ordering
+        self._next_sequence: int = 0
         # Inverted index mapping unit -> {wallet -> quantity} for O(1) position lookups
         self._positions_by_unit: Dict[str, Dict[str, float]] = defaultdict(dict)
+
+        # Auto-register the system wallet (used for unit issuance/redemption)
+        self.registered_wallets.add(SYSTEM_WALLET)
+        self.balances[SYSTEM_WALLET] = defaultdict(float)
 
     # ========================================================================
     # LedgerView PROTOCOL IMPLEMENTATION (read-only methods)
@@ -111,13 +104,13 @@ class Ledger:
         """Current logical time of the ledger."""
         return self._current_time
 
-    def get_balance(self, wallet: str, unit: str) -> float:
+    def get_balance(self, wallet_id: str, unit_symbol: str) -> float:
         """
         Get the balance of a specific unit in a wallet.
 
         Args:
-            wallet: Wallet identifier
-            unit: Unit symbol
+            wallet_id: Wallet identifier
+            unit_symbol: Unit symbol
 
         Returns:
             Current balance (0.0 if wallet has no balance for this unit)
@@ -126,11 +119,11 @@ class Ledger:
             WalletNotRegistered: If wallet is not registered
             UnitNotRegistered: If unit is not registered
         """
-        if wallet not in self.registered_wallets:
-            raise WalletNotRegistered(f"Wallet {wallet} not registered")
-        if unit not in self.units:
-            raise UnitNotRegistered(f"Unit {unit} not registered")
-        return self.balances[wallet].get(unit, 0.0)
+        if wallet_id not in self.registered_wallets:
+            raise WalletNotRegistered(f"Wallet {wallet_id} not registered")
+        if unit_symbol not in self.units:
+            raise UnitNotRegistered(f"Unit {unit_symbol} not registered")
+        return self.balances[wallet_id].get(unit_symbol, 0.0)
 
     def get_unit_state(self, unit_symbol: str) -> UnitState:
         """
@@ -140,7 +133,7 @@ class Ledger:
         the ledger's internal state.
 
         Args:
-            unit_symbol: Symbol of the unit
+            unit_symbol: Unit symbol
 
         Returns:
             Deep copy of the unit's state dictionary (empty dict if no state)
@@ -150,8 +143,8 @@ class Ledger:
         """
         if unit_symbol not in self.units:
             raise UnitNotRegistered(f"Unit {unit_symbol} not registered")
-        unit = self.units[unit_symbol]
-        return self._deep_copy_state(unit._state) if unit._state else {}
+        unit_obj = self.units[unit_symbol]
+        return self._deep_copy_state(unit_obj._state) if unit_obj._state else {}
 
     def get_positions(self, unit_symbol: str) -> Positions:
         """
@@ -160,7 +153,7 @@ class Ledger:
         Uses an inverted index for O(1) lookup performance.
 
         Args:
-            unit_symbol: Symbol of the unit
+            unit_symbol: Unit symbol
 
         Returns:
             Dictionary mapping wallet IDs to their non-zero balances for this unit
@@ -181,13 +174,13 @@ class Ledger:
             raise UnitNotRegistered(f"Unit {symbol} not registered")
         return self.units[symbol]
 
-    def get_wallet_balances(self, wallet: str) -> BalanceMap:
+    def get_wallet_balances(self, wallet_id: str) -> BalanceMap:
         """Get all balances for a wallet."""
-        if wallet not in self.registered_wallets:
-            raise WalletNotRegistered(f"Wallet {wallet} not registered")
-        return dict(self.balances[wallet])
+        if wallet_id not in self.registered_wallets:
+            raise WalletNotRegistered(f"Wallet {wallet_id} not registered")
+        return dict(self.balances[wallet_id])
 
-    def total_supply(self, unit: str) -> float:
+    def total_supply(self, unit_symbol: str) -> float:
         """
         Calculate total supply of a unit across all wallets.
 
@@ -195,7 +188,7 @@ class Ledger:
         accumulation order.
 
         Args:
-            unit: Unit symbol
+            unit_symbol: Unit symbol
 
         Returns:
             Total supply across all wallets
@@ -203,9 +196,9 @@ class Ledger:
         Raises:
             UnitNotRegistered: If unit is not registered
         """
-        if unit not in self.units:
-            raise UnitNotRegistered(f"Unit {unit} not registered")
-        return sum(self.balances[w].get(unit, 0.0) for w in sorted(self.registered_wallets))
+        if unit_symbol not in self.units:
+            raise UnitNotRegistered(f"Unit {unit_symbol} not registered")
+        return sum(self.balances[w].get(unit_symbol, 0.0) for w in sorted(self.registered_wallets))
 
     def verify_double_entry(
         self,
@@ -282,9 +275,9 @@ class Ledger:
             'discrepancies': discrepancies,
         }
 
-    def is_registered(self, wallet: str) -> bool:
+    def is_registered(self, wallet_id: str) -> bool:
         """Check if a wallet is registered."""
-        return wallet in self.registered_wallets
+        return wallet_id in self.registered_wallets
 
     # ========================================================================
     # TIME MANAGEMENT
@@ -350,7 +343,7 @@ class Ledger:
             rule_str = f", rule={unit.transfer_rule.__name__}" if unit.transfer_rule else ""
             print(f"📝 Registered: {unit.symbol} ({unit.name}) [{unit.unit_type}]{rule_str}")
 
-    def set_balance(self, wallet: str, unit: str, quantity: float) -> None:
+    def set_balance(self, wallet_id: str, unit_symbol: str, quantity: float) -> None:
         """
         Set a wallet's balance for a unit directly.
 
@@ -364,16 +357,16 @@ class Ledger:
         double-entry invariants (every credit has a corresponding debit).
 
         Args:
-            wallet: Wallet to update
-            unit: Unit symbol
+            wallet_id: Wallet identifier to update
+            unit_symbol: Unit symbol
             quantity: New balance (overwrites existing)
         """
-        if wallet not in self.registered_wallets:
-            raise WalletNotRegistered(f"Wallet {wallet} not registered")
-        if unit not in self.units:
-            raise UnitNotRegistered(f"Unit {unit} not registered")
-        self.balances[wallet][unit] = quantity
-        self._update_position_index(wallet, unit, quantity)
+        if wallet_id not in self.registered_wallets:
+            raise WalletNotRegistered(f"Wallet {wallet_id} not registered")
+        if unit_symbol not in self.units:
+            raise UnitNotRegistered(f"Unit {unit_symbol} not registered")
+        self.balances[wallet_id][unit_symbol] = quantity
+        self._update_position_index(wallet_id, unit_symbol, quantity)
 
     def update_unit_state(self, unit_symbol: str, state_updates: UnitState) -> None:
         """
@@ -383,7 +376,7 @@ class Ledger:
         no existing state, an empty state dictionary is created first.
 
         Args:
-            unit_symbol: Symbol of the unit to update
+            unit_symbol: Unit symbol to update
             state_updates: Dictionary of state keys and values to update
 
         Raises:
@@ -391,134 +384,116 @@ class Ledger:
         """
         if unit_symbol not in self.units:
             raise UnitNotRegistered(f"Unit {unit_symbol} not registered")
-        unit = self.units[unit_symbol]
-        if unit._state is None:
-            unit._state = {}
-        unit._state.update(state_updates)
+        unit_obj = self.units[unit_symbol]
+        if unit_obj._state is None:
+            unit_obj._state = {}
+        unit_obj._state.update(state_updates)
 
     # ========================================================================
     # TRANSACTION EXECUTION (Mutating)
     # ========================================================================
 
-    def _deterministic_tx_id(self, moves: Tuple[Move, ...]) -> str:
+    def _generate_exec_id(self, sequence: int) -> str:
         """
-        Generate a deterministic transaction ID from move contents.
+        Generate a unique execution ID.
 
-        The ID is derived from a SHA-256 hash of:
-        - Current ledger time
-        - Ledger name
-        - All move details (source, dest, unit, quantity, contract_id)
+        Format: exec:{ledger_name}:{sequence:012d}:{timestamp_micros}
+        This is globally unique and monotonically increasing within a ledger.
+        """
+        micros = int(self._current_time.timestamp() * 1_000_000)
+        return f"exec:{self.name}:{sequence:012d}:{micros}"
 
-        This ensures reproducibility: identical inputs produce identical IDs.
+    def execute(self, pending: PendingTransaction) -> ExecuteResult:
+        """
+        Execute a PendingTransaction atomically.
+
+        All moves succeed together or all fail together.
+        Execution is idempotent: a pending transaction with the same intent_id
+        will not be applied twice.
+
+        All transactions are fully validated against:
+        - Unit and wallet registration
+        - Balance constraints (min/max balance limits)
+        - Transfer rules
+        - Timestamp requirements
 
         Args:
-            moves: Tuple of moves to hash
-
-        Returns:
-            16-character hex string (first 16 chars of SHA-256 hash)
-        """
-        content = f"{self._current_time.isoformat()}:{self.name}:"
-        for m in moves:
-            content += f"{m.source},{m.dest},{m.unit},{m.quantity},{m.contract_id};"
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
-
-    def create_transaction(
-        self,
-        moves: List[Move],
-        tx_id: Optional[str] = None
-    ) -> Transaction:
-        """
-        Create a new transaction with the current ledger time as timestamp.
-
-        If no tx_id is provided, a deterministic ID is generated from:
-        - Current timestamp
-        - Ledger name
-        - Move details (source, dest, unit, quantity, contract_id)
-
-        This ensures reproducibility: identical inputs produce identical transaction IDs.
-
-        Args:
-            moves: List of moves to include in the transaction
-            tx_id: Optional custom transaction ID (auto-generated if not provided)
-
-        Returns:
-            A new Transaction object
-        """
-        moves_tuple = tuple(moves)
-        return Transaction(
-            moves=moves_tuple,
-            tx_id=tx_id or self._deterministic_tx_id(moves_tuple),
-            timestamp=self._current_time,
-            ledger_name=self.name
-        )
-
-    def execute(
-        self,
-        tx: Transaction,
-        fast_mode: Optional[bool] = None
-    ) -> ExecuteResult:
-        """
-        Execute a transaction atomically.
-
-        All moves in the transaction succeed together or all fail together.
-        Execution is idempotent: a transaction with the same tx_id will not
-        be applied twice.
-
-        Validation behavior:
-        - Units and wallets are always validated, regardless of fast_mode
-        - In normal mode: balance constraints, transfer rules, and timestamps are validated
-        - In fast_mode: balance constraints, transfer rules, and timestamps are skipped
-
-        Args:
-            tx: Transaction to execute
-            fast_mode: Override ledger's fast_mode setting for this transaction
+            pending: PendingTransaction to execute
 
         Returns:
             ExecuteResult.APPLIED if successful
             ExecuteResult.ALREADY_APPLIED if transaction was already executed
             ExecuteResult.REJECTED if validation failed
         """
-        use_fast_mode = fast_mode if fast_mode is not None else self.fast_mode
+        # Handle empty pending transactions
+        if pending.is_empty():
+            return ExecuteResult.APPLIED
 
-        # Idempotency check
-        if tx.tx_id in self.seen_tx_ids:
+        # Idempotency check based on intent_id (content hash)
+        if pending.intent_id in self.seen_intent_ids:
             if self.verbose:
-                self._print_tx_result(tx, "ALREADY_APPLIED", "⚠️")
+                print(f"⚠️  ALREADY_APPLIED: intent_id={pending.intent_id}")
             return ExecuteResult.ALREADY_APPLIED
 
-        # Record execution time
-        object.__setattr__(tx, 'execution_time', self._current_time)
+        # Register any units that need to be created as part of this transaction
+        for unit in pending.units_to_create:
+            if unit.symbol not in self.units:
+                self.register_unit(unit)
 
-        # Always validate units and wallets exist (even in fast mode)
-        for move in tx.moves:
-            if move.unit not in self.units:
+        # Validate units and wallets exist
+        for move in pending.moves:
+            if move.unit_symbol not in self.units:
                 if self.verbose:
-                    self._print_tx_result(tx, f"REJECTED: unit not registered: {move.unit}", "✗")
+                    print(f"✗ REJECTED: unit not registered: {move.unit_symbol}")
                 return ExecuteResult.REJECTED
             if move.source not in self.registered_wallets:
                 if self.verbose:
-                    self._print_tx_result(tx, f"REJECTED: wallet not registered: {move.source}", "✗")
+                    print(f"✗ REJECTED: wallet not registered: {move.source}")
                 return ExecuteResult.REJECTED
             if move.dest not in self.registered_wallets:
                 if self.verbose:
-                    self._print_tx_result(tx, f"REJECTED: wallet not registered: {move.dest}", "✗")
+                    print(f"✗ REJECTED: wallet not registered: {move.dest}")
                 return ExecuteResult.REJECTED
 
-        # Full validation (skip in fast mode)
-        if not use_fast_mode:
-            valid, reason = self._validate_transaction(tx)
-            if not valid:
-                if self.verbose:
-                    self._print_tx_result(tx, f"REJECTED: {reason}", "✗")
-                return ExecuteResult.REJECTED
+        # Full validation
+        valid, reason = self._validate_pending(pending)
+        if not valid:
+            if self.verbose:
+                print(f"✗ REJECTED: {reason}")
+            return ExecuteResult.REJECTED
+
+        # Generate execution ID and sequence
+        sequence = self._next_sequence
+        self._next_sequence += 1
+        exec_id = self._generate_exec_id(sequence)
+
+        # Create the executed Transaction record
+        tx = Transaction(
+            moves=pending.moves,
+            state_changes=pending.state_changes,
+            origin=pending.origin,
+            timestamp=pending.timestamp,
+            intent_id=pending.intent_id,
+            exec_id=exec_id,
+            ledger_name=self.name,
+            execution_time=self._current_time,
+            sequence_number=sequence,
+            units_to_create=pending.units_to_create,
+        )
 
         # Apply moves
         self._execute_moves(tx.moves)
 
-        # Log transaction
-        if not self.no_log:
-            self.transaction_log.append(tx)
-        self.seen_tx_ids.add(tx.tx_id)
+        # Apply state updates from state_changes
+        for sc in tx.state_changes:
+            if sc.unit in self.units:
+                self.units[sc.unit]._state = self._deep_copy_state(
+                    sc.new_state if isinstance(sc.new_state, dict) else {}
+                )
+
+        # Log transaction (always - audit trail is mandatory)
+        self.transaction_log.append(tx)
+        self.seen_intent_ids.add(pending.intent_id)
 
         if self.verbose:
             self._print_tx_result(tx, "APPLIED", "✓")
@@ -526,126 +501,34 @@ class Ledger:
 
     def _print_tx_result(self, tx: Transaction, result: str, icon: str) -> None:
         """
-        Print transaction details and result in a formatted Unicode box.
+        Print transaction details and result.
 
-        Displays transaction metadata, moves, state deltas, and execution result
-        in a 100-character wide box with Unicode border characters.
+        Uses Transaction.__repr__ and appends a result line.
 
         Args:
             tx: Transaction to display
             result: Result string (e.g., "APPLIED", "REJECTED: reason")
             icon: Icon to display with result (e.g., "✓", "✗", "⚠️")
         """
-        w = 100  # Inner content width
+        # Get the repr output and replace the closing line with result
+        tx_repr = repr(tx)
+        # Replace the last line (└───┘) with a result section
+        lines = tx_repr.split('\n')
+        w = 100
         bar = "─" * w
-
         def pad(text: str) -> str:
-            """Pad or truncate text to exactly w characters."""
             if len(text) > w:
                 return text[:w-3] + "..."
             return text + " " * (w - len(text))
-
-        lines = [
-            "",
-            f"┌{bar}┐",
-            f"│{pad(' Transaction: ' + tx.tx_id)}│",
-            f"├{bar}┤",
-            f"│{pad('   timestamp      : ' + str(tx.timestamp))}│",
-            f"│{pad('   ledger_name    : ' + tx.ledger_name)}│",
-            f"│{pad('   execution_time : ' + str(tx.execution_time))}│",
-            f"│{pad('   contract_ids   : ' + str(set(tx.contract_ids)))}│",
-            f"├{bar}┤",
-            f"│{pad(' Moves (' + str(len(tx.moves)) + '):')}│",
-        ]
-        for i, move in enumerate(tx.moves):
-            move_str = f"   [{i}] {move.source} → {move.dest}: {move.quantity} {move.unit}"
-            lines.append(f"│{pad(move_str)}│")
-        if tx.state_deltas:
-            lines.append(f"├{bar}┤")
-            lines.append(f"│{pad(' State Deltas (' + str(len(tx.state_deltas)) + '):')}│")
-            for delta in tx.state_deltas:
-                lines.append(f"│{pad('   [' + delta.unit + ']')}│")
-                lines.append(f"│{pad('      old: ' + str(delta.old_state))}│")
-                lines.append(f"│{pad('      new: ' + str(delta.new_state))}│")
-        lines.append(f"├{bar}┤")
+        # Remove the closing line and add result
+        lines[-1] = f"├{bar}┤"
         lines.append(f"│{pad(' ' + icon + ' ' + result)}│")
         lines.append(f"└{bar}┘")
         print("\n".join(lines))
 
-    def execute_contract(self, result: ContractResult) -> ExecuteResult:
+    def _validate_pending(self, pending: PendingTransaction) -> Tuple[bool, str]:
         """
-        Execute a ContractResult atomically.
-
-        Execution order:
-        1. Execute moves (if any)
-        2. Apply state updates (if moves succeeded or there are no moves)
-
-        If moves fail validation, state updates are not applied.
-
-        State changes are captured as StateDelta objects containing deep copies
-        of both old and new state. This ensures the transaction log contains
-        immutable snapshots that won't be corrupted by later mutations.
-
-        Args:
-            result: ContractResult containing moves and state updates
-
-        Returns:
-            ExecuteResult.APPLIED if successful
-            ExecuteResult.ALREADY_APPLIED or ExecuteResult.REJECTED if moves failed
-        """
-        if result.is_empty():
-            return ExecuteResult.APPLIED
-
-        # Capture state changes with deep copies
-        # Deep copying ensures transaction log contains immutable snapshots
-        state_deltas = []
-        for unit_symbol, updates in result.state_updates.items():
-            old_state = self.get_unit_state(unit_symbol)  # Already a deep copy
-            new_state = self._deep_copy_state({**old_state, **updates})
-            state_deltas.append(StateDelta(
-                unit=unit_symbol,
-                old_state=old_state,
-                new_state=new_state
-            ))
-
-        # Execute moves with state deltas attached
-        if result.moves:
-            moves_tuple = tuple(result.moves)
-            tx = Transaction(
-                moves=moves_tuple,
-                tx_id=self._deterministic_tx_id(moves_tuple),
-                timestamp=self._current_time,
-                ledger_name=self.name,
-                state_deltas=tuple(state_deltas)
-            )
-            exec_result = self.execute(tx)
-            if exec_result != ExecuteResult.APPLIED:
-                return exec_result
-        elif state_deltas and not self.no_log:
-            # State-only update (no moves) - generate ID from state deltas
-            state_content = f"{self._current_time.isoformat()}:{self.name}:state:"
-            for delta in state_deltas:
-                state_content += f"{delta.unit};"
-            tx_id = hashlib.sha256(state_content.encode()).hexdigest()[:16]
-            tx = Transaction(
-                moves=(),
-                tx_id=tx_id,
-                timestamp=self._current_time,
-                ledger_name=self.name,
-                state_deltas=tuple(state_deltas)
-            )
-            self.transaction_log.append(tx)
-            self.seen_tx_ids.add(tx.tx_id)
-
-        # Apply state updates
-        for unit_symbol, updates in result.state_updates.items():
-            self.update_unit_state(unit_symbol, updates)
-
-        return ExecuteResult.APPLIED
-
-    def _validate_transaction(self, tx: Transaction) -> Tuple[bool, str]:
-        """
-        Validate transaction against all constraints.
+        Validate pending transaction against all constraints.
 
         Checks performed:
         1. Timestamp validation (transaction must not be from the future)
@@ -654,7 +537,7 @@ class Ledger:
         4. Balance constraint validation (min/max balance limits)
 
         Args:
-            tx: Transaction to validate
+            pending: PendingTransaction to validate
 
         Returns:
             Tuple of (success: bool, reason: str)
@@ -662,20 +545,20 @@ class Ledger:
             If success is False, reason describes the validation failure
         """
         # Timestamp check
-        if tx.timestamp > self._current_time:
+        if pending.timestamp > self._current_time:
             return False, "future timestamp"
 
         # Check units, wallets, and transfer rules
-        for move in tx.moves:
-            if move.unit not in self.units:
-                return False, f"unit not registered: {move.unit}"
+        for move in pending.moves:
+            if move.unit_symbol not in self.units:
+                return False, f"unit not registered: {move.unit_symbol}"
             if not self.is_registered(move.source):
                 return False, f"wallet not registered: {move.source}"
             if not self.is_registered(move.dest):
                 return False, f"wallet not registered: {move.dest}"
 
             # Transfer rule check (pass self as LedgerView)
-            unit = self.units[move.unit]
+            unit = self.units[move.unit_symbol]
             if unit.transfer_rule:
                 try:
                     unit.transfer_rule(self, move)
@@ -684,10 +567,10 @@ class Ledger:
 
         # Calculate net balance changes with proper rounding
         net: Dict[Tuple[str, str], float] = {}
-        for move in tx.moves:
-            unit = self.units[move.unit]
-            key_src = (move.source, move.unit)
-            key_dst = (move.dest, move.unit)
+        for move in pending.moves:
+            unit = self.units[move.unit_symbol]
+            key_src = (move.source, move.unit_symbol)
+            key_dst = (move.dest, move.unit_symbol)
             # Apply unit-specific rounding to match execution behavior
             net[key_src] = unit.round(net.get(key_src, 0.0) - move.quantity)
             net[key_dst] = unit.round(net.get(key_dst, 0.0) + move.quantity)
@@ -710,24 +593,24 @@ class Ledger:
 
         return True, ""
 
-    def _update_position_index(self, wallet: str, unit_symbol: str, quantity: float) -> None:
+    def _update_position_index(self, wallet_id: str, unit_symbol: str, quantity: float) -> None:
         """
         Update the inverted position index after a balance change.
 
-        The position index maintains a mapping of unit -> {wallet -> quantity}
+        The position index maintains a mapping of unit -> {wallet_id -> quantity}
         for efficient position lookups. Zero or near-zero balances are removed
         from the index to keep it compact.
 
         Args:
-            wallet: Wallet whose balance changed
+            wallet_id: Wallet identifier whose balance changed
             unit_symbol: Unit symbol
             quantity: New balance quantity
         """
         if abs(quantity) > self.POSITION_EPSILON:
-            self._positions_by_unit[unit_symbol][wallet] = quantity
+            self._positions_by_unit[unit_symbol][wallet_id] = quantity
         else:
             # Remove zero/dust positions from index
-            self._positions_by_unit[unit_symbol].pop(wallet, None)
+            self._positions_by_unit[unit_symbol].pop(wallet_id, None)
 
     def _execute_moves(self, moves) -> None:
         """
@@ -743,19 +626,19 @@ class Ledger:
             moves: Iterable of Move objects to execute
         """
         for move in moves:
-            unit = self.units[move.unit]
+            unit = self.units[move.unit_symbol]
             # Update source balance
             new_src_balance = unit.round(
-                self.balances[move.source][move.unit] - move.quantity
+                self.balances[move.source][move.unit_symbol] - move.quantity
             )
-            self.balances[move.source][move.unit] = new_src_balance
-            self._update_position_index(move.source, move.unit, new_src_balance)
+            self.balances[move.source][move.unit_symbol] = new_src_balance
+            self._update_position_index(move.source, move.unit_symbol, new_src_balance)
             # Update destination balance
             new_dst_balance = unit.round(
-                self.balances[move.dest][move.unit] + move.quantity
+                self.balances[move.dest][move.unit_symbol] + move.quantity
             )
-            self.balances[move.dest][move.unit] = new_dst_balance
-            self._update_position_index(move.dest, move.unit, new_dst_balance)
+            self.balances[move.dest][move.unit_symbol] = new_dst_balance
+            self._update_position_index(move.dest, move.unit_symbol, new_dst_balance)
 
     # ========================================================================
     # LEDGER OPERATIONS
@@ -786,9 +669,9 @@ class Ledger:
         Cloned state includes:
         - All unit definitions and their internal state
         - All wallet registrations and balances
-        - Transaction log (if logging is enabled)
+        - Transaction log
         - Current time
-        - Configuration (verbose, fast_mode, no_log)
+        - Configuration (verbose)
 
         Returns:
             A new Ledger instance with identical state
@@ -797,8 +680,6 @@ class Ledger:
         cloned.name = self.name
         cloned._current_time = self._current_time
         cloned.verbose = self.verbose
-        cloned.fast_mode = self.fast_mode
-        cloned.no_log = self.no_log
 
         # Deep copy units (including nested state)
         cloned.units = {}
@@ -816,8 +697,9 @@ class Ledger:
 
         # Copy collections
         cloned.registered_wallets = self.registered_wallets.copy()
-        cloned.seen_tx_ids = self.seen_tx_ids.copy()
+        cloned.seen_intent_ids = self.seen_intent_ids.copy()
         cloned.transaction_log = list(self.transaction_log)
+        cloned._next_sequence = self._next_sequence
 
         # Deep copy balances
         cloned.balances = {}
@@ -840,7 +722,7 @@ class Ledger:
         2. Walk backward through all transactions executed after target_time
         3. Reverse each transaction's effects:
            - Restore balances (add to source, subtract from destination)
-           - Restore unit state from state_deltas (old_state)
+           - Restore unit state from state_changes (old_state)
         4. Filter transaction log to only include transactions up to target_time
 
         The algorithm correctly handles:
@@ -855,11 +737,8 @@ class Ledger:
             A new Ledger instance with state as it was at target_time
 
         Raises:
-            LedgerError: If no_log=True (cannot reconstruct without transaction log)
             ValueError: If target_time is in the future
         """
-        if self.no_log:
-            raise LedgerError("Cannot reconstruct: no_log=True")
         if target_time > self._current_time:
             raise ValueError(f"Target time {target_time} is in the future")
 
@@ -870,57 +749,65 @@ class Ledger:
         # Filter transaction log to only include transactions executed at or before target_time
         cloned.transaction_log = [
             tx for tx in self.transaction_log
-            if (tx.execution_time or tx.timestamp) <= target_time
+            if tx.execution_time <= target_time
         ]
-        cloned.seen_tx_ids = {tx.tx_id for tx in cloned.transaction_log}
+        cloned.seen_intent_ids = {tx.intent_id for tx in cloned.transaction_log}
+        # Reset sequence to match filtered transaction count
+        cloned._next_sequence = len(cloned.transaction_log)
 
         # Walk backwards through transactions executed after target_time, reversing them
         for tx in reversed(self.transaction_log):
-            effective_time = tx.execution_time or tx.timestamp
-            if effective_time <= target_time:
+            if tx.execution_time <= target_time:
                 break
 
             # Reverse moves (apply rounding to match _execute_moves)
             for move in tx.moves:
-                unit = cloned.units.get(move.unit)
+                unit = cloned.units.get(move.unit_symbol)
                 if unit is None:
-                    raise LedgerError(f"Cannot unwind: unit {move.unit} not found in cloned ledger")
+                    raise LedgerError(f"Cannot unwind: unit {move.unit_symbol} not found in cloned ledger")
                 new_src = unit.round(
-                    cloned.balances[move.source][move.unit] + move.quantity
+                    cloned.balances[move.source][move.unit_symbol] + move.quantity
                 )
                 new_dst = unit.round(
-                    cloned.balances[move.dest][move.unit] - move.quantity
+                    cloned.balances[move.dest][move.unit_symbol] - move.quantity
                 )
 
-                cloned.balances[move.source][move.unit] = new_src
-                cloned.balances[move.dest][move.unit] = new_dst
+                cloned.balances[move.source][move.unit_symbol] = new_src
+                cloned.balances[move.dest][move.unit_symbol] = new_dst
                 # Update position index for reversed moves
-                cloned._update_position_index(move.source, move.unit, new_src)
-                cloned._update_position_index(move.dest, move.unit, new_dst)
+                cloned._update_position_index(move.source, move.unit_symbol, new_src)
+                cloned._update_position_index(move.dest, move.unit_symbol, new_dst)
 
-            # Reverse state deltas - restore old_state
-            for delta in tx.state_deltas:
-                if delta.unit in cloned.units:
-                    cloned.units[delta.unit]._state = self._deep_copy_state(
-                        delta.old_state if isinstance(delta.old_state, dict) else {}
+            # Reverse state changes - restore old_state
+            for sc in tx.state_changes:
+                if sc.unit in cloned.units:
+                    cloned.units[sc.unit]._state = self._deep_copy_state(
+                        sc.old_state if isinstance(sc.old_state, dict) else {}
                     )
+
+            # Reverse units_to_create - remove units that were created in this transaction
+            for unit in tx.units_to_create:
+                if unit.symbol in cloned.units:
+                    del cloned.units[unit.symbol]
+                # Clean up any balances for this unit
+                for wallet in cloned.registered_wallets:
+                    if unit.symbol in cloned.balances[wallet]:
+                        del cloned.balances[wallet][unit.symbol]
+                # Clean up position index
+                if unit.symbol in cloned._positions_by_unit:
+                    del cloned._positions_by_unit[unit.symbol]
 
         return cloned
 
-    def replay(
-        self,
-        from_tx: int = 0,
-        fast_mode: bool = True,
-        no_log: bool = False
-    ) -> Ledger:
+    def replay(self, from_tx: int = 0) -> Ledger:
         """
         Create a new ledger by replaying the transaction log.
 
         This method reconstructs ledger state by re-executing all logged transactions
         in order. The resulting ledger will contain:
         - All balance changes from transactions
-        - All unit state updates from state_deltas
-        - The complete transaction history (unless no_log=True)
+        - All unit state updates from state_changes
+        - The complete transaction history
 
         Note: Initial balances set via set_balance() are NOT replayed because
         they are not part of the transaction log. Use clone() or clone_at() if
@@ -929,34 +816,37 @@ class Ledger:
         The replay process:
         1. Create a new ledger with unit definitions and wallet registrations
         2. Re-execute each transaction from the log
-        3. Apply state_deltas to restore unit states
+        3. Apply state_changes to restore unit states
         4. Advance time as needed to match transaction timestamps
 
         Args:
             from_tx: Starting transaction index (0 = replay from beginning)
-            fast_mode: Skip validation during replay (default: True)
-            no_log: Don't log transactions in the new ledger (default: False)
 
         Returns:
             New Ledger instance with replayed state
 
         Raises:
-            LedgerError: If no_log=True on source ledger, or if replay fails
+            LedgerError: If replay fails
         """
-        if self.no_log:
-            raise LedgerError("Cannot replay: no_log=True")
-
         new_ledger = Ledger(
             name=f"{self.name}_replayed",
             initial_time=datetime(1970, 1, 1),
-            verbose=self.verbose,
-            fast_mode=fast_mode,
-            no_log=no_log
+            verbose=self.verbose
         )
 
+        # Identify units that will be created during replay
+        # These should NOT be pre-loaded (they'll be created by transactions)
+        units_created_in_log = set()
+        for tx in self.transaction_log[from_tx:]:
+            for unit in tx.units_to_create:
+                units_created_in_log.add(unit.symbol)
+
         # Copy unit definitions only (not current state)
-        # Unit states will be built from state_deltas during replay
+        # Unit states will be built from state_changes during replay
+        # Skip units that will be dynamically created during replay
         for symbol, unit in self.units.items():
+            if symbol in units_created_in_log:
+                continue  # Will be created by a transaction during replay
             new_ledger.units[symbol] = Unit(
                 symbol=unit.symbol,
                 name=unit.name,
@@ -969,24 +859,28 @@ class Ledger:
             )
 
         for wallet in self.registered_wallets:
-            new_ledger.register_wallet(wallet)
+            # Skip system wallet - it's auto-registered in Ledger.__init__
+            if wallet != SYSTEM_WALLET:
+                new_ledger.register_wallet(wallet)
 
         for tx in self.transaction_log[from_tx:]:
             if tx.timestamp > new_ledger._current_time:
                 new_ledger.advance_time(tx.timestamp)
 
-            # Execute moves
-            result = new_ledger.execute(tx, fast_mode=fast_mode)
-            if result == ExecuteResult.REJECTED:
-                raise LedgerError(f"Replay failed at tx {tx.tx_id}")
+            # Convert Transaction back to PendingTransaction for replay
+            # Use a new intent_id to avoid idempotency conflicts
+            pending = PendingTransaction(
+                moves=tx.moves,
+                state_changes=tx.state_changes,
+                origin=tx.origin,
+                timestamp=tx.timestamp,
+                units_to_create=tx.units_to_create,
+            )
 
-            # Apply state_deltas to restore unit states
-            # The new_state from each delta represents the state after this transaction
-            for delta in tx.state_deltas:
-                if delta.unit in new_ledger.units:
-                    new_ledger.units[delta.unit]._state = self._deep_copy_state(
-                        delta.new_state if isinstance(delta.new_state, dict) else {}
-                    )
+            # Execute the pending transaction
+            result = new_ledger.execute(pending)
+            if result == ExecuteResult.REJECTED:
+                raise LedgerError(f"Replay failed at tx {tx.exec_id}")
 
         return new_ledger
 
@@ -1005,7 +899,7 @@ class Ledger:
             - 'transaction_log': Transaction log memory usage
             - 'balances': Wallet balance storage
             - 'units': Unit definitions
-            - 'seen_tx_ids': Transaction ID deduplication set
+            - 'seen_intent_ids': Intent ID deduplication set
             - 'total': Sum of all components
         """
         # Transaction log size
@@ -1027,15 +921,15 @@ class Ledger:
         for symbol, unit in self.units.items():
             units_size += sys.getsizeof(symbol) + sys.getsizeof(unit)
 
-        # Seen tx ids
-        seen_size = sys.getsizeof(self.seen_tx_ids)
-        for tx_id in self.seen_tx_ids:
-            seen_size += sys.getsizeof(tx_id)
+        # Seen intent ids (for idempotency)
+        seen_size = sys.getsizeof(self.seen_intent_ids)
+        for intent_id in self.seen_intent_ids:
+            seen_size += sys.getsizeof(intent_id)
 
         return {
             'transaction_log': log_size,
             'balances': balances_size,
             'units': units_size,
-            'seen_tx_ids': seen_size,
+            'seen_intent_ids': seen_size,
             'total': log_size + balances_size + units_size + seen_size,
         }

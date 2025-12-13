@@ -3,7 +3,6 @@ test_options.py - Unit tests for options.py
 
 Tests:
 - create_option_unit: unit creation (creates bilateral option units)
-- build_option_trade: trade building (generates contract results for option trades)
 - compute_option_settlement: ITM/OTM call/put settlement (settles options at maturity)
 - Convenience functions: get_option_intrinsic_value, get_option_moneyness
 - option_contract: SmartContract implementation (automated settlement)
@@ -12,8 +11,8 @@ Tests:
 import pytest
 from datetime import datetime
 from ledger import (
-    Move, ContractResult, Unit,
-    create_option_unit, build_option_trade,
+    Move, Unit, PendingTransaction,
+    create_option_unit,
     compute_option_settlement,
     get_option_intrinsic_value, get_option_moneyness,
     option_contract,
@@ -112,55 +111,6 @@ class TestCreateOptionUnit:
             )
 
 
-class TestBuildOptionTrade:
-    """Tests for build_option_trade function."""
-
-    def test_build_trade_returns_contract_result(self):
-        result = build_option_trade(
-            option_symbol="AAPL_C150",
-            num_contracts=5,
-            premium_per_contract=8.50,
-            buyer="alice",
-            seller="bob",
-            premium_currency="USD",
-            trade_id="trade_001"
-        )
-        assert isinstance(result, ContractResult)
-        assert len(result.moves) == 2
-
-    def test_build_trade_premium_move(self):
-        result = build_option_trade(
-            option_symbol="AAPL_C150",
-            num_contracts=10,
-            premium_per_contract=5.0,
-            buyer="alice",
-            seller="bob",
-            premium_currency="USD",
-            trade_id="trade_001"
-        )
-        premium_move = result.moves[0]
-        assert premium_move.source == "alice"
-        assert premium_move.dest == "bob"
-        assert premium_move.unit == "USD"
-        assert premium_move.quantity == 50.0  # 10 * 5.0
-
-    def test_build_trade_option_move(self):
-        result = build_option_trade(
-            option_symbol="AAPL_C150",
-            num_contracts=10,
-            premium_per_contract=5.0,
-            buyer="alice",
-            seller="bob",
-            premium_currency="USD",
-            trade_id="trade_001"
-        )
-        option_move = result.moves[1]
-        assert option_move.source == "bob"
-        assert option_move.dest == "alice"
-        assert option_move.unit == "AAPL_C150"
-        assert option_move.quantity == 10
-
-
 class TestComputeOptionSettlement:
     """Tests for compute_option_settlement function."""
 
@@ -193,20 +143,21 @@ class TestComputeOptionSettlement:
         assert len(result.moves) == 3
 
         # Check cash move (long pays strike * quantity)
-        cash_move = next(m for m in result.moves if m.unit == 'USD')
+        cash_move = next(m for m in result.moves if m.unit_symbol == 'USD')
         assert cash_move.source == 'alice'
         assert cash_move.dest == 'bob'
         assert cash_move.quantity == 5 * 100 * 100.0  # 5 contracts * 100 shares * $100
 
         # Check delivery move
-        delivery_move = next(m for m in result.moves if m.unit == 'AAPL')
+        delivery_move = next(m for m in result.moves if m.unit_symbol == 'AAPL')
         assert delivery_move.source == 'bob'
         assert delivery_move.dest == 'alice'
         assert delivery_move.quantity == 5 * 100  # 5 contracts * 100 shares
 
         # Check state updates
-        assert result.state_updates['OPT']['settled'] is True
-        assert result.state_updates['OPT']['exercised'] is True
+        sc = next(d for d in result.state_changes if d.unit == "OPT")
+        assert sc.new_state['settled'] is True
+        assert sc.new_state['exercised'] is True
 
     def test_call_otm_settlement(self):
         """Call OTM: just close positions, no physical delivery."""
@@ -236,8 +187,9 @@ class TestComputeOptionSettlement:
         # OTM: only close position move
         assert len(result.moves) == 1
         close_move = result.moves[0]
-        assert close_move.unit == 'OPT'
-        assert result.state_updates['OPT']['exercised'] is False
+        assert close_move.unit_symbol == 'OPT'
+        sc = next(d for d in result.state_changes if d.unit == "OPT")
+        assert sc.new_state['exercised'] is False
 
     def test_put_itm_settlement(self):
         """Put ITM: long delivers underlying, receives cash."""
@@ -267,12 +219,12 @@ class TestComputeOptionSettlement:
         assert len(result.moves) == 3
 
         # Check delivery move (long delivers underlying)
-        delivery_move = next(m for m in result.moves if m.unit == 'AAPL')
+        delivery_move = next(m for m in result.moves if m.unit_symbol == 'AAPL')
         assert delivery_move.source == 'alice'
         assert delivery_move.dest == 'bob'
 
         # Check cash move (short pays long)
-        cash_move = next(m for m in result.moves if m.unit == 'USD')
+        cash_move = next(m for m in result.moves if m.unit_symbol == 'USD')
         assert cash_move.source == 'bob'
         assert cash_move.dest == 'alice'
 

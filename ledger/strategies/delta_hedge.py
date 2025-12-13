@@ -22,7 +22,10 @@ from datetime import datetime
 import math
 from typing import Dict, Any, List
 
-from ..core import LedgerView, Move, ContractResult, Unit, UNIT_TYPE_DELTA_HEDGE_STRATEGY
+from ..core import (
+    LedgerView, Move, PendingTransaction, Unit, UnitStateChange, UNIT_TYPE_DELTA_HEDGE_STRATEGY,
+    build_transaction, empty_pending_transaction,
+)
 from ..black_scholes import call_s as bs_call_delta, call as bs_call_price
 
 
@@ -154,7 +157,7 @@ def compute_rebalance(
     strategy_symbol: str,
     spot_price: float,
     min_trade_size: float = 0.0001,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Compute the rebalancing trades needed to maintain delta neutrality.
 
@@ -170,10 +173,10 @@ def compute_rebalance(
         min_trade_size: Minimum number of shares required to trigger a trade (default 0.0001)
 
     Returns:
-        ContractResult: Contains moves for buying/selling shares and corresponding cash
+        PendingTransaction: Contains moves for buying/selling shares and corresponding cash
                        transfers, plus updated strategy state with new share count,
                        cumulative cash, and incremented rebalance count.
-                       Returns empty ContractResult if no rebalance is needed, the option
+                       Returns empty PendingTransaction if no rebalance is needed, the option
                        has expired, or the strategy is already liquidated.
 
     Raises:
@@ -191,7 +194,7 @@ def compute_rebalance(
     state = view.get_unit_state(strategy_symbol)
 
     if state.get('liquidated'):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     current_shares = state.get('current_shares', 0.0)
     cumulative_cash = state.get('cumulative_cash', 0.0)
@@ -200,14 +203,14 @@ def compute_rebalance(
     t_in_days = _time_to_maturity_days(state['maturity'], view.current_time)
 
     if t_in_days <= 0:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     delta = _compute_delta(spot_price, state['strike'], t_in_days, state['volatility'])
     target_shares = delta * state['num_options'] * state['option_multiplier']
     shares_to_trade = target_shares - current_shares
 
     if abs(shares_to_trade) < min_trade_size:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     ts = view.current_time
     strategy_wallet = state['strategy_wallet']
@@ -218,10 +221,10 @@ def compute_rebalance(
     if shares_to_trade > 0:
         cash_amount = shares_to_trade * spot_price
         moves = [
-            Move(source=market_wallet, dest=strategy_wallet, unit=underlying,
-                 quantity=shares_to_trade, contract_id=f"hedge_{strategy_symbol}_{ts.isoformat()}_buy"),
-            Move(source=strategy_wallet, dest=market_wallet, unit=currency,
-                 quantity=cash_amount, contract_id=f"hedge_{strategy_symbol}_{ts.isoformat()}_pay"),
+            Move(quantity=shares_to_trade, unit_symbol=underlying, source=market_wallet, dest=strategy_wallet,
+                 contract_id=f"hedge_{strategy_symbol}_{ts.isoformat()}_buy"),
+            Move(quantity=cash_amount, unit_symbol=currency, source=strategy_wallet, dest=market_wallet,
+                 contract_id=f"hedge_{strategy_symbol}_{ts.isoformat()}_pay"),
         ]
         new_shares = current_shares + shares_to_trade
         new_cash = cumulative_cash - cash_amount
@@ -229,31 +232,30 @@ def compute_rebalance(
         sell_qty = -shares_to_trade
         cash_amount = sell_qty * spot_price
         moves = [
-            Move(source=strategy_wallet, dest=market_wallet, unit=underlying,
-                 quantity=sell_qty, contract_id=f"hedge_{strategy_symbol}_{ts.isoformat()}_sell"),
-            Move(source=market_wallet, dest=strategy_wallet, unit=currency,
-                 quantity=cash_amount, contract_id=f"hedge_{strategy_symbol}_{ts.isoformat()}_recv"),
+            Move(quantity=sell_qty, unit_symbol=underlying, source=strategy_wallet, dest=market_wallet,
+                 contract_id=f"hedge_{strategy_symbol}_{ts.isoformat()}_sell"),
+            Move(quantity=cash_amount, unit_symbol=currency, source=market_wallet, dest=strategy_wallet,
+                 contract_id=f"hedge_{strategy_symbol}_{ts.isoformat()}_recv"),
         ]
         new_shares = current_shares - sell_qty
         new_cash = cumulative_cash + cash_amount
 
-    state_updates = {
-        strategy_symbol: {
-            **state,
-            'current_shares': new_shares,
-            'cumulative_cash': new_cash,
-            'rebalance_count': rebalance_count + 1,
-        }
+    new_state = {
+        **state,
+        'current_shares': new_shares,
+        'cumulative_cash': new_cash,
+        'rebalance_count': rebalance_count + 1,
     }
+    state_changes = [UnitStateChange(unit=strategy_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 def compute_liquidation(
     view: LedgerView,
     strategy_symbol: str,
     spot_price: float,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Compute trades to liquidate all remaining hedge positions at maturity.
 
@@ -267,11 +269,11 @@ def compute_liquidation(
         spot_price: Current market price of the underlying asset
 
     Returns:
-        ContractResult: Contains moves to sell all shares to market wallet and receive cash,
+        PendingTransaction: Contains moves to sell all shares to market wallet and receive cash,
                        plus updated state with zero shares, final cumulative cash total,
                        and liquidated flag set to True.
                        Returns state-only update if no shares to liquidate.
-                       Returns empty ContractResult if already liquidated.
+                       Returns empty PendingTransaction if already liquidated.
 
     Raises:
         ValueError: If spot_price is not positive and finite
@@ -287,40 +289,37 @@ def compute_liquidation(
     state = view.get_unit_state(strategy_symbol)
 
     if state.get('liquidated'):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     current_shares = state.get('current_shares', 0.0)
     cumulative_cash = state.get('cumulative_cash', 0.0)
     rebalance_count = state.get('rebalance_count', 0)
 
     if current_shares <= 0:
-        return ContractResult(state_updates={
-            strategy_symbol: {**state, 'current_shares': 0.0, 'liquidated': True}
-        })
+        new_state = {**state, 'current_shares': 0.0, 'liquidated': True}
+        state_changes = [UnitStateChange(unit=strategy_symbol, old_state=state, new_state=new_state)]
+        return build_transaction(view, [], state_changes)
 
     ts = view.current_time
     cash_amount = current_shares * spot_price
 
     moves = [
-        Move(source=state['strategy_wallet'], dest=state['market_wallet'],
-             unit=state['underlying'], quantity=current_shares,
+        Move(quantity=current_shares, unit_symbol=state['underlying'], source=state['strategy_wallet'], dest=state['market_wallet'],
              contract_id=f"hedge_{strategy_symbol}_{ts.isoformat()}_liquidate"),
-        Move(source=state['market_wallet'], dest=state['strategy_wallet'],
-             unit=state['currency'], quantity=cash_amount,
+        Move(quantity=cash_amount, unit_symbol=state['currency'], source=state['market_wallet'], dest=state['strategy_wallet'],
              contract_id=f"hedge_{strategy_symbol}_{ts.isoformat()}_liquidate_recv"),
     ]
 
-    state_updates = {
-        strategy_symbol: {
-            **state,
-            'current_shares': 0.0,
-            'cumulative_cash': cumulative_cash + cash_amount,
-            'rebalance_count': rebalance_count + 1,
-            'liquidated': True,
-        }
+    new_state = {
+        **state,
+        'current_shares': 0.0,
+        'cumulative_cash': cumulative_cash + cash_amount,
+        'rebalance_count': rebalance_count + 1,
+        'liquidated': True,
     }
+    state_changes = [UnitStateChange(unit=strategy_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 def get_hedge_state(
@@ -473,14 +472,14 @@ def delta_hedge_contract(min_trade_size: float = 0.01):
     Returns:
         Callable: A smart contract function with signature:
                  (view: LedgerView, symbol: str, timestamp: datetime, prices: Dict[str, float])
-                 -> ContractResult
+                 -> PendingTransaction
 
     Smart Contract Behavior:
         - Checks if strategy is already liquidated (returns empty if so)
         - Retrieves current price for the underlying asset from prices dict
         - At or after maturity: triggers liquidation of all positions
         - Before maturity: triggers rebalancing if needed based on delta
-        - Returns empty ContractResult if no action needed or price unavailable
+        - Returns empty PendingTransaction if no action needed or price unavailable
 
     Example:
         >>> contract_fn = delta_hedge_contract(min_trade_size=0.01)
@@ -490,7 +489,7 @@ def delta_hedge_contract(min_trade_size: float = 0.01):
         ... )
 
     Notes:
-        - The contract is pure and stateless - all state changes go through ContractResult
+        - The contract is pure and stateless - all state changes go through PendingTransaction
         - Requires price data for the underlying asset to be provided in prices dict
         - Safe to call repeatedly - idempotent when no changes are needed
     """
@@ -499,16 +498,16 @@ def delta_hedge_contract(min_trade_size: float = 0.01):
         symbol: str,
         timestamp: datetime,
         prices: Dict[str, float]
-    ) -> ContractResult:
+    ) -> PendingTransaction:
         state = view.get_unit_state(symbol)
 
         if state.get('liquidated'):
-            return ContractResult()
+            return empty_pending_transaction(view)
 
         underlying = state.get('underlying')
         spot_price = prices.get(underlying)
         if spot_price is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
 
         maturity = state.get('maturity')
         if maturity and timestamp >= maturity:

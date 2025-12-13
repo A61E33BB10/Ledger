@@ -81,7 +81,7 @@ class TestBondIssueToMaturity:
         for date in coupon_dates:
             ledger.advance_time(date)
             result = compute_coupon_payment(ledger, "CORP", date)
-            ledger.execute_contract(result)
+            ledger.execute(result)
             investor_cash.append(ledger.get_balance("investor", "USD"))
 
         # Each coupon: 10 bonds × $25 = $250
@@ -90,7 +90,7 @@ class TestBondIssueToMaturity:
 
         # Redemption at maturity
         result = compute_redemption(ledger, "CORP", maturity_date)
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # 10 bonds × $1000 = $10,000
         assert ledger.get_balance("investor", "USD") == 11000.0
@@ -173,7 +173,7 @@ class TestBondMultipleHolders:
         # Process coupon
         ledger.advance_time(datetime(2024, 7, 15))
         result = compute_coupon_payment(ledger, "CORP", datetime(2024, 7, 15))
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # Verify proportional distribution
         # Total bonds: 35, total coupon: 35 × $30 = $1050
@@ -214,7 +214,7 @@ class TestBondMultipleHolders:
 
         # Redemption
         result = compute_redemption(ledger, "CORP", maturity_date)
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         assert ledger.get_balance("alice", "USD") == 10_000.0
         assert ledger.get_balance("bob", "USD") == 15_000.0
@@ -256,7 +256,7 @@ class TestBondEarlyRedemption:
 
         # Use compute_redemption with allow_early=True for early call
         result = compute_redemption(ledger, "CALLABLE", call_date, redemption_price=1020.0, allow_early=True)
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # 10 bonds × $1020 = $10,200
         assert ledger.get_balance("investor", "USD") == 10_200.0
@@ -297,7 +297,7 @@ class TestBondEarlyRedemption:
         ledger.advance_time(put_date)
 
         result = compute_redemption(ledger, "PUTABLE", put_date, redemption_price=1000.0, allow_early=True)
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         assert ledger.get_balance("investor", "USD") == 10_000.0
 
@@ -469,7 +469,7 @@ class TestBondMultiCurrency:
         # Coupon payment
         ledger.advance_time(datetime(2024, 7, 15))
         result = compute_coupon_payment(ledger, "EURO_CORP", datetime(2024, 7, 15))
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # Verify EUR is used
         assert ledger.get_balance("eu_investor", "EUR") == 200.0  # 10 × €20
@@ -507,7 +507,7 @@ class TestBondMultiCurrency:
         # Coupon payment
         ledger.advance_time(datetime(2024, 7, 15))
         result = compute_coupon_payment(ledger, "JGB", datetime(2024, 7, 15))
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # ¥500,000 coupon
         assert ledger.get_balance("jp_investor", "JPY") == 500_000.0
@@ -554,7 +554,7 @@ class TestBondConservation:
         # Coupon payment
         ledger.advance_time(datetime(2024, 7, 15))
         result = compute_coupon_payment(ledger, "CORP", datetime(2024, 7, 15))
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         final_total = (
             ledger.get_balance("investor", "USD") +
@@ -599,7 +599,7 @@ class TestBondConservation:
 
         # Redemption
         result = compute_redemption(ledger, "CORP", maturity_date)
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         final_total = (
             ledger.get_balance("investor", "USD") +

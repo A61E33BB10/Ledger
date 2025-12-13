@@ -11,7 +11,7 @@ Tests:
 import pytest
 from datetime import datetime
 from ledger import (
-    Move, ContractResult, Unit,
+    Move, Unit,
     create_forward_unit,
     compute_forward_settlement,
     get_forward_value,
@@ -134,26 +134,27 @@ class TestComputeForwardSettlement:
         assert len(result.moves) == 3  # cash, delivery, close
 
         # Check cash move
-        cash_move = next(m for m in result.moves if m.unit == 'USD')
+        cash_move = next(m for m in result.moves if m.unit_symbol == 'USD')
         assert cash_move.source == 'alice'
         assert cash_move.dest == 'bob'
         # 2 contracts * 1000 qty * $75 = $150,000
         assert cash_move.quantity == 2 * 1000 * 75.0
 
         # Check delivery move
-        delivery_move = next(m for m in result.moves if m.unit == 'OIL')
+        delivery_move = next(m for m in result.moves if m.unit_symbol == 'OIL')
         assert delivery_move.source == 'bob'
         assert delivery_move.dest == 'alice'
         assert delivery_move.quantity == 2 * 1000
 
         # Check close position
-        close_move = next(m for m in result.moves if m.unit == 'FWD')
+        close_move = next(m for m in result.moves if m.unit_symbol == 'FWD')
         assert close_move.source == 'alice'
         assert close_move.dest == 'bob'
         assert close_move.quantity == 2
 
         # Check state updates
-        assert result.state_updates['FWD']['settled'] is True
+        sc = next(d for d in result.state_changes if d.unit == "FWD")
+        assert sc.new_state['settled'] is True
 
     def test_settlement_before_delivery_returns_empty(self):
         view = FakeView(
@@ -197,7 +198,8 @@ class TestComputeForwardSettlement:
         )
         result = compute_forward_settlement(view, 'FWD', force_settlement=True)
         assert not result.is_empty()
-        assert result.state_updates['FWD']['settled'] is True
+        sc = next(d for d in result.state_changes if d.unit == "FWD")
+        assert sc.new_state['settled'] is True
 
     def test_already_settled_returns_empty(self):
         view = FakeView(

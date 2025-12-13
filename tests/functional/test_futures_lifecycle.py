@@ -36,32 +36,38 @@ class TestMultiDayLifecycle:
         ))
         ledger.register_wallet("trader")
         ledger.register_wallet("clearing")
+        ledger.register_wallet("market_maker")
         ledger.set_balance("trader", "USD", 500_000)
         ledger.set_balance("clearing", "USD", 10_000_000)
-        ledger.set_balance("clearing", "ESZ24", 1000)
+        ledger.set_balance("market_maker", "ESZ24", 1000)
+        # Market maker entered at 4500: vcash = -1000 * 4500 * 50 = -225,000,000
+        ledger.update_unit_state("ESZ24", {
+            **ledger.get_unit_state("ESZ24"),
+            'wallets': {'market_maker': {'position': 1000, 'virtual_cash': -225_000_000.0}},
+        })
 
-        # Buy 10 at 4500 (positive qty)
+        # Buy 10 at 4500: market_maker sells to trader (via clearinghouse)
         # virtual_cash = -10 * 4500 * 50 = -2,250,000
-        ledger.execute_contract(future_transact(ledger, "ESZ24", "trader", qty=10, price=4500.0))
+        ledger.execute(future_transact(ledger, "ESZ24", seller_id="market_maker", buyer_id="trader", qty=10, price=4500.0))
         assert ledger.get_balance("trader", "ESZ24") == 10.0
         assert ledger.get_unit_state("ESZ24")["wallets"]["trader"]["virtual_cash"] == -2_250_000.0
 
         # Day 1 EOD: MTM at 4505 (up $5)
         # target = -10 * 4505 * 50 = -2,252,500
         # vm = -2,250,000 - (-2,252,500) = +2,500
-        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4505.0}))
+        ledger.execute(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4505.0}))
         assert ledger.get_balance("trader", "USD") == 502_500.0
 
         # Day 2 EOD: MTM at 4520 (up $15 from day 1)
         # target = -10 * 4520 * 50 = -2,260,000
         # vm = -2,252,500 - (-2,260,000) = +7,500
-        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 2), {"SPX": 4520.0}))
+        ledger.execute(future_contract(ledger, "ESZ24", datetime(2024, 11, 2), {"SPX": 4520.0}))
         assert ledger.get_balance("trader", "USD") == 510_000.0
 
         # Day 3 EOD: MTM at 4510 (down $10 from day 2)
         # target = -10 * 4510 * 50 = -2,255,000
         # vm = -2,260,000 - (-2,255,000) = -5,000
-        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 3), {"SPX": 4510.0}))
+        ledger.execute(future_contract(ledger, "ESZ24", datetime(2024, 11, 3), {"SPX": 4510.0}))
         assert ledger.get_balance("trader", "USD") == 505_000.0
 
         # Net: (4510-4500) * 10 * 50 = +5000
@@ -76,24 +82,30 @@ class TestMultiDayLifecycle:
         ))
         ledger.register_wallet("trader")
         ledger.register_wallet("clearing")
+        ledger.register_wallet("market_maker")
         ledger.set_balance("trader", "USD", 500_000)
         ledger.set_balance("clearing", "USD", 10_000_000)
-        ledger.set_balance("clearing", "ESZ24", 1000)
+        ledger.set_balance("market_maker", "ESZ24", 1000)
+        # Market maker entered at 4500: vcash = -1000 * 4500 * 50 = -225,000,000
+        ledger.update_unit_state("ESZ24", {
+            **ledger.get_unit_state("ESZ24"),
+            'wallets': {'market_maker': {'position': 1000, 'virtual_cash': -225_000_000.0}},
+        })
 
-        # Buy 10 at 4500
+        # Buy 10 at 4500: market_maker sells to trader
         # vcash = -10 * 4500 * 50 = -2,250,000
-        ledger.execute_contract(future_transact(ledger, "ESZ24", "trader", qty=10, price=4500.0))
+        ledger.execute(future_transact(ledger, "ESZ24", seller_id="market_maker", buyer_id="trader", qty=10, price=4500.0))
         assert ledger.get_balance("trader", "ESZ24") == 10.0
 
-        # Sell 3 at 4510 (negative qty)
+        # Sell 3 at 4510: trader sells to market_maker
         # vcash = -2,250,000 + 3 * 4510 * 50 = -2,250,000 + 676,500 = -1,573,500
-        ledger.execute_contract(future_transact(ledger, "ESZ24", "trader", qty=-3, price=4510.0))
+        ledger.execute(future_transact(ledger, "ESZ24", seller_id="trader", buyer_id="market_maker", qty=3, price=4510.0))
         assert ledger.get_balance("trader", "ESZ24") == 7.0
 
         # EOD MTM at 4520 - only 7 contracts now
         # target = -7 * 4520 * 50 = -1,582,000
         # vm = -1,573,500 - (-1,582,000) = +8,500
-        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4520.0}))
+        ledger.execute(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4520.0}))
         assert ledger.get_unit_state("ESZ24")["wallets"]["trader"]["virtual_cash"] == -1_582_000.0
 
 
@@ -107,21 +119,26 @@ class TestMultiHolder:
         ledger.register_unit(create_future(
             "ESZ24", "E-mini Dec 24", "SPX", datetime(2024, 12, 20), 50.0, "USD", "clearing"
         ))
-        for w in ["alice", "bob", "clearing"]:
+        for w in ["alice", "bob", "clearing", "market_maker"]:
             ledger.register_wallet(w)
         ledger.set_balance("alice", "USD", 500_000)
         ledger.set_balance("bob", "USD", 500_000)
         ledger.set_balance("clearing", "USD", 10_000_000)
-        ledger.set_balance("clearing", "ESZ24", 1000)
+        ledger.set_balance("market_maker", "ESZ24", 1000)
+        # Market maker entered at 4500: vcash = -1000 * 4500 * 50 = -225,000,000
+        ledger.update_unit_state("ESZ24", {
+            **ledger.get_unit_state("ESZ24"),
+            'wallets': {'market_maker': {'position': 1000, 'virtual_cash': -225_000_000.0}},
+        })
 
-        # Alice buys 10 at 4500
-        ledger.execute_contract(future_transact(ledger, "ESZ24", "alice", qty=10, price=4500.0))
+        # Alice buys 10 at 4500: market_maker sells to alice
+        ledger.execute(future_transact(ledger, "ESZ24", seller_id="market_maker", buyer_id="alice", qty=10, price=4500.0))
 
-        # Bob buys 5 at 4550
-        ledger.execute_contract(future_transact(ledger, "ESZ24", "bob", qty=5, price=4550.0))
+        # Bob buys 5 at 4550: market_maker sells to bob
+        ledger.execute(future_transact(ledger, "ESZ24", seller_id="market_maker", buyer_id="bob", qty=5, price=4550.0))
 
         # MTM at 4520
-        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4520.0}))
+        ledger.execute(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4520.0}))
 
         # Alice: (4520-4500)*10*50 = +10,000
         assert ledger.get_balance("alice", "USD") == 510_000.0
@@ -129,8 +146,8 @@ class TestMultiHolder:
         # Bob: (4520-4550)*5*50 = -7,500
         assert ledger.get_balance("bob", "USD") == 492_500.0
 
-        # Conservation
-        total = sum(ledger.get_balance(w, "USD") for w in ["alice", "bob", "clearing"])
+        # Conservation (clearing settles with all parties)
+        total = sum(ledger.get_balance(w, "USD") for w in ["alice", "bob", "clearing", "market_maker"])
         assert total == 500_000 + 500_000 + 10_000_000
 
 
@@ -162,7 +179,7 @@ class TestExpiry:
         # Expiry settlement via future_contract at 4550
         # target = -10 * 4550 * 50 = -2,275,000
         # vm = -2,250,000 - (-2,275,000) = +25,000
-        ledger.execute_contract(future_contract(ledger, "ESZ24", expiry, {"SPX": 4550.0}))
+        ledger.execute(future_contract(ledger, "ESZ24", expiry, {"SPX": 4550.0}))
 
         state = ledger.get_unit_state("ESZ24")
         assert state["settled"] is True
@@ -220,15 +237,21 @@ class TestMultiCurrency:
         ))
         ledger.register_wallet("trader")
         ledger.register_wallet("eurex")
+        ledger.register_wallet("market_maker")
         ledger.set_balance("trader", "EUR", 100_000)
         ledger.set_balance("eurex", "EUR", 10_000_000)
-        ledger.set_balance("eurex", "FESX", 1000)
+        ledger.set_balance("market_maker", "FESX", 1000)
+        # Market maker entered at 5000: vcash = -1000 * 5000 * 10 = -50,000,000
+        ledger.update_unit_state("FESX", {
+            **ledger.get_unit_state("FESX"),
+            'wallets': {'market_maker': {'position': 1000, 'virtual_cash': -50_000_000.0}},
+        })
 
-        # Buy 5 at 5000
-        ledger.execute_contract(future_transact(ledger, "FESX", "trader", qty=5, price=5000.0))
+        # Buy 5 at 5000: market_maker sells to trader
+        ledger.execute(future_transact(ledger, "FESX", seller_id="market_maker", buyer_id="trader", qty=5, price=5000.0))
 
         # MTM at 5050
-        ledger.execute_contract(future_contract(ledger, "FESX", datetime(2024, 11, 1), {"SX5E": 5050.0}))
+        ledger.execute(future_contract(ledger, "FESX", datetime(2024, 11, 1), {"SX5E": 5050.0}))
 
         # VM = (5050-5000)*5*10 = 2,500 EUR
         assert ledger.get_balance("trader", "EUR") == 102_500.0
@@ -242,15 +265,21 @@ class TestMultiCurrency:
         ))
         ledger.register_wallet("trader")
         ledger.register_wallet("jpx")
+        ledger.register_wallet("market_maker")
         ledger.set_balance("trader", "JPY", 100_000_000)
-        ledger.set_balance("jpx", "JPY", 10_000_000_000)
-        ledger.set_balance("jpx", "NK225", 1000)
+        ledger.set_balance("jpx", "JPY", 50_000_000_000)  # More cash for large settlements
+        ledger.set_balance("market_maker", "NK225", 1000)
+        # Market maker's position entered at 38000, vcash = -1000 * 38000 * 1000 = -38,000,000,000
+        ledger.update_unit_state("NK225", {
+            **ledger.get_unit_state("NK225"),
+            'wallets': {'market_maker': {'position': 1000, 'virtual_cash': -38_000_000_000.0}},
+        })
 
-        # Buy 2 at 38000
-        ledger.execute_contract(future_transact(ledger, "NK225", "trader", qty=2, price=38000.0))
+        # Buy 2 at 38000: market_maker sells to trader
+        ledger.execute(future_transact(ledger, "NK225", seller_id="market_maker", buyer_id="trader", qty=2, price=38000.0))
 
         # MTM at 38500
-        ledger.execute_contract(future_contract(ledger, "NK225", datetime(2024, 11, 1), {"NI225": 38500.0}))
+        ledger.execute(future_contract(ledger, "NK225", datetime(2024, 11, 1), {"NI225": 38500.0}))
 
         # VM = (38500-38000)*2*1000 = 1,000,000 JPY
         assert ledger.get_balance("trader", "JPY") == 101_000_000
@@ -268,16 +297,22 @@ class TestConservation:
         ))
         ledger.register_wallet("trader")
         ledger.register_wallet("clearing")
+        ledger.register_wallet("market_maker")
         ledger.set_balance("trader", "USD", 500_000)
         ledger.set_balance("clearing", "USD", 10_000_000)
-        ledger.set_balance("clearing", "ESZ24", 1000)
+        ledger.set_balance("market_maker", "ESZ24", 1000)
+        # Market maker entered at 4500: vcash = -1000 * 4500 * 50 = -225,000,000
+        ledger.update_unit_state("ESZ24", {
+            **ledger.get_unit_state("ESZ24"),
+            'wallets': {'market_maker': {'position': 1000, 'virtual_cash': -225_000_000.0}},
+        })
 
-        initial = ledger.get_balance("trader", "USD") + ledger.get_balance("clearing", "USD")
+        initial = sum(ledger.get_balance(w, "USD") for w in ["trader", "clearing", "market_maker"])
 
-        ledger.execute_contract(future_transact(ledger, "ESZ24", "trader", qty=10, price=4500.0))
-        ledger.execute_contract(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4510.0}))
+        ledger.execute(future_transact(ledger, "ESZ24", seller_id="market_maker", buyer_id="trader", qty=10, price=4500.0))
+        ledger.execute(future_contract(ledger, "ESZ24", datetime(2024, 11, 1), {"SPX": 4510.0}))
 
-        final = ledger.get_balance("trader", "USD") + ledger.get_balance("clearing", "USD")
+        final = sum(ledger.get_balance(w, "USD") for w in ["trader", "clearing", "market_maker"])
         assert final == initial
 
     def test_expiry_conserves_cash(self):
@@ -300,7 +335,7 @@ class TestConservation:
         })
 
         initial = ledger.get_balance("trader", "USD") + ledger.get_balance("clearing", "USD")
-        ledger.execute_contract(future_contract(ledger, "ESZ24", expiry, {"SPX": 4550.0}))
+        ledger.execute(future_contract(ledger, "ESZ24", expiry, {"SPX": 4550.0}))
         final = ledger.get_balance("trader", "USD") + ledger.get_balance("clearing", "USD")
 
         assert final == initial

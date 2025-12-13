@@ -14,7 +14,7 @@ from typing import Dict, Set, Tuple, List, Any
 
 from ledger import (
     # Core
-    Ledger, Move, Transaction, ContractResult, Unit, StateDelta,
+    Ledger, Move, Transaction, Unit, UnitStateChange,
     ExecuteResult, LedgerView,
     cash,
 
@@ -35,6 +35,9 @@ from ledger import (
 
     # Pricing
     TimeSeriesPricingSource,
+
+    # Dividends
+    Dividend,
 )
 
 from tests.fake_view import FakeView
@@ -115,14 +118,14 @@ def compare_ledger_states(ledger1: Ledger, ledger2: Ledger, tolerance: float = 1
     }
 
 
-def verify_conservation(ledger: Ledger, unit: str, expected_total: float = None, tolerance: float = 1e-9) -> Tuple[bool, float]:
+def verify_conservation(ledger: Ledger, unit_symbol: str, expected_total: float = None, tolerance: float = 1e-9) -> Tuple[bool, float]:
     """
     Verify conservation law for a unit.
 
     Returns:
         (is_conserved, actual_total)
     """
-    actual = ledger.total_supply(unit)
+    actual = ledger.total_supply(unit_symbol)
     if expected_total is not None:
         return abs(actual - expected_total) < tolerance, actual
     return True, actual
@@ -217,10 +220,10 @@ def dividend_ledger():
 
     # Stock with quarterly dividend schedule
     dividend_schedule = [
-        (datetime(2025, 3, 15), 0.25),
-        (datetime(2025, 6, 15), 0.25),
-        (datetime(2025, 9, 15), 0.25),
-        (datetime(2025, 12, 15), 0.25),
+        Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD"),
+        Dividend(datetime(2025, 6, 15), datetime(2025, 6, 15), 0.25, "USD"),
+        Dividend(datetime(2025, 9, 15), datetime(2025, 9, 15), 0.25, "USD"),
+        Dividend(datetime(2025, 12, 15), datetime(2025, 12, 15), 0.25, "USD"),
     ]
     ledger.register_unit(create_stock_unit(
         symbol="AAPL",
@@ -428,48 +431,6 @@ def dividend_engine(dividend_ledger):
 
 
 # =============================================================================
-# MONTE CARLO / SIMULATION FIXTURES
-# =============================================================================
-
-@pytest.fixture
-def monte_carlo_ledger():
-    """Ledger configured for Monte Carlo simulation (fast_mode, no_log)."""
-    ledger = Ledger("mc_sim", datetime(2025, 1, 1),
-                    verbose=False, fast_mode=True, no_log=True)
-    ledger.register_unit(cash("USD", "US Dollar", decimal_places=2))
-    ledger.register_unit(create_stock("AAPL", "Apple Inc", "treasury", shortable=True))
-
-    ledger.register_wallet("trader")
-    ledger.register_wallet("market")
-    ledger.register_wallet("treasury")
-
-    ledger.set_balance("trader", "USD", 100000)
-    ledger.set_balance("market", "USD", 10000000)
-    ledger.set_balance("market", "AAPL", 100000)
-
-    return ledger
-
-
-@pytest.fixture
-def golden_source_ledger():
-    """Ledger configured as golden source (full validation and logging)."""
-    ledger = Ledger("golden", datetime(2025, 1, 1),
-                    verbose=False, fast_mode=False, no_log=False)
-    ledger.register_unit(cash("USD", "US Dollar", decimal_places=2))
-    ledger.register_unit(create_stock("AAPL", "Apple Inc", "treasury", shortable=True))
-
-    ledger.register_wallet("trader")
-    ledger.register_wallet("market")
-    ledger.register_wallet("treasury")
-
-    ledger.set_balance("trader", "USD", 100000)
-    ledger.set_balance("market", "USD", 10000000)
-    ledger.set_balance("market", "AAPL", 100000)
-
-    return ledger
-
-
-# =============================================================================
 # PRICING FIXTURES
 # =============================================================================
 
@@ -523,9 +484,9 @@ def stock_view():
                 "unit_type": "STOCK",
                 "issuer": "treasury",
                 "currency": "USD",
-                "dividend_schedule": [(datetime(2025, 3, 15), 0.25)],
-                "next_payment_index": 0,
-                "paid_dividends": [],
+                "dividend_schedule": [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD")],
+                "snapshots": {},
+                "paid": {},
             }
         },
         time=datetime(2025, 3, 15)

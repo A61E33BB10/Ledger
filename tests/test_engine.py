@@ -9,7 +9,8 @@ Tests:
 import pytest
 from datetime import datetime, timedelta
 from ledger import (
-    Ledger, Move, ContractResult,
+    Ledger, Move, PendingTransaction,
+    TransactionOrigin, OriginType,
     LifecycleEngine, SmartContract,
     option_contract, forward_contract, delta_hedge_contract,
     create_option_unit,
@@ -29,36 +30,51 @@ def _stock(symbol: str, name: str, issuer: str, shortable: bool = False):
 class MockContract:
     """Mock SmartContract for testing."""
 
-    def __init__(self, should_fire=False, moves=None, state_updates=None):
+    def __init__(self, should_fire=False, moves=None, state_changes=None):
         self.should_fire = should_fire
-        self.moves = moves or []
-        self.state_updates = state_updates or {}
+        self._base_moves = moves or []
+        self.state_changes = state_changes or []
         self.call_count = 0
+        self._fired_timestamps = set()  # Track timestamps we've fired for
 
     def check_lifecycle(self, view, symbol, t, prices):
+        from ledger.core import build_transaction, empty_pending_transaction
         self.call_count += 1
-        if self.should_fire:
-            return ContractResult(moves=self.moves, state_updates=self.state_updates)
-        return ContractResult()
+        # Only fire once per timestamp (like real contracts that track state)
+        # This prevents multiple fires during multi-pass lifecycle processing
+        if self.should_fire and t not in self._fired_timestamps:
+            self._fired_timestamps.add(t)
+            # Create moves with unique contract_ids for each timestamp to avoid idempotency rejection
+            unique_moves = []
+            for m in self._base_moves:
+                unique_moves.append(Move(
+                    quantity=m.quantity,
+                    unit_symbol=m.unit_symbol,
+                    source=m.source,
+                    dest=m.dest,
+                    contract_id=f"{m.contract_id}_{t.isoformat()}",
+                ))
+            return build_transaction(view, unique_moves, self.state_changes)
+        return empty_pending_transaction(view)
 
 
 class TestLifecycleEngineBasic:
     """Basic tests for LifecycleEngine."""
 
     def test_create_engine(self):
-        ledger = Ledger("test", no_log=True)
+        ledger = Ledger("test")
         engine = LifecycleEngine(ledger)
         assert engine.ledger is ledger
         assert engine.contracts == {}
 
     def test_create_engine_with_contracts(self):
-        ledger = Ledger("test", no_log=True)
+        ledger = Ledger("test")
         mock_contract = MockContract()
         engine = LifecycleEngine(ledger, contracts={'MOCK': mock_contract})
         assert 'MOCK' in engine.contracts
 
     def test_register_contract(self):
-        ledger = Ledger("test", no_log=True)
+        ledger = Ledger("test")
         engine = LifecycleEngine(ledger)
         mock_contract = MockContract()
         engine.register('MOCK_TYPE', mock_contract)
@@ -70,7 +86,7 @@ class TestLifecycleEngineStep:
     """Tests for LifecycleEngine.step()."""
 
     def test_step_advances_time(self):
-        ledger = Ledger("test", no_log=True)
+        ledger = Ledger("test")
         engine = LifecycleEngine(ledger)
 
         t1 = datetime(2025, 1, 15, 10, 0)
@@ -78,14 +94,14 @@ class TestLifecycleEngineStep:
         assert ledger.current_time == t1
 
     def test_step_no_contracts_returns_empty(self):
-        ledger = Ledger("test", no_log=True)
+        ledger = Ledger("test")
         engine = LifecycleEngine(ledger)
 
         txs = engine.step(datetime(2025, 1, 15), {})
         assert txs == []
 
     def test_step_contract_not_matched(self):
-        ledger = Ledger("test", no_log=True)
+        ledger = Ledger("test")
         ledger.register_unit(cash("USD", "US Dollar"))
         engine = LifecycleEngine(ledger)
         engine.register('OTHER_TYPE', MockContract(should_fire=True))
@@ -95,7 +111,7 @@ class TestLifecycleEngineStep:
         assert txs == []
 
     def test_step_contract_fires(self):
-        ledger = Ledger("test", no_log=False, verbose=False)  # Enable logging to get transactions
+        ledger = Ledger("test", verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
@@ -104,7 +120,7 @@ class TestLifecycleEngineStep:
         # Create mock contract that fires
         mock_contract = MockContract(
             should_fire=True,
-            moves=[Move("alice", "bob", "USD", 100.0, "mock_tx")]
+            moves=[Move(100.0, "USD", "alice", "bob", "mock_tx")]
         )
         engine = LifecycleEngine(ledger)
         engine.register('CASH', mock_contract)
@@ -115,7 +131,7 @@ class TestLifecycleEngineStep:
         assert ledger.get_balance("bob", "USD") == 100
 
     def test_step_contract_not_firing(self):
-        ledger = Ledger("test", no_log=True)
+        ledger = Ledger("test")
         ledger.register_unit(cash("USD", "US Dollar"))
 
         mock_contract = MockContract(should_fire=False)
@@ -131,7 +147,7 @@ class TestLifecycleEngineRun:
     """Tests for LifecycleEngine.run()."""
 
     def test_run_processes_all_timestamps(self):
-        ledger = Ledger("test", no_log=True)
+        ledger = Ledger("test")
         ledger.register_unit(cash("USD", "US Dollar"))
 
         mock_contract = MockContract(should_fire=False)
@@ -153,7 +169,7 @@ class TestLifecycleEngineRun:
         assert ledger.current_time == timestamps[-1]
 
     def test_run_returns_all_transactions(self):
-        ledger = Ledger("test", no_log=False, verbose=False)
+        ledger = Ledger("test", verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
@@ -162,7 +178,7 @@ class TestLifecycleEngineRun:
         # Contract that always fires
         mock_contract = MockContract(
             should_fire=True,
-            moves=[Move("alice", "bob", "USD", 100.0, "mock_tx")]
+            moves=[Move(100.0, "USD", "alice", "bob", "mock_tx")]
         )
         engine = LifecycleEngine(ledger)
         engine.register('CASH', mock_contract)
@@ -185,7 +201,7 @@ class TestLifecycleEngineWithOptions:
     """Integration tests with OptionContract."""
 
     def test_option_auto_settlement(self):
-        ledger = Ledger("test", no_log=False, verbose=False)
+        ledger = Ledger("test", verbose=False)
 
         # Setup units and wallets
         ledger.register_unit(cash("USD", "US Dollar"))
@@ -240,7 +256,7 @@ class TestLifecycleEngineWithForwards:
     """Integration tests with ForwardContract."""
 
     def test_forward_auto_settlement(self):
-        ledger = Ledger("test", no_log=False, verbose=False)
+        ledger = Ledger("test", verbose=False)
 
         # Setup units and wallets
         ledger.register_unit(cash("USD", "US Dollar"))
@@ -294,7 +310,7 @@ class TestLifecycleEngineWithDeltaHedge:
     """Integration tests with DeltaHedgeContract."""
 
     def test_delta_hedge_rebalancing(self):
-        ledger = Ledger("test", no_log=False, verbose=False)
+        ledger = Ledger("test", verbose=False)
 
         # Setup units and wallets
         ledger.register_unit(cash("USD", "US Dollar"))
@@ -346,7 +362,7 @@ class TestLifecycleEngineWithDeltaHedge:
         assert ledger.get_balance("hedge_fund", "AAPL") > 0
 
     def test_delta_hedge_liquidation_at_maturity(self):
-        ledger = Ledger("test", no_log=False, verbose=False)
+        ledger = Ledger("test", verbose=False)
 
         # Setup
         ledger.register_unit(cash("USD", "US Dollar"))
@@ -409,7 +425,7 @@ class TestLifecycleEngineMultipleContracts:
     """Tests with multiple contract types."""
 
     def test_multiple_contract_types(self):
-        ledger = Ledger("test", no_log=False, verbose=False)
+        ledger = Ledger("test", verbose=False)
 
         # Setup
         ledger.register_unit(cash("USD", "US Dollar"))

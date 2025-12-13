@@ -36,9 +36,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Optional
 
+import math
+
 from ..core import (
-    LedgerView, Move, ContractResult, Unit,
+    LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     UNIT_TYPE_STRUCTURED_NOTE, QUANTITY_EPSILON,
+    build_transaction, empty_pending_transaction,
 )
 
 
@@ -377,7 +380,7 @@ def compute_coupon_payment(
     view: LedgerView,
     symbol: str,
     payment_date: datetime,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Process a scheduled coupon payment if due.
 
@@ -390,10 +393,10 @@ def compute_coupon_payment(
         payment_date: Current timestamp to check against scheduled date.
 
     Returns:
-        ContractResult containing:
+        PendingTransaction containing:
         - moves: Tuple of Move objects transferring currency from issuer to holders.
         - state_updates: Updates next_coupon_index and appends to paid_coupons.
-        Returns empty ContractResult if no coupon is due or schedule exhausted.
+        Returns empty PendingTransaction if no coupon is due or schedule exhausted.
 
     Example:
         >>> result = compute_coupon_payment(view, "SN_SPX_2025", datetime(2024, 7, 15))
@@ -407,12 +410,12 @@ def compute_coupon_payment(
     next_idx = state.get('next_coupon_index', 0)
 
     if next_idx >= len(schedule):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     scheduled_date, coupon_amount = schedule[next_idx]
 
     if payment_date < scheduled_date:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     issuer = state['issuer_wallet']
     currency = state['currency']
@@ -426,10 +429,10 @@ def compute_coupon_payment(
         if notes_held > 0 and wallet != issuer:
             payout = notes_held * coupon_amount
             moves.append(Move(
+                quantity=payout,
+                unit_symbol=currency,
                 source=issuer,
                 dest=wallet,
-                unit=currency,
-                quantity=payout,
                 contract_id=f'sn_coupon_{symbol}_{next_idx}_{wallet}',
             ))
             total_paid += payout
@@ -442,15 +445,14 @@ def compute_coupon_payment(
         'total_paid': total_paid,
     })
 
-    state_updates = {
-        symbol: {
-            **state,
-            'next_coupon_index': next_idx + 1,
-            'paid_coupons': paid_coupons,
-        }
+    new_state = {
+        **state,
+        'next_coupon_index': next_idx + 1,
+        'paid_coupons': paid_coupons,
     }
+    state_changes = [UnitStateChange(unit=symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 # ============================================================================
@@ -461,7 +463,7 @@ def compute_maturity_payoff(
     view: LedgerView,
     symbol: str,
     final_price: float,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Calculate and pay the final payoff at maturity.
 
@@ -474,10 +476,10 @@ def compute_maturity_payoff(
         final_price: Final price of the underlying at maturity.
 
     Returns:
-        ContractResult containing:
+        PendingTransaction containing:
         - moves: Payment moves from issuer to each holder.
         - state_updates: Marks note as matured with final settlement details.
-        Returns empty ContractResult if already matured or maturity not reached.
+        Returns empty PendingTransaction if already matured or maturity not reached.
 
     Raises:
         ValueError: If final_price is not positive.
@@ -493,11 +495,11 @@ def compute_maturity_payoff(
     state = view.get_unit_state(symbol)
 
     if state.get('matured', False):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     maturity_date = state['maturity_date']
     if view.current_time < maturity_date:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Extract parameters
     notional = state['notional']
@@ -526,29 +528,28 @@ def compute_maturity_payoff(
             total_payout = notes_held * payout_per_note
             if abs(total_payout) > QUANTITY_EPSILON:
                 moves.append(Move(
+                    quantity=total_payout,
+                    unit_symbol=currency,
                     source=issuer,
                     dest=wallet,
-                    unit=currency,
-                    quantity=total_payout,
                     contract_id=f'sn_maturity_{symbol}_{wallet}',
                 ))
                 total_paid += total_payout
 
-    state_updates = {
-        symbol: {
-            **state,
-            'matured': True,
-            'maturity_settlement': {
-                'final_price': final_price,
-                'performance': performance,
-                'return_rate': return_rate,
-                'payout_per_note': payout_per_note,
-                'total_paid': total_paid,
-            },
-        }
+    new_state = {
+        **state,
+        'matured': True,
+        'maturity_settlement': {
+            'final_price': final_price,
+            'performance': performance,
+            'return_rate': return_rate,
+            'payout_per_note': payout_per_note,
+            'total_paid': total_paid,
+        },
     }
+    state_changes = [UnitStateChange(unit=symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 # ============================================================================
@@ -558,10 +559,105 @@ def compute_maturity_payoff(
 def transact(
     view: LedgerView,
     symbol: str,
+    seller: str,
+    buyer: str,
+    qty: float,
+    price: float,
+) -> PendingTransaction:
+    """
+    Execute a structured note trade (secondary market transfer).
+
+    Structured notes trade like bonds in the secondary market. The buyer
+    acquires the right to receive future coupons and the maturity payoff.
+
+    Args:
+        view: Read-only ledger access.
+        symbol: Structured note symbol.
+        seller: Wallet selling the structured note units.
+        buyer: Wallet buying the structured note units.
+        qty: Quantity to transfer (positive, whole units).
+        price: Price per unit (mark-to-market value).
+
+    Returns:
+        PendingTransaction containing:
+        - Move transferring the structured note units from seller to buyer.
+        - Move transferring cash from buyer to seller (if price > 0).
+
+    Raises:
+        ValueError: If qty <= 0, price < 0, seller == buyer, or invalid state.
+
+    Example:
+        # Alice sells her structured note to Bob
+        result = transact(
+            view, "SN_SPX_2025",
+            seller_id="alice",
+            buyer_id="bob",
+            qty=1,
+            price=102000.0  # Trading at premium due to favorable performance
+        )
+        ledger.execute(result)
+    """
+    # Validate quantity
+    if qty <= 0:
+        raise ValueError(f"qty must be positive, got {qty}")
+
+    # Validate price
+    if not math.isfinite(price) or price < 0:
+        raise ValueError(f"price must be non-negative and finite, got {price}")
+
+    # Validate wallets
+    if seller == buyer:
+        raise ValueError("seller and buyer must be different")
+
+    # Get unit state
+    state = view.get_unit_state(symbol)
+
+    # Check if already matured
+    if state.get('matured', False):
+        raise ValueError(f"Structured note {symbol} has already matured")
+
+    # Check seller has sufficient balance
+    seller_balance = view.get_balance(seller, symbol)
+    if seller_balance < qty - QUANTITY_EPSILON:
+        raise ValueError(
+            f"Seller {seller} has insufficient balance: {seller_balance} < {qty}"
+        )
+
+    currency = state['currency']
+
+    # Build moves
+    moves = [
+        # Transfer the structured note units
+        Move(
+            quantity=qty,
+            unit_symbol=symbol,
+            source=seller,
+            dest=buyer,
+            contract_id=f'sn_trade_{symbol}_unit',
+        ),
+    ]
+
+    # Cash payment if price > 0
+    total_payment = qty * price
+    if total_payment > QUANTITY_EPSILON:
+        moves.append(Move(
+            quantity=total_payment,
+            unit_symbol=currency,
+            source=buyer,
+            dest=seller,
+            contract_id=f'sn_trade_{symbol}_cash',
+        ))
+
+    return build_transaction(view, moves)
+
+
+def _process_lifecycle_event(
+    view: LedgerView,
+    symbol: str,
     event_type: str,
     event_date: datetime,
     **kwargs
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Generate moves and state updates for a structured note lifecycle event.
 
@@ -578,15 +674,15 @@ def transact(
             - For COUPON: None required
 
     Returns:
-        ContractResult with moves and state_updates, or empty result
+        PendingTransaction with moves and state_updates, or empty result
         if event_type is unknown or required parameters are missing.
 
     Example:
         >>> # Process a coupon payment
-        >>> result = transact(view, "SN_SPX_2025", "COUPON", datetime(2024, 7, 15))
+        >>> result = _process_lifecycle_event(view, "SN_SPX_2025", "COUPON", datetime(2024, 7, 15))
 
         >>> # Process maturity settlement
-        >>> result = transact(view, "SN_SPX_2025", "MATURITY", datetime(2025, 1, 15),
+        >>> result = _process_lifecycle_event(view, "SN_SPX_2025", "MATURITY", datetime(2025, 1, 15),
         ...                   final_price=4950.0)
     """
     if event_type == 'COUPON':
@@ -595,11 +691,11 @@ def transact(
     elif event_type == 'MATURITY':
         final_price = kwargs.get('final_price')
         if final_price is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
         return compute_maturity_payoff(view, symbol, final_price)
 
     else:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
 
 # ============================================================================
@@ -611,7 +707,7 @@ def structured_note_contract(
     symbol: str,
     timestamp: datetime,
     prices: Dict[str, float]
-) -> ContractResult:
+) -> PendingTransaction:
     """
     SmartContract function for automatic structured note lifecycle processing.
 
@@ -625,7 +721,7 @@ def structured_note_contract(
         prices: Price data dictionary (must contain underlying price for maturity).
 
     Returns:
-        ContractResult with coupon payment or maturity moves if due,
+        PendingTransaction with coupon payment or maturity moves if due,
         or empty result if no events are due.
 
     Example:
@@ -653,4 +749,4 @@ def structured_note_contract(
         if timestamp >= scheduled_date:
             return compute_coupon_payment(view, symbol, timestamp)
 
-    return ContractResult()
+    return empty_pending_transaction(view)

@@ -2,7 +2,7 @@
 strategies - Trading strategy implementations for the Ledger system.
 
 This module provides trading strategy implementations that operate on the ledger.
-Each strategy is a pure function or callable that generates ContractResults.
+Each strategy is a pure function or callable that returns PendingTransactions.
 
 Available strategies:
 - delta_hedge: Delta hedging strategy for options using Black-Scholes

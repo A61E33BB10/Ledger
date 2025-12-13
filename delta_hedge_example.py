@@ -24,7 +24,7 @@ import time
 
 from ledger import (
     # Core
-    Ledger, Move, cash,
+    Ledger, Move, cash, build_transaction, SYSTEM_WALLET,
 
     # Stock module
     create_stock_unit,
@@ -141,8 +141,6 @@ def main():
         name="delta_hedge_demo",
         initial_time=start_date,
         verbose=True,
-        fast_mode=False,
-        no_log=False,
     )
 
     # Register assets
@@ -153,10 +151,14 @@ def main():
     strategy = ledger.register_wallet("strategy")
     market = ledger.register_wallet("market")
 
-    # Fund wallets
-    ledger.balances[market]["USD"] = 10_000_000
-    ledger.balances[market]["AAPL"] = 100_000
-    ledger.balances[strategy]["USD"] = 100_000
+    # Fund wallets via SYSTEM_WALLET (proper issuance)
+    # SYSTEM_WALLET is auto-registered by the ledger
+    funding_tx = build_transaction(ledger, [
+        Move(10_000_000, "USD", SYSTEM_WALLET, market, "fund_market_usd"),
+        Move(100_000, "AAPL", SYSTEM_WALLET, market, "fund_market_aapl"),
+        Move(100_000, "USD", SYSTEM_WALLET, strategy, "fund_strategy_usd"),
+    ])
+    ledger.execute(funding_tx)
 
     print(f"Strategy: ${ledger.get_balance(strategy, 'USD'):,.2f} cash")
     print(f"Market:   ${ledger.get_balance(market, 'USD'):,.2f} cash, "
@@ -255,7 +257,7 @@ def main():
         result = compute_rebalance(ledger, "HEDGE_AAPL_150", price, min_trade_size=0.01)
 
         if not result.is_empty():
-            ledger.execute_contract(result)
+            ledger.execute(result)
 
             # Print progress every 10 days
             if day % 10 == 0:
@@ -286,7 +288,7 @@ def main():
     # Compute and execute liquidation
     liq_result = compute_liquidation(ledger, "HEDGE_AAPL_150", final_price)
     if not liq_result.is_empty():
-        ledger.execute_contract(liq_result)
+        ledger.execute(liq_result)
 
     state_after = get_hedge_state(ledger, "HEDGE_AAPL_150", final_price)
     print(f"After liquidation:  {state_after['current_shares']:.1f} shares")
@@ -344,17 +346,22 @@ def main_with_lifecycle_engine():
     start_date = datetime(2024, 4, 1, 1, 30)
     maturity_date = datetime(2025, 4, 1, 16, 0)
 
-    ledger = Ledger("engine_hedge", start_date, verbose=True, fast_mode=False, no_log=False)
+    ledger = Ledger("engine_hedge", start_date, verbose=True)
 
     ledger.register_unit(cash("USD", "US Dollar"))
     ledger.register_unit(stock("AAPL", "Apple Inc.", issuer="AAPL", shortable=True))
 
     strategy = ledger.register_wallet("strategy")
     market = ledger.register_wallet("market")
+    # SYSTEM_WALLET is auto-registered by the ledger
 
-    ledger.balances[market]["USD"] = 10_000_000
-    ledger.balances[market]["AAPL"] = 100_000
-    ledger.balances[strategy]["USD"] = 100_000
+    # Fund wallets via SYSTEM_WALLET
+    funding_tx = build_transaction(ledger, [
+        Move(10_000_000, "USD", SYSTEM_WALLET, market, "fund_market_usd"),
+        Move(100_000, "AAPL", SYSTEM_WALLET, market, "fund_market_aapl"),
+        Move(100_000, "USD", SYSTEM_WALLET, strategy, "fund_strategy_usd"),
+    ])
+    ledger.execute(funding_tx)
 
     # Create strategy
     ledger.register_unit(create_delta_hedge_unit(

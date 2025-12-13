@@ -31,8 +31,9 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from ..core import (
-    LedgerView, Move, ContractResult, Unit,
+    LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     QUANTITY_EPSILON, UNIT_TYPE_PORTFOLIO_SWAP,
+    build_transaction, empty_pending_transaction,
 )
 
 
@@ -264,7 +265,7 @@ def compute_swap_reset(
     current_nav: float,
     funding_rate: float,
     days_elapsed: int,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Compute the periodic reset settlement for a portfolio swap.
 
@@ -282,7 +283,7 @@ def compute_swap_reset(
         days_elapsed: Days since last reset for funding calculation
 
     Returns:
-        ContractResult with:
+        PendingTransaction with:
         - moves: Settlement payment move (if non-zero)
         - state_updates: Updated last_nav, last_reset_date, reset_history
 
@@ -304,7 +305,7 @@ def compute_swap_reset(
     state = view.get_unit_state(symbol)
 
     if state.get('terminated', False):
-        return ContractResult()  # Already terminated
+        return empty_pending_transaction(view)  # Already terminated
 
     last_nav = state.get('last_nav')
     if last_nav is None:
@@ -338,19 +339,19 @@ def compute_swap_reset(
         if net_settlement > 0:
             # Payer owes receiver (portfolio outperformed funding)
             moves.append(Move(
+                quantity=net_settlement,
+                unit_symbol=currency,
                 source=payer_wallet,
                 dest=receiver_wallet,
-                unit=currency,
-                quantity=net_settlement,
                 contract_id=f'swap_reset_{symbol}_{next_reset_index}',
             ))
         else:
             # Receiver owes payer (funding exceeded portfolio return)
             moves.append(Move(
+                quantity=-net_settlement,
+                unit_symbol=currency,
                 source=receiver_wallet,
                 dest=payer_wallet,
-                unit=currency,
-                quantity=-net_settlement,
                 contract_id=f'swap_reset_{symbol}_{next_reset_index}',
             ))
 
@@ -368,17 +369,16 @@ def compute_swap_reset(
     })
 
     # Update state
-    state_updates = {
-        symbol: {
-            **state,
-            'last_nav': current_nav,
-            'last_reset_date': view.current_time,
-            'next_reset_index': next_reset_index + 1,
-            'reset_history': reset_history,
-        }
+    new_state = {
+        **state,
+        'last_nav': current_nav,
+        'last_reset_date': view.current_time,
+        'next_reset_index': next_reset_index + 1,
+        'reset_history': reset_history,
     }
+    state_changes = [UnitStateChange(unit=symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 def compute_termination(
@@ -387,7 +387,7 @@ def compute_termination(
     final_nav: float,
     funding_rate: float,
     days_elapsed: int,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Compute early or scheduled termination of a portfolio swap.
 
@@ -402,7 +402,7 @@ def compute_termination(
         days_elapsed: Days since last reset
 
     Returns:
-        ContractResult with:
+        PendingTransaction with:
         - moves: Final settlement payment move (if non-zero)
         - state_updates: Marks swap as terminated
 
@@ -418,7 +418,7 @@ def compute_termination(
     state = view.get_unit_state(symbol)
 
     if state.get('terminated', False):
-        return ContractResult()  # Already terminated
+        return empty_pending_transaction(view)  # Already terminated
 
     last_nav = state.get('last_nav')
     if last_nav is None:
@@ -445,18 +445,18 @@ def compute_termination(
     if abs(net_settlement) > QUANTITY_EPSILON:
         if net_settlement > 0:
             moves.append(Move(
+                quantity=net_settlement,
+                unit_symbol=currency,
                 source=payer_wallet,
                 dest=receiver_wallet,
-                unit=currency,
-                quantity=net_settlement,
                 contract_id=f'swap_termination_{symbol}',
             ))
         else:
             moves.append(Move(
+                quantity=-net_settlement,
+                unit_symbol=currency,
                 source=receiver_wallet,
                 dest=payer_wallet,
-                unit=currency,
-                quantity=-net_settlement,
                 contract_id=f'swap_termination_{symbol}',
             ))
 
@@ -475,20 +475,19 @@ def compute_termination(
     })
 
     # Update state - mark as terminated
-    state_updates = {
-        symbol: {
-            **state,
-            'last_nav': final_nav,
-            'last_reset_date': view.current_time,
-            'next_reset_index': next_reset_index + 1,
-            'reset_history': reset_history,
-            'terminated': True,
-            'termination_date': view.current_time,
-            'termination_nav': final_nav,
-        }
+    new_state = {
+        **state,
+        'last_nav': final_nav,
+        'last_reset_date': view.current_time,
+        'next_reset_index': next_reset_index + 1,
+        'reset_history': reset_history,
+        'terminated': True,
+        'termination_date': view.current_time,
+        'termination_nav': final_nav,
     }
+    state_changes = [UnitStateChange(unit=symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 def transact(
@@ -497,7 +496,7 @@ def transact(
     event_type: str,
     event_date: datetime,
     **kwargs
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Generate moves and state updates for a portfolio swap lifecycle event.
 
@@ -517,7 +516,7 @@ def transact(
             - For INITIALIZE: initial_nav (float) - sets the baseline NAV
 
     Returns:
-        ContractResult with moves and state_updates, or empty result
+        PendingTransaction with moves and state_updates, or empty result
         if event_type is unknown or required parameters are missing.
 
     Example:
@@ -539,24 +538,23 @@ def transact(
         # Initialize the baseline NAV
         initial_nav = kwargs.get('initial_nav')
         if initial_nav is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
         if initial_nav <= 0:
-            return ContractResult()
+            return empty_pending_transaction(view)
 
-        state_updates = {
-            symbol: {
-                **state,
-                'last_nav': initial_nav,
-                'last_reset_date': event_date,
-            }
+        new_state = {
+            **state,
+            'last_nav': initial_nav,
+            'last_reset_date': event_date,
         }
-        return ContractResult(state_updates=state_updates)
+        state_changes = [UnitStateChange(unit=symbol, old_state=state, new_state=new_state)]
+        return build_transaction(view, [], state_changes)
 
     elif event_type == 'RESET':
         current_nav = kwargs.get('current_nav')
         days_elapsed = kwargs.get('days_elapsed')
         if current_nav is None or days_elapsed is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
 
         funding_rate = kwargs.get('funding_rate', state.get('funding_spread', 0.0))
         return compute_swap_reset(view, symbol, current_nav, funding_rate, days_elapsed)
@@ -565,13 +563,13 @@ def transact(
         final_nav = kwargs.get('final_nav')
         days_elapsed = kwargs.get('days_elapsed')
         if final_nav is None or days_elapsed is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
 
         funding_rate = kwargs.get('funding_rate', state.get('funding_spread', 0.0))
         return compute_termination(view, symbol, final_nav, funding_rate, days_elapsed)
 
     else:
-        return ContractResult()  # Unknown event type
+        return empty_pending_transaction(view)  # Unknown event type
 
 
 def portfolio_swap_contract(
@@ -579,7 +577,7 @@ def portfolio_swap_contract(
     symbol: str,
     timestamp: datetime,
     prices: Dict[str, float]
-) -> ContractResult:
+) -> PendingTransaction:
     """
     SmartContract function for automatic portfolio swap processing.
 
@@ -596,7 +594,7 @@ def portfolio_swap_contract(
         prices: Market prices dictionary (must contain all portfolio assets)
 
     Returns:
-        ContractResult with reset moves if a reset date has been reached,
+        PendingTransaction with reset moves if a reset date has been reached,
         or empty result if no events are due.
 
     Example:
@@ -612,17 +610,17 @@ def portfolio_swap_contract(
     state = view.get_unit_state(symbol)
 
     if state.get('terminated', False):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     reset_schedule = state.get('reset_schedule', [])
     next_reset_index = state.get('next_reset_index', 0)
 
     if next_reset_index >= len(reset_schedule):
-        return ContractResult()  # All resets processed
+        return empty_pending_transaction(view)  # All resets processed
 
     next_reset_date = reset_schedule[next_reset_index]
     if timestamp < next_reset_date:
-        return ContractResult()  # Not yet time for reset
+        return empty_pending_transaction(view)  # Not yet time for reset
 
     # Time for a reset - calculate current NAV
     portfolio = state.get('reference_portfolio', {})
@@ -631,7 +629,7 @@ def portfolio_swap_contract(
     try:
         current_nav = compute_portfolio_nav(portfolio, prices, notional)
     except ValueError:
-        return ContractResult()  # Missing prices
+        return empty_pending_transaction(view)  # Missing prices
 
     # Calculate days elapsed
     last_reset_date = state.get('last_reset_date')
@@ -675,10 +673,10 @@ def portfolio_swap_contract(
         if abs(funding_amount) > QUANTITY_EPSILON:
             # Receiver pays funding to payer (no portfolio return to offset)
             moves.append(Move(
+                quantity=funding_amount,
+                unit_symbol=currency,
                 source=receiver_wallet,
                 dest=payer_wallet,
-                unit=currency,
-                quantity=funding_amount,
                 contract_id=f'swap_reset_{symbol}_{next_reset_index}',
             ))
 
@@ -696,15 +694,14 @@ def portfolio_swap_contract(
             'is_initial_reset': True,
         })
 
-        state_updates = {
-            symbol: {
-                **state,
-                'last_nav': current_nav,
-                'last_reset_date': timestamp,
-                'next_reset_index': next_reset_index + 1,
-                'reset_history': reset_history,
-            }
+        new_state = {
+            **state,
+            'last_nav': current_nav,
+            'last_reset_date': timestamp,
+            'next_reset_index': next_reset_index + 1,
+            'reset_history': reset_history,
         }
-        return ContractResult(moves=tuple(moves), state_updates=state_updates)
+        state_changes = [UnitStateChange(unit=symbol, old_state=state, new_state=new_state)]
+        return build_transaction(view, moves, state_changes)
 
     return compute_swap_reset(view, symbol, current_nav, funding_rate, days_elapsed)

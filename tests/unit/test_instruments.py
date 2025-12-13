@@ -2,7 +2,7 @@
 test_instruments.py - Unit tests for instrument modules
 
 Tests pure functions for:
-- Stocks: create_stock_unit, compute_scheduled_dividend
+- Stocks: create_stock_unit, process_dividends
 - Options: create_option_unit, compute_option_settlement
 - Forwards: create_forward_unit, compute_forward_settlement
 - Delta Hedge: create_delta_hedge_unit, compute_rebalance, compute_liquidation
@@ -11,9 +11,13 @@ Tests pure functions for:
 import pytest
 from datetime import datetime, timedelta
 from ledger import (
+    # Core
+    PendingTransaction,
+
     # Stocks
+    Dividend,
     create_stock_unit,
-    compute_scheduled_dividend,
+    process_dividends,
     stock_contract,
 
     # Options
@@ -35,9 +39,6 @@ from ledger import (
     get_hedge_state,
     compute_hedge_pnl_breakdown,
     delta_hedge_contract,
-
-    # Core
-    ContractResult,
 )
 from tests.fake_view import FakeView
 
@@ -69,8 +70,8 @@ class TestCreateStockUnit:
     def test_create_stock_with_dividend_schedule(self):
         """Stock with dividend schedule."""
         schedule = [
-            (datetime(2025, 3, 15), 0.25),
-            (datetime(2025, 6, 15), 0.25),
+            Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD"),
+            Dividend(datetime(2025, 6, 15), datetime(2025, 6, 15), 0.25, "USD"),
         ]
         unit = create_stock_unit("AAPL", "Apple Inc", "treasury", "USD",
                                   dividend_schedule=schedule)
@@ -83,8 +84,8 @@ class TestCreateStockUnit:
         assert unit._state['issuer'] == "treasury"
 
 
-class TestComputeScheduledDividend:
-    """Tests for compute_scheduled_dividend pure function."""
+class TestProcessDividends:
+    """Tests for process_dividends pure function."""
 
     def test_dividend_on_payment_date(self):
         """Dividend paid on payment date."""
@@ -99,15 +100,15 @@ class TestComputeScheduledDividend:
                     "unit_type": "STOCK",
                     "issuer": "treasury",
                     "currency": "USD",
-                    "dividend_schedule": [(datetime(2025, 3, 15), 0.25)],
-                    "next_payment_index": 0,
-                    "paid_dividends": [],
+                    "dividend_schedule": [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD")],
+                    "snapshots": {},
+                    "paid": {},
                 }
             },
             time=datetime(2025, 3, 15)
         )
 
-        result = compute_scheduled_dividend(view, "AAPL", datetime(2025, 3, 15))
+        result = process_dividends(view, "AAPL", datetime(2025, 3, 15))
 
         assert not result.is_empty()
         assert len(result.moves) == 2  # alice and bob
@@ -121,15 +122,15 @@ class TestComputeScheduledDividend:
                     "unit_type": "STOCK",
                     "issuer": "treasury",
                     "currency": "USD",
-                    "dividend_schedule": [(datetime(2025, 3, 15), 0.25)],
-                    "next_payment_index": 0,
-                    "paid_dividends": [],
+                    "dividend_schedule": [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD")],
+                    "snapshots": {},
+                    "paid": {},
                 }
             },
             time=datetime(2025, 3, 14)
         )
 
-        result = compute_scheduled_dividend(view, "AAPL", datetime(2025, 3, 14))
+        result = process_dividends(view, "AAPL", datetime(2025, 3, 14))
         assert result.is_empty()
 
     def test_dividend_correct_amount(self):
@@ -144,19 +145,21 @@ class TestComputeScheduledDividend:
                     "unit_type": "STOCK",
                     "issuer": "treasury",
                     "currency": "USD",
-                    "dividend_schedule": [(datetime(2025, 3, 15), 0.25)],
-                    "next_payment_index": 0,
-                    "paid_dividends": [],
+                    "dividend_schedule": [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD")],
+                    "processed_dividends": [],
                 }
             },
             time=datetime(2025, 3, 15)
         )
 
-        result = compute_scheduled_dividend(view, "AAPL", datetime(2025, 3, 15))
+        result = process_dividends(view, "AAPL", datetime(2025, 3, 15))
 
-        # alice: 1000 shares × $0.25 = $250
-        dividend_move = result.moves[0]
-        assert dividend_move.quantity == 250.0
+        # alice: DeferredCash entitlement (qty=1)
+        assert len(result.moves) == 1
+        assert len(result.units_to_create) == 1
+        # Check DeferredCash amount: 1000 shares × $0.25 = $250
+        dc_unit = result.units_to_create[0]
+        assert dc_unit._state["amount"] == 250.0
 
     def test_dividend_excludes_issuer(self):
         """Issuer doesn't receive dividend on own shares."""
@@ -170,22 +173,21 @@ class TestComputeScheduledDividend:
                     "unit_type": "STOCK",
                     "issuer": "treasury",
                     "currency": "USD",
-                    "dividend_schedule": [(datetime(2025, 3, 15), 0.25)],
-                    "next_payment_index": 0,
-                    "paid_dividends": [],
+                    "dividend_schedule": [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD")],
+                    "processed_dividends": [],
                 }
             },
             time=datetime(2025, 3, 15)
         )
 
-        result = compute_scheduled_dividend(view, "AAPL", datetime(2025, 3, 15))
+        result = process_dividends(view, "AAPL", datetime(2025, 3, 15))
 
-        # Only alice gets dividend, not treasury
+        # Only alice gets dividend (DeferredCash), not treasury
         assert len(result.moves) == 1
         assert result.moves[0].dest == "alice"
 
-    def test_dividend_advances_index(self):
-        """State update advances next_payment_index."""
+    def test_dividend_tracks_processed(self):
+        """State update tracks processed dividends."""
         view = FakeView(
             balances={
                 "alice": {"AAPL": 1000},
@@ -196,21 +198,21 @@ class TestComputeScheduledDividend:
                     "unit_type": "STOCK",
                     "issuer": "treasury",
                     "currency": "USD",
-                    "dividend_schedule": [(datetime(2025, 3, 15), 0.25)],
-                    "next_payment_index": 0,
-                    "paid_dividends": [],
+                    "dividend_schedule": [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD")],
+                    "processed_dividends": [],
                 }
             },
             time=datetime(2025, 3, 15)
         )
 
-        result = compute_scheduled_dividend(view, "AAPL", datetime(2025, 3, 15))
+        result = process_dividends(view, "AAPL", datetime(2025, 3, 15))
 
-        assert "AAPL" in result.state_updates
-        assert result.state_updates["AAPL"]["next_payment_index"] == 1
+        sc = next(d for d in result.state_changes if d.unit == "AAPL")
+        # New format: just processed_dividends list
+        assert "2025-03-15" in sc.new_state["processed_dividends"]
 
-    def test_dividend_exhausted_schedule(self):
-        """Empty result when all dividends paid."""
+    def test_dividend_already_processed(self):
+        """Empty result when dividend already processed."""
         view = FakeView(
             balances={
                 "alice": {"AAPL": 1000},
@@ -221,15 +223,14 @@ class TestComputeScheduledDividend:
                     "unit_type": "STOCK",
                     "issuer": "treasury",
                     "currency": "USD",
-                    "dividend_schedule": [(datetime(2025, 3, 15), 0.25)],
-                    "next_payment_index": 1,  # Already paid
-                    "paid_dividends": [(datetime(2025, 3, 15), 0.25)],
+                    "dividend_schedule": [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD")],
+                    "processed_dividends": ["2025-03-15"],
                 }
             },
             time=datetime(2025, 6, 15)
         )
 
-        result = compute_scheduled_dividend(view, "AAPL", datetime(2025, 6, 15))
+        result = process_dividends(view, "AAPL", datetime(2025, 6, 15))
         assert result.is_empty()
 
 
@@ -237,7 +238,7 @@ class TestStockContract:
     """Tests for stock_contract SmartContract interface."""
 
     def test_stock_contract_returns_contract_result(self):
-        """stock_contract returns ContractResult."""
+        """stock_contract returns PendingTransaction."""
         view = FakeView(
             balances={"alice": {"AAPL": 1000}, "treasury": {"USD": 10000000}},
             states={
@@ -245,9 +246,9 @@ class TestStockContract:
                     "unit_type": "STOCK",
                     "issuer": "treasury",
                     "currency": "USD",
-                    "dividend_schedule": [(datetime(2025, 3, 15), 0.25)],
-                    "next_payment_index": 0,
-                    "paid_dividends": [],
+                    "dividend_schedule": [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD")],
+                    "snapshots": {},
+                    "paid": {},
                 }
             },
             time=datetime(2025, 3, 15)
@@ -255,7 +256,7 @@ class TestStockContract:
 
         result = stock_contract(view, "AAPL", datetime(2025, 3, 15), {"AAPL": 150.0})
 
-        assert isinstance(result, ContractResult)
+        assert isinstance(result, PendingTransaction)
 
 
 # =============================================================================
@@ -364,8 +365,9 @@ class TestComputeOptionSettlement:
 
         assert not result.is_empty()
         # State should show exercised=True, settled=True
-        assert result.state_updates["OPT"]["exercised"] is True
-        assert result.state_updates["OPT"]["settled"] is True
+        sc = next(d for d in result.state_changes if d.unit == "OPT")
+        assert sc.new_state["exercised"] is True
+        assert sc.new_state["settled"] is True
 
     def test_call_otm_settlement(self):
         """OTM call option expires worthless."""
@@ -395,8 +397,9 @@ class TestComputeOptionSettlement:
         result = compute_option_settlement(view, "OPT", 140.0)
 
         # Should still settle but not exercise
-        assert result.state_updates["OPT"]["settled"] is True
-        assert result.state_updates["OPT"]["exercised"] is False
+        sc = next(d for d in result.state_changes if d.unit == "OPT")
+        assert sc.new_state["settled"] is True
+        assert sc.new_state["exercised"] is False
 
     def test_option_already_settled_empty(self):
         """Already settled option returns empty."""
@@ -582,7 +585,8 @@ class TestComputeForwardSettlement:
         result = compute_forward_settlement(view, "FWD")
 
         assert not result.is_empty()
-        assert result.state_updates["FWD"]["settled"] is True
+        sc = next(d for d in result.state_changes if d.unit == "FWD")
+        assert sc.new_state["settled"] is True
 
     def test_forward_before_delivery_empty(self):
         """Forward before delivery returns empty."""
@@ -818,8 +822,9 @@ class TestComputeLiquidation:
         result = compute_liquidation(view, "HEDGE", 160.0)
 
         assert not result.is_empty()
-        assert result.state_updates["HEDGE"]["liquidated"] is True
-        assert result.state_updates["HEDGE"]["current_shares"] == 0.0
+        sc = next(d for d in result.state_changes if d.unit == "HEDGE")
+        assert sc.new_state["liquidated"] is True
+        assert sc.new_state["current_shares"] == 0.0
 
     def test_liquidation_already_liquidated_empty(self):
         """Liquidation when already liquidated returns empty."""
@@ -902,7 +907,7 @@ class TestDeltaHedgeContract:
         assert callable(contract)
 
     def test_delta_hedge_contract_returns_result(self):
-        """Contract call returns ContractResult."""
+        """Contract call returns ."""
         view = FakeView(
             balances={
                 "trader": {"USD": 500000},
@@ -933,4 +938,4 @@ class TestDeltaHedgeContract:
         contract = delta_hedge_contract(min_trade_size=0.01)
         result = contract(view, "HEDGE", datetime(2025, 1, 1), {"AAPL": 150.0})
 
-        assert isinstance(result, ContractResult)
+        assert isinstance(result, PendingTransaction)

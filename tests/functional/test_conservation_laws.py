@@ -16,7 +16,7 @@ import pytest
 import random
 from datetime import datetime, timedelta
 from ledger import (
-    Ledger, Move, ContractResult,
+    Ledger, Move, build_transaction,
     cash,
     create_stock_unit,
     create_option_unit,
@@ -27,15 +27,17 @@ from ledger import (
     option_contract,
     forward_contract,
     delta_hedge_contract,
-    compute_scheduled_dividend,
+    deferred_cash_contract,
+    process_dividends,
+    Dividend,
     compute_option_settlement,
     TimeSeriesPricingSource,
 )
 
 
-def total_supply(ledger: Ledger, unit: str) -> float:
+def total_supply(ledger: Ledger, unit_symbol: str) -> float:
     """Calculate total supply of a unit across all wallets."""
-    return ledger.total_supply(unit)
+    return ledger.total_supply(unit_symbol)
 
 
 def verify_all_units_conserved(ledger: Ledger, expected_supplies: dict, tolerance: float = 1e-9) -> bool:
@@ -62,8 +64,8 @@ class TestBasicConservation:
         initial_supply = total_supply(ledger, "USD")
 
         # Transfer
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "USD", 100.0, "payment")
+        tx = build_transaction(ledger, [
+            Move(100.0, "USD", "alice", "bob", "payment")
         ])
         ledger.execute(tx)
 
@@ -87,9 +89,9 @@ class TestBasicConservation:
         initial_aapl = total_supply(ledger, "AAPL")
 
         # Trade
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "USD", 1500.0, "trade"),
-            Move("bob", "alice", "AAPL", 10.0, "trade"),
+        tx = build_transaction(ledger, [
+            Move(1500.0, "USD", "alice", "bob", "trade"),
+            Move(10.0, "AAPL", "bob", "alice", "trade"),
         ])
         ledger.execute(tx)
 
@@ -101,7 +103,7 @@ class TestBasicConservation:
         """Many random transactions conserve total supply."""
         random.seed(42)
 
-        ledger = Ledger("test", verbose=False, fast_mode=True)
+        ledger = Ledger("test", verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True))
 
@@ -125,8 +127,8 @@ class TestBasicConservation:
             unit = random.choice(["USD", "AAPL"])
             amount = random.uniform(0.01, 10.0)
 
-            tx = ledger.create_transaction([
-                Move(source, dest, unit, amount, f"tx_{i}")
+            tx = build_transaction(ledger, [
+                Move(amount, unit, source, dest, f"tx_{i}")
             ])
             ledger.execute(tx)
 
@@ -150,8 +152,8 @@ class TestConservationWithRounding:
 
         # Many small transactions that require rounding
         for i in range(100):
-            tx = ledger.create_transaction([
-                Move("alice", "bob", "USD", 0.01, f"micro_{i}")
+            tx = build_transaction(ledger, [
+                Move(0.01, "USD", "alice", "bob", f"micro_{i}")
             ])
             ledger.execute(tx)
 
@@ -171,13 +173,13 @@ class TestConservationWithRounding:
         initial_supply = total_supply(ledger, "USD")
 
         # Transfer with rounding
-        tx1 = ledger.create_transaction([
-            Move("alice", "bob", "USD", 333.33, "split1")
+        tx1 = build_transaction(ledger, [
+            Move(333.33, "USD", "alice", "bob", "split1")
         ])
         ledger.execute(tx1)
 
-        tx2 = ledger.create_transaction([
-            Move("alice", "charlie", "USD", 333.33, "split2")
+        tx2 = build_transaction(ledger, [
+            Move(333.33, "USD", "alice", "charlie", "split2")
         ])
         ledger.execute(tx2)
 
@@ -194,7 +196,7 @@ class TestConservationWithDividends:
         ledger = Ledger("test", datetime(2025, 3, 15), verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
 
-        schedule = [(datetime(2025, 3, 15), 0.25)]
+        schedule = [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD")]
         ledger.register_unit(create_stock_unit(
             "AAPL", "Apple", "treasury", "USD",
             dividend_schedule=schedule, shortable=True
@@ -212,8 +214,8 @@ class TestConservationWithDividends:
         initial_aapl = total_supply(ledger, "AAPL")
 
         # Process dividend
-        result = compute_scheduled_dividend(ledger, "AAPL", datetime(2025, 3, 15))
-        ledger.execute_contract(result)
+        result = process_dividends(ledger, "AAPL", datetime(2025, 3, 15))
+        ledger.execute(result)
 
         # Conservation check - USD and AAPL should be conserved
         assert abs(total_supply(ledger, "USD") - initial_usd) < 1e-9
@@ -225,10 +227,10 @@ class TestConservationWithDividends:
         ledger.register_unit(cash("USD", "US Dollar"))
 
         schedule = [
-            (datetime(2025, 3, 15), 0.25),
-            (datetime(2025, 6, 15), 0.25),
-            (datetime(2025, 9, 15), 0.25),
-            (datetime(2025, 12, 15), 0.25),
+            Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD"),
+            Dividend(datetime(2025, 6, 15), datetime(2025, 6, 15), 0.25, "USD"),
+            Dividend(datetime(2025, 9, 15), datetime(2025, 9, 15), 0.25, "USD"),
+            Dividend(datetime(2025, 12, 15), datetime(2025, 12, 15), 0.25, "USD"),
         ]
         ledger.register_unit(create_stock_unit(
             "AAPL", "Apple", "treasury", "USD",
@@ -248,6 +250,7 @@ class TestConservationWithDividends:
         # Process all dividends
         engine = LifecycleEngine(ledger)
         engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
 
         for date in [datetime(2025, 3, 15), datetime(2025, 6, 15),
                      datetime(2025, 9, 15), datetime(2025, 12, 15)]:
@@ -288,7 +291,7 @@ class TestConservationWithOptions:
         # Settle at maturity
         ledger.advance_time(datetime(2025, 6, 20))
         result = compute_option_settlement(ledger, "AAPL_C150", 170.0)
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # Conservation check
         assert abs(total_supply(ledger, "USD") - initial_usd) < 1e-9
@@ -338,40 +341,6 @@ class TestConservationWithDeltaHedge:
         # Conservation check
         assert abs(total_supply(ledger, "USD") - initial_usd) < 1e-6
         assert abs(total_supply(ledger, "AAPL") - initial_aapl) < 1e-6
-
-
-class TestConservationInMonteCarloMode:
-    """Conservation tests in Monte Carlo mode."""
-
-    def test_fast_mode_conserves(self):
-        """fast_mode=True still conserves."""
-        ledger = Ledger("test", verbose=False, fast_mode=True, no_log=True)
-        ledger.register_unit(cash("USD", "US Dollar"))
-        ledger.register_unit(create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True))
-
-        wallets = [f"w_{i}" for i in range(10)]
-        for w in wallets:
-            ledger.register_wallet(w)
-            ledger.set_balance(w, "USD", 10000)
-            ledger.set_balance(w, "AAPL", 100)
-
-        initial_usd = total_supply(ledger, "USD")
-        initial_aapl = total_supply(ledger, "AAPL")
-
-        # Many fast transactions
-        random.seed(123)
-        for i in range(10000):
-            src = random.choice(wallets)
-            dst = random.choice([w for w in wallets if w != src])
-            unit = random.choice(["USD", "AAPL"])
-            amt = random.uniform(0.01, 5.0)
-
-            tx = ledger.create_transaction([Move(src, dst, unit, amt, f"tx_{i}")])
-            ledger.execute(tx)
-
-        # Conservation check
-        assert abs(total_supply(ledger, "USD") - initial_usd) < 1e-4
-        assert abs(total_supply(ledger, "AAPL") - initial_aapl) < 1e-4
 
 
 class TestPositionSumEqualsSupply:

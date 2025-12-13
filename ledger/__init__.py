@@ -4,15 +4,23 @@ ledger - Financial Ledger System
 A modular ledger implementation for financial simulations and portfolio tracking.
 
 Usage:
-    from ledger import Ledger, cash, Move, create_stock_unit
+    from ledger import Ledger, cash, Move, build_transaction, SYSTEM_WALLET
 
-    ledger = Ledger("main", fast_mode=True, no_log=True)
+    ledger = Ledger("main")
     ledger.register_unit(cash("USD", "US Dollar"))
     ledger.register_wallet("alice")
     ledger.register_wallet("bob")
+    ledger.register_wallet(SYSTEM_WALLET)
 
-    tx = ledger.create_transaction([
-        Move("alice", "bob", "USD", 100.0, "payment_001")
+    # Fund wallets via SYSTEM_WALLET (proper issuance)
+    funding = build_transaction(ledger, [
+        Move(1000.0, "USD", SYSTEM_WALLET, "alice", "initial_balance")
+    ])
+    ledger.execute(funding)
+
+    # Transfer between wallets
+    tx = build_transaction(ledger, [
+        Move(100.0, "USD", "alice", "bob", "payment_001")
     ])
     result = ledger.execute(tx)
 """
@@ -20,11 +28,16 @@ Usage:
 # Core types
 from .core import (
     LedgerView,
+    SmartContract,
     Move,
     Transaction,
-    ContractResult,
+    PendingTransaction,
+    TransactionOrigin,
+    OriginType,
+    build_transaction,
+    empty_pending_transaction,
     Unit,
-    StateDelta,
+    UnitStateChange,
     ExecuteResult,
     LedgerError,
     InsufficientFunds,
@@ -42,10 +55,14 @@ from .core import (
     UNIT_TYPE_DEFERRED_CASH,
     UNIT_TYPE_DELTA_HEDGE_STRATEGY,
     UNIT_TYPE_BOND,
+    UNIT_TYPE_FUTURE,
     UNIT_TYPE_AUTOCALLABLE,
     UNIT_TYPE_MARGIN_LOAN,
     UNIT_TYPE_PORTFOLIO_SWAP,
     UNIT_TYPE_STRUCTURED_NOTE,
+    UNIT_TYPE_BORROW_RECORD,
+    UNIT_TYPE_LOCATE,
+    UNIT_TYPE_QIS,
 )
 
 # Ledger
@@ -65,7 +82,6 @@ from .black_scholes import (
 # Options
 from .units.option import (
     create_option_unit,
-    build_option_trade,
     compute_option_settlement,
     compute_option_exercise,
     get_option_intrinsic_value,
@@ -96,9 +112,13 @@ from .strategies.delta_hedge import (
 
 # Stocks
 from .units.stock import (
+    Dividend,
+    SplitAdjustment,
+    BorrowSplitAdjustment,
     create_stock_unit,
-    compute_scheduled_dividend,
+    process_dividends,
     compute_stock_split,
+    compute_split_adjustments,
     stock_contract,
     transact as stock_transact,
 )
@@ -198,10 +218,48 @@ from .units.structured_note import (
     generate_structured_note_coupon_schedule,
 )
 
+# Borrow Records (SBL)
+from .units.borrow_record import (
+    create_borrow_record_unit,
+    initiate_borrow,
+    compute_borrow_return,
+    initiate_recall,
+    compute_available_position,
+    compute_borrow_fee,
+    compute_required_collateral,
+    validate_short_sale,
+    get_active_borrows,
+    get_total_borrowed,
+    borrow_record_contract,
+    BorrowStatus,
+    ContractType as BorrowContractType,
+)
+
 # Lifecycle
-from .lifecycle import (
-    SmartContract,
-    LifecycleEngine,
+from .enhanced_lifecycle import LifecycleEngine
+
+# Scheduled Events (simplified API)
+from .scheduled_events import (
+    Event,
+    EventScheduler,
+    EventHandler,
+    dividend_event,
+    coupon_event,
+    maturity_event,
+    expiry_event,
+    settlement_event,
+    split_event,
+)
+
+from .event_handlers import (
+    handle_dividend,
+    handle_coupon,
+    handle_maturity,
+    handle_expiry,
+    handle_settlement,
+    handle_split,
+    DEFAULT_HANDLERS,
+    create_default_scheduler,
 )
 
 # Pricing sources
@@ -211,9 +269,28 @@ from .pricing_source import (
     TimeSeriesPricingSource,
 )
 
+# QIS (Quantitative Investment Strategy)
+from .units.qis import (
+    create_qis,
+    compute_nav as compute_qis_nav,
+    accrue_financing as accrue_qis_financing,
+    compute_rebalance as compute_qis_rebalance,
+    compute_payoff as compute_qis_payoff,
+    compute_qis_settlement,
+    qis_contract,
+    leveraged_strategy,
+    fixed_weight_strategy,
+    get_qis_nav,
+    get_qis_return,
+    get_qis_leverage,
+    Strategy as QISStrategy,
+)
+
 __all__ = [
     # Core
-    'LedgerView', 'Move', 'Transaction', 'ContractResult', 'Unit', 'StateDelta',
+    'LedgerView', 'Move', 'Transaction', 'PendingTransaction', 'TransactionOrigin', 'OriginType',
+    'build_transaction', 'empty_pending_transaction',
+    'Unit', 'UnitStateChange',
     'ExecuteResult', 'LedgerError', 'InsufficientFunds', 'BalanceConstraintViolation',
     'TransferRuleViolation', 'UnitNotRegistered', 'WalletNotRegistered',
     'bilateral_transfer_rule', 'cash',
@@ -221,7 +298,7 @@ __all__ = [
     'UNIT_TYPE_CASH', 'UNIT_TYPE_STOCK', 'UNIT_TYPE_BILATERAL_OPTION',
     'UNIT_TYPE_BILATERAL_FORWARD', 'UNIT_TYPE_DEFERRED_CASH', 'UNIT_TYPE_DELTA_HEDGE_STRATEGY',
     'UNIT_TYPE_BOND', 'UNIT_TYPE_FUTURE', 'UNIT_TYPE_AUTOCALLABLE', 'UNIT_TYPE_MARGIN_LOAN',
-    'UNIT_TYPE_PORTFOLIO_SWAP',
+    'UNIT_TYPE_PORTFOLIO_SWAP', 'UNIT_TYPE_BORROW_RECORD', 'UNIT_TYPE_LOCATE',
     # Ledger
     'Ledger',
     # Black-Scholes
@@ -229,7 +306,7 @@ __all__ = [
     'call_vega', 'put_vega', 'call_theta', 'put_theta', 'call_impvol', 'put_impvol',
     'gamma', 'vega',
     # Options
-    'create_option_unit', 'build_option_trade', 'compute_option_settlement',
+    'create_option_unit', 'compute_option_settlement',
     'compute_option_exercise', 'get_option_intrinsic_value', 'get_option_moneyness',
     'option_contract', 'option_transact',
     # Forwards
@@ -239,8 +316,9 @@ __all__ = [
     'create_delta_hedge_unit', 'compute_rebalance', 'compute_liquidation',
     'get_hedge_state', 'compute_hedge_pnl_breakdown', 'delta_hedge_contract',
     # Stocks
-    'create_stock_unit', 'compute_scheduled_dividend', 'compute_stock_split',
-    'stock_contract', 'stock_transact',
+    'Dividend', 'SplitAdjustment', 'BorrowSplitAdjustment',
+    'create_stock_unit', 'process_dividends', 'compute_stock_split',
+    'compute_split_adjustments', 'stock_contract', 'stock_transact',
     # DeferredCash
     'create_deferred_cash_unit', 'compute_deferred_cash_settlement',
     'deferred_cash_transact', 'deferred_cash_contract',
@@ -274,10 +352,28 @@ __all__ = [
     'compute_structured_note_coupon', 'compute_structured_note_maturity',
     'structured_note_contract', 'structured_note_transact',
     'generate_structured_note_coupon_schedule', 'UNIT_TYPE_STRUCTURED_NOTE',
+    # Borrow Records (SBL)
+    'create_borrow_record_unit', 'initiate_borrow', 'compute_borrow_return',
+    'initiate_recall', 'compute_available_position', 'compute_borrow_fee',
+    'compute_required_collateral', 'validate_short_sale', 'get_active_borrows',
+    'get_total_borrowed', 'borrow_record_contract', 'BorrowStatus', 'BorrowContractType',
     # Lifecycle
     'SmartContract', 'LifecycleEngine',
+    # Scheduled Events (simplified)
+    'Event', 'EventScheduler', 'EventHandler',
+    'dividend_event', 'coupon_event', 'maturity_event',
+    'expiry_event', 'settlement_event', 'split_event',
+    # Event Handlers
+    'handle_dividend', 'handle_coupon', 'handle_maturity',
+    'handle_expiry', 'handle_settlement', 'handle_split',
+    'DEFAULT_HANDLERS', 'create_default_scheduler',
     # Pricing
     'PricingSource', 'StaticPricingSource', 'TimeSeriesPricingSource',
+    # QIS
+    'UNIT_TYPE_QIS', 'create_qis', 'compute_qis_nav', 'accrue_qis_financing',
+    'compute_qis_rebalance', 'compute_qis_payoff', 'compute_qis_settlement',
+    'qis_contract', 'leveraged_strategy', 'fixed_weight_strategy',
+    'get_qis_nav', 'get_qis_return', 'get_qis_leverage', 'QISStrategy',
 ]
 
 __version__ = '1.0.0'

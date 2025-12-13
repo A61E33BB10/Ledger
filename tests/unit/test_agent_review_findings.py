@@ -19,8 +19,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any
 
 from ledger import (
-    Ledger, Move, cash, ExecuteResult, Transaction, ContractResult,
-    SYSTEM_WALLET
+    Ledger, Move, cash, ExecuteResult, Transaction,
+    SYSTEM_WALLET, build_transaction, Dividend,
 )
 from ledger.core import QUANTITY_EPSILON
 from ledger.units.future import (
@@ -89,22 +89,22 @@ class TestCorporateActionDates:
 
         ledger = Ledger("test", initial_time=datetime(2024, 3, 1))
 
-        # Current API: payment_date only
+        # New API: Dividend objects with ex_date, payment_date, amount, currency
         stock = create_stock_unit(
             symbol="AAPL",
             name="Apple",
             issuer="issuer",
             currency="USD",
             dividend_schedule=[
-                (datetime(2024, 3, 15), 0.25),  # payment_date only
+                Dividend(datetime(2024, 3, 15), datetime(2024, 3, 15), 0.25, "USD"),
             ]
         )
 
         state = stock._state
         schedule = state.get('dividend_schedule', [])
 
-        # Document: Only 2 elements (payment_date, amount) - no ex-date
-        assert len(schedule[0]) == 2, "Schedule has payment_date and amount only"
+        # Verify: Schedule contains Dividend objects
+        assert len(schedule) > 0, "Schedule should have dividend entries"
 
 
 # =============================================================================
@@ -122,8 +122,8 @@ class TestAuditTrailCompleteness:
         ledger.register_wallet("bob")
         ledger.set_balance("alice", "USD", 1000.0)
 
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "USD", 100.0, "audit_test_1")
+        tx = build_transaction(ledger, [
+            Move(100.0, "USD", "alice", "bob", "audit_test_1")
         ])
         result = ledger.execute(tx)
 
@@ -133,7 +133,7 @@ class TestAuditTrailCompleteness:
         assert len(logged_tx.moves) == 1
         assert logged_tx.moves[0].quantity == 100.0
 
-    def test_state_deltas_captured_in_transaction(self):
+    def test_state_changes_captured_in_transaction(self):
         """Verify state changes are captured in transaction log."""
         ledger = Ledger("delta_test", initial_time=datetime(2024, 1, 1))
         ledger.register_unit(cash("USD", "US Dollar"))
@@ -158,12 +158,12 @@ class TestAuditTrailCompleteness:
 
         # Interest accrual creates state delta
         result = compute_interest_accrual(ledger, "LOAN_001", 30.0)
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # Verify state delta was logged
         if ledger.transaction_log:
             last_tx = ledger.transaction_log[-1]
-            assert len(last_tx.state_deltas) > 0, "State deltas should be logged"
+            assert len(last_tx.state_changes) > 0, "State deltas should be logged"
 
     def test_idempotency_prevents_duplicate_execution(self):
         """Verify same tx_id cannot be executed twice."""
@@ -173,8 +173,8 @@ class TestAuditTrailCompleteness:
         ledger.register_wallet("bob")
         ledger.set_balance("alice", "USD", 1000.0)
 
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "USD", 100.0, "idem_test_1")
+        tx = build_transaction(ledger, [
+            Move(100.0, "USD", "alice", "bob", "idem_test_1")
         ])
 
         result1 = ledger.execute(tx)
@@ -205,7 +205,6 @@ class TestSettlementBehavior:
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("buyer")
         ledger.register_wallet("seller")
-        ledger.register_wallet(SYSTEM_WALLET)
 
         # Create deferred cash for T+2 settlement
         dc = create_deferred_cash_unit(
@@ -222,8 +221,8 @@ class TestSettlementBehavior:
         ledger.set_balance(SYSTEM_WALLET, "DC_001", 1.0)
 
         # Move obligation to buyer
-        tx = ledger.create_transaction([
-            Move(SYSTEM_WALLET, "buyer", "DC_001", 1.0, "create_obligation")
+        tx = build_transaction(ledger, [
+            Move(1.0, "DC_001", SYSTEM_WALLET, "buyer", "create_obligation")
         ])
         ledger.execute(tx)
 
@@ -232,7 +231,7 @@ class TestSettlementBehavior:
 
         # Settle
         result = compute_deferred_cash_settlement(ledger, "DC_001", datetime(2024, 3, 17))
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # Verify settlement occurred
         state = ledger.get_unit_state("DC_001")
@@ -332,7 +331,7 @@ class TestAutocallableLifecycle:
         # Observation 1: Below coupon barrier (miss, add to memory)
         ledger.advance_time(datetime(2024, 4, 1))
         result1 = compute_observation(ledger, "AUTO_SPX", datetime(2024, 4, 1), 3000.0)
-        ledger.execute_contract(result1)
+        ledger.execute(result1)
 
         state = ledger.get_unit_state("AUTO_SPX")
         assert state.get('coupon_memory', 0) > 0, "Memory should accumulate"
@@ -377,7 +376,7 @@ class TestAutocallableLifecycle:
 
         # Miss first observation (below coupon barrier)
         result1 = compute_observation(ledger, "AUTO_MEM", datetime(2024, 4, 1), 3000.0)
-        ledger.execute_contract(result1)
+        ledger.execute(result1)
 
         state = ledger.get_unit_state("AUTO_MEM")
         expected_memory = 100000.0 * 0.08  # One period of coupon
@@ -391,36 +390,40 @@ class TestFuturesLifecycle:
         """Verify multi-holder pattern for futures trades."""
         from tests.fake_view import FakeView
 
+        # Market maker has position with proper state
         state = {
             'underlying': 'SPX',
             'expiry': datetime(2024, 12, 20),
             'multiplier': 50.0,
             'currency': 'USD',
             'clearinghouse': 'clearing',
-            'wallets': {},
+            'wallets': {'market_maker': {'position': 100, 'virtual_cash': -22_500_000.0}},  # entered at 4500
             'settled': False,
             'last_settle_date': None,
         }
         view = FakeView(
             balances={
                 'trader': {'USD': 100000},
-                'clearing': {'USD': 1000000, 'ESZ24': 100},
+                'clearing': {'USD': 1000000},
+                'market_maker': {'ESZ24': 100},
             },
             states={'ESZ24': state},
             time=datetime(2024, 12, 1),
         )
 
         # Execute trade - creates position and sets per-wallet state
-        result = future_transact(view, "ESZ24", "trader", qty=10.0, price=4500.0)
+        # Trader buys from market_maker (via clearinghouse)
+        result = future_transact(view, "ESZ24", seller_id="market_maker", buyer_id="trader", qty=10.0, price=4500.0)
 
-        # Verify move created
-        assert len(result.moves) == 1
+        # Verify moves created (two moves: seller→CH, CH→buyer)
+        assert len(result.moves) == 2
         assert result.moves[0].quantity == 10.0
+        assert result.moves[1].quantity == 10.0
 
         # Verify per-wallet state (virtual_cash model)
         # virtual_cash = -qty * price * mult = -10 * 4500 * 50 = -2,250,000
-        updated_state = result.state_updates['ESZ24']
-        assert updated_state['wallets']['trader']['virtual_cash'] == -2_250_000.0
+        sc = next(d for d in result.state_changes if d.unit == "ESZ24")
+        assert sc.new_state['wallets']['trader']['virtual_cash'] == -2_250_000.0
 
     def test_daily_settlement_updates_virtual_cash(self):
         """Verify EOD settlement updates wallet virtual_cash correctly."""
@@ -458,8 +461,8 @@ class TestFuturesLifecycle:
         assert result.moves[0].quantity == 5000.0
 
         # Verify virtual_cash updated to target
-        updated_state = result.state_updates['ESZ24']
-        assert updated_state['wallets']['trader']['virtual_cash'] == -2_255_000.0
+        sc = next(d for d in result.state_changes if d.unit == "ESZ24")
+        assert sc.new_state['wallets']['trader']['virtual_cash'] == -2_255_000.0
 
 
 class TestMarginLoanLifecycle:
@@ -523,7 +526,7 @@ class TestMarginLoanLifecycle:
 
         # Accrue 30 days of interest
         result = compute_interest_accrual(ledger, "LOAN_002", 30.0)
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         state = ledger.get_unit_state("LOAN_002")
         # Interest = 100,000 * 0.08 * (30/365) = ~657.53
@@ -649,8 +652,8 @@ class TestProductionResilience:
 
         # Execute transactions
         for i in range(10):
-            tx = ledger.create_transaction([
-                Move("alice", "bob", "USD", 10.0, f"tx_{i}")
+            tx = build_transaction(ledger, [
+                Move(10.0, "USD", "alice", "bob", f"tx_{i}")
             ])
             ledger.execute(tx)
 
@@ -671,8 +674,8 @@ class TestProductionResilience:
 
         num_transactions = 100
         for i in range(num_transactions):
-            tx = ledger.create_transaction([
-                Move("alice", "bob", "USD", 1.0, f"log_tx_{i}")
+            tx = build_transaction(ledger, [
+                Move(1.0, "USD", "alice", "bob", f"log_tx_{i}")
             ])
             ledger.execute(tx)
 
@@ -691,14 +694,14 @@ class TestProductionResilience:
 
         # Execute some transactions
         ledger.advance_time(datetime(2024, 12, 5))
-        tx1 = ledger.create_transaction([
-            Move("alice", "bob", "USD", 100.0, "tx1")
+        tx1 = build_transaction(ledger, [
+            Move(100.0, "USD", "alice", "bob", "tx1")
         ])
         ledger.execute(tx1)
 
         ledger.advance_time(datetime(2024, 12, 10))
-        tx2 = ledger.create_transaction([
-            Move("alice", "bob", "USD", 200.0, "tx2")
+        tx2 = build_transaction(ledger, [
+            Move(200.0, "USD", "alice", "bob", "tx2")
         ])
         ledger.execute(tx2)
 
@@ -725,15 +728,15 @@ class TestIntegrationReadiness:
         ledger.register_wallet("bob")
         ledger.set_balance("alice", "USD", 1000.0)
 
-        tx1 = ledger.create_transaction([
-            Move("alice", "bob", "USD", 100.0, "tx_unique_1")
+        tx1 = build_transaction(ledger, [
+            Move(100.0, "USD", "alice", "bob", "tx_unique_1")
         ])
-        tx2 = ledger.create_transaction([
-            Move("alice", "bob", "USD", 100.0, "tx_unique_2")
+        tx2 = build_transaction(ledger, [
+            Move(100.0, "USD", "alice", "bob", "tx_unique_2")
         ])
 
-        assert tx1.tx_id != tx2.tx_id, "Different transactions should have different IDs"
-        assert len(tx1.tx_id) > 0, "Transaction ID should not be empty"
+        assert tx1.intent_id != tx2.intent_id, "Different transactions should have different IDs"
+        assert len(tx1.intent_id) > 0, "Transaction ID should not be empty"
 
     def test_move_metadata_available(self):
         """Verify moves can carry metadata for integration."""
@@ -744,10 +747,10 @@ class TestIntegrationReadiness:
         ledger.set_balance("alice", "USD", 1000.0)
 
         move = Move(
+            quantity=100.0,
+            unit_symbol="USD",
             source="alice",
             dest="bob",
-            unit="USD",
-            quantity=100.0,
             contract_id="meta_test",
             metadata={
                 "isin": "US0378331005",
@@ -831,18 +834,18 @@ class TestConservationLaws:
         initial_supply = ledger.total_supply("USD")
 
         # Multiple transfers
-        tx1 = ledger.create_transaction([
-            Move("alice", "bob", "USD", 300.0, "transfer1")
+        tx1 = build_transaction(ledger, [
+            Move(300.0, "USD", "alice", "bob", "transfer1")
         ])
         ledger.execute(tx1)
 
-        tx2 = ledger.create_transaction([
-            Move("bob", "charlie", "USD", 150.0, "transfer2")
+        tx2 = build_transaction(ledger, [
+            Move(150.0, "USD", "bob", "charlie", "transfer2")
         ])
         ledger.execute(tx2)
 
-        tx3 = ledger.create_transaction([
-            Move("charlie", "alice", "USD", 50.0, "transfer3")
+        tx3 = build_transaction(ledger, [
+            Move(50.0, "USD", "charlie", "alice", "transfer3")
         ])
         ledger.execute(tx3)
 
@@ -882,7 +885,7 @@ class TestConservationLaws:
         # Pay coupon
         ledger.advance_time(datetime(2024, 7, 15))
         result = compute_coupon_payment(ledger, "BOND_CONS", datetime(2024, 7, 15))
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         final_usd = ledger.total_supply("USD")
 

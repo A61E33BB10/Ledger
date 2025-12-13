@@ -18,17 +18,17 @@ Run this file directly:
 from datetime import datetime
 from ledger import (
     # Core
-    Ledger, Move, cash,
+    Ledger, Move, cash, build_transaction, SYSTEM_WALLET,
 
     # Stock module
     create_stock_unit,
 
     # Options module
     create_option_unit,
-    build_option_trade,
     compute_option_settlement,
     get_option_intrinsic_value,
     option_contract,
+    option_transact,
 
     # Engine
     LifecycleEngine,
@@ -116,8 +116,6 @@ def main():
         name="options_demo",
         initial_time=datetime(2025, 6, 1, 9, 30),  # June 1, 2025
         verbose=True,
-        fast_mode=False,
-        no_log=False
     )
 
     # Register assets
@@ -131,19 +129,16 @@ def main():
     bob = ledger.register_wallet("bob")      # Option seller (writer)
     mint = ledger.register_wallet("mint")    # Funding source
 
-    # Fund wallets
+    # Fund wallets via SYSTEM_WALLET (proper issuance)
     print("\n--- Funding Wallets ---")
     print("Alice receives $100,000 cash (to pay premium and exercise)")
     print("Bob receives $10,000 cash and 500 AAPL shares (to deliver if exercised)")
 
-    # Give mint unlimited funds
-    ledger.balances[mint]["USD"] = 1_000_000
-    ledger.balances[mint]["AAPL"] = 10_000
-
-    funding_tx = ledger.create_transaction([
-        Move(mint, alice, "USD", 100_000, "fund_alice"),
-        Move(mint, bob, "USD", 10_000, "fund_bob"),
-        Move(mint, bob, "AAPL", 500, "fund_bob_shares"),
+    # SYSTEM_WALLET is auto-registered by the ledger
+    funding_tx = build_transaction(ledger, [
+        Move(100_000, "USD", SYSTEM_WALLET, alice, "fund_alice"),
+        Move(10_000, "USD", SYSTEM_WALLET, bob, "fund_bob"),
+        Move(500, "AAPL", SYSTEM_WALLET, bob, "fund_bob_shares"),
     ])
     ledger.execute(funding_tx)
 
@@ -230,26 +225,25 @@ def main():
     print(f"  Premium/contract: ${premium_per_contract}")
     print(f"  Total premium:    ${total_premium}")
 
-    # Build the trade (pure function - returns ContractResult)
+    # Build the trade (pure function - returns PendingTransaction)
     print("\n--- Building Trade (Pure Function) ---")
-    trade_result = build_option_trade(
-        option_symbol="AAPL_C150_DEC25",
-        num_contracts=num_contracts,
-        premium_per_contract=premium_per_contract,
-        buyer=alice,
+    trade_result = option_transact(
+        view=ledger,
+        symbol="AAPL_C150_DEC25",
         seller=bob,
-        premium_currency="USD",
-        trade_id="trade_001"
+        buyer=alice,
+        qty=num_contracts,
+        price=premium_per_contract,
     )
 
-    print(f"ContractResult: {trade_result}")
+    print(f"PendingTransaction: {trade_result}")
     print("Moves:")
     for move in trade_result.moves:
         print(f"  {move}")
 
     # Execute the trade
     print("\n--- Executing Trade ---")
-    ledger.execute_contract(trade_result)
+    ledger.execute(trade_result)
 
     print("\n--- Positions After Trade ---")
     print(f"Alice: {ledger.get_balance(alice, 'AAPL_C150_DEC25')} options, "
@@ -365,14 +359,15 @@ def main():
     for move in settlement_result.moves:
         print(f"  {move}")
 
-    print(f"\nState Updates:")
-    for unit, updates in settlement_result.state_updates.items():
-        print(f"  {unit}:")
-        for key, value in updates.items():
-            print(f"    {key}: {value}")
+    print(f"\nState Changes ({len(settlement_result.state_changes)}):")
+    for sc in settlement_result.state_changes:
+        print(f"  [{sc.unit}]:")
+        changed = sc.changed_fields()
+        for key, (old_val, new_val) in changed.items():
+            print(f"    {key}: {old_val} -> {new_val}")
 
     # Verify ledger hasn't changed yet
-    print("\n--- Ledger State (BEFORE execute_contract) ---")
+    print("\n--- Ledger State (BEFORE execute) ---")
     print(f"Alice options: {ledger.get_balance(alice, 'AAPL_C150_DEC25')}")
     print(f"Option settled: {ledger.get_unit_state('AAPL_C150_DEC25').get('settled')}")
     print("(Nothing changed yet - pure function only computed the result)")
@@ -389,7 +384,7 @@ def main():
     """)
 
     print("--- Executing Settlement ---")
-    exec_result = ledger.execute_contract(settlement_result)
+    exec_result = ledger.execute(settlement_result)
     print(f"Execution result: {exec_result}")
 
     # =========================================================================
@@ -505,15 +500,15 @@ def main_with_lifecycle_engine():
 
     alice = ledger.register_wallet("alice")
     bob = ledger.register_wallet("bob")
-    mint = ledger.register_wallet("mint")
+    # SYSTEM_WALLET is auto-registered by the ledger
 
-    ledger.balances[mint]["USD"] = 1_000_000
-    ledger.balances[mint]["AAPL"] = 10_000
-
-    # Fund and create option
-    ledger.balances[alice]["USD"] = 100_000
-    ledger.balances[bob]["USD"] = 10_000
-    ledger.balances[bob]["AAPL"] = 500
+    # Fund wallets via SYSTEM_WALLET
+    funding_tx = build_transaction(ledger, [
+        Move(100_000, "USD", SYSTEM_WALLET, alice, "fund_alice"),
+        Move(10_000, "USD", SYSTEM_WALLET, bob, "fund_bob"),
+        Move(500, "AAPL", SYSTEM_WALLET, bob, "fund_bob_shares"),
+    ])
+    ledger.execute(funding_tx)
 
     maturity = datetime(2025, 12, 19, 16, 0)
     ledger.register_unit(create_option_unit(
@@ -530,8 +525,8 @@ def main_with_lifecycle_engine():
     ))
 
     # Trade
-    trade = build_option_trade("AAPL_C150", 3, 12.50, alice, bob, "USD", "trade_001")
-    ledger.execute_contract(trade)
+    trade = option_transact(ledger, "AAPL_C150", bob, alice, 3, 12.50)
+    ledger.execute(trade)
 
     print(f"After trade: Alice has {ledger.get_balance(alice, 'AAPL_C150')} options")
 

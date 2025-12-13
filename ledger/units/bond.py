@@ -6,13 +6,14 @@ This module provides bond unit creation and lifecycle processing:
 2. compute_accrued_interest() - Calculate accrued interest as of a date
 3. compute_coupon_payment() - Process scheduled coupon payments
 4. compute_redemption() - Final principal repayment at maturity
-5. transact() - Event-driven interface for COUPON, REDEMPTION, CALL, PUT events
+5. transact() - Execute bond trades with dirty price settlement
 6. bond_contract() - SmartContract for LifecycleEngine integration
 
 Bonds represent debt instruments with:
 - Fixed or floating coupon payments
 - Accrued interest calculation using day count conventions
 - Redemption at maturity (or early call/put)
+- Trading with clean/dirty price distinction
 
 All functions take LedgerView (read-only) and return immutable results.
 """
@@ -20,10 +21,12 @@ All functions take LedgerView (read-only) and return immutable results.
 from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Tuple, Optional
+import math
 
 from ..core import (
-    LedgerView, Move, ContractResult, Unit,
+    LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     SYSTEM_WALLET,
+    build_transaction, empty_pending_transaction,
 )
 
 
@@ -417,7 +420,7 @@ def compute_coupon_payment(
     view: LedgerView,
     bond_symbol: str,
     payment_date: datetime,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Process a scheduled coupon payment if due.
 
@@ -437,22 +440,22 @@ def compute_coupon_payment(
         payment_date: Current timestamp to check against scheduled payment_date
 
     Returns:
-        ContractResult containing:
+        PendingTransaction containing:
         - moves: Tuple of Move objects transferring currency from issuer to bondholders
         - state_updates: Updates next_coupon_index and appends to paid_coupons history
-        Returns empty ContractResult if no coupon is due or schedule is exhausted.
+        Returns empty PendingTransaction if no coupon is due or schedule is exhausted.
     """
     state = view.get_unit_state(bond_symbol)
     schedule = state.get('coupon_schedule', [])
     next_idx = state.get('next_coupon_index', 0)
 
     if next_idx >= len(schedule):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     scheduled_date, coupon_amount = schedule[next_idx]
 
     if payment_date < scheduled_date:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     issuer = state['issuer_wallet']
     currency = state['currency']
@@ -466,10 +469,10 @@ def compute_coupon_payment(
         if bonds_held > 0 and wallet != issuer:
             payout = bonds_held * coupon_amount
             moves.append(Move(
+                quantity=payout,
+                unit_symbol=currency,
                 source=issuer,
                 dest=wallet,
-                unit=currency,
-                quantity=payout,
                 contract_id=f'coupon_{bond_symbol}_{next_idx}_{wallet}',
             ))
             total_paid += payout
@@ -483,16 +486,15 @@ def compute_coupon_payment(
     })
 
     # Update accrued interest to 0 after payment
-    state_updates = {
-        bond_symbol: {
-            **state,
-            'next_coupon_index': next_idx + 1,
-            'accrued_interest': 0.0,
-            'paid_coupons': paid_coupons,
-        }
+    new_state = {
+        **state,
+        'next_coupon_index': next_idx + 1,
+        'accrued_interest': 0.0,
+        'paid_coupons': paid_coupons,
     }
+    state_changes = [UnitStateChange(unit=bond_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 # ============================================================================
@@ -505,7 +507,7 @@ def compute_redemption(
     redemption_date: datetime,
     redemption_price: Optional[float] = None,
     allow_early: bool = False,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Process bond redemption (principal repayment) at maturity or early call/put.
 
@@ -520,21 +522,21 @@ def compute_redemption(
         allow_early: If True, allows redemption before maturity (for CALL/PUT events)
 
     Returns:
-        ContractResult containing:
+        PendingTransaction containing:
         - moves: Principal payments from issuer to bondholders
         - state_updates: Marks bond as redeemed
-        Returns empty ContractResult if already redeemed or maturity not reached
+        Returns empty PendingTransaction if already redeemed or maturity not reached
         (unless allow_early is True).
     """
     state = view.get_unit_state(bond_symbol)
 
     if state.get('redeemed'):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Check maturity date unless early redemption is explicitly allowed
     maturity_date = state['maturity_date']
     if not allow_early and redemption_date < maturity_date:
-        return ContractResult()  # Not yet matured
+        return empty_pending_transaction(view)  # Not yet matured
 
     issuer = state['issuer_wallet']
     currency = state['currency']
@@ -551,25 +553,24 @@ def compute_redemption(
         if bonds_held > 0 and wallet != issuer:
             payment = bonds_held * redemption_amount
             moves.append(Move(
+                quantity=payment,
+                unit_symbol=currency,
                 source=issuer,
                 dest=wallet,
-                unit=currency,
-                quantity=payment,
                 contract_id=f'redemption_{bond_symbol}_{wallet}',
             ))
             total_redeemed += payment
 
-    state_updates = {
-        bond_symbol: {
-            **state,
-            'redeemed': True,
-            'redemption_date': redemption_date,
-            'redemption_amount': redemption_amount,
-            'total_redeemed': total_redeemed,
-        }
+    new_state = {
+        **state,
+        'redeemed': True,
+        'redemption_date': redemption_date,
+        'redemption_amount': redemption_amount,
+        'total_redeemed': total_redeemed,
     }
+    state_changes = [UnitStateChange(unit=bond_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 # ============================================================================
@@ -579,60 +580,94 @@ def compute_redemption(
 def transact(
     view: LedgerView,
     symbol: str,
-    event_type: str,
-    event_date: datetime,
-    **kwargs
-) -> ContractResult:
+    seller: str,
+    buyer: str,
+    qty: float,
+    price: float,
+) -> PendingTransaction:
     """
-    Generate moves and state updates for a bond lifecycle event.
+    Execute a bond trade between two parties.
 
-    This is the unified entry point for all bond lifecycle events, routing
-    to the appropriate handler based on event_type.
+    This function implements the unified transact() signature for bond trading.
+    Bonds trade at a "clean price" but settle at a "dirty price" (clean + accrued interest).
 
     Args:
         view: Read-only ledger access
-        symbol: Bond symbol
-        event_type: Type of event (COUPON, REDEMPTION, CALL, PUT)
-        event_date: When the event occurs
-        **kwargs: Event-specific parameters:
-            - For COUPON: None (uses scheduled coupon)
-            - For REDEMPTION: redemption_price (optional, defaults to face_value)
-            - For CALL: redemption_price (optional)
-            - For PUT: redemption_price (optional)
+        symbol: Bond symbol to trade
+        seller: Wallet selling the bonds
+        buyer: Wallet buying the bonds
+        qty: Quantity of bonds to transfer (must be positive)
+        price: CLEAN price per bond (must be non-negative and finite)
 
     Returns:
-        ContractResult with moves and state_updates, or empty result
-        if event_type is unknown.
+        PendingTransaction containing two moves:
+        1. Bond transfer: seller → buyer (qty bonds)
+        2. Cash settlement: buyer → seller (qty × dirty_price in currency)
+
+    Raises:
+        ValueError: If qty <= 0, price < 0, price not finite, seller == buyer,
+                   or bond is already redeemed
 
     Example:
-        # Process a scheduled coupon
-        result = transact(ledger, "CORP_5Y_2029", "COUPON", datetime(2024, 6, 15))
-
-        # Process redemption at maturity
-        result = transact(ledger, "CORP_5Y_2029", "REDEMPTION", datetime(2029, 12, 15))
-
-        # Process early call
-        result = transact(ledger, "CORP_5Y_2029", "CALL", datetime(2027, 6, 15),
-                         redemption_price=1050.0)
+        # Trade 10 bonds at clean price of 98.50
+        result = transact(view, "CORP_5Y_2029", "investor_a", "investor_b", 10.0, 98.50)
+        # If accrued interest is 1.25, dirty price = 99.75
+        # Moves: 10 bonds from investor_a → investor_b
+        #        997.50 USD from investor_b → investor_a
     """
-    handlers = {
-        'COUPON': lambda: compute_coupon_payment(view, symbol, event_date),
-        'REDEMPTION': lambda: compute_redemption(view, symbol, event_date,
-                                                 kwargs.get('redemption_price'),
-                                                 allow_early=False),
-        'CALL': lambda: compute_redemption(view, symbol, event_date,
-                                           kwargs.get('redemption_price'),
-                                           allow_early=True),  # CALL allows early redemption
-        'PUT': lambda: compute_redemption(view, symbol, event_date,
-                                          kwargs.get('redemption_price'),
-                                          allow_early=True),   # PUT allows early redemption
-    }
+    # Validation
+    if qty <= 0:
+        raise ValueError(f"qty must be positive, got {qty}")
 
-    handler = handlers.get(event_type)
-    if handler is None:
-        return ContractResult()  # Unknown event type - no action
+    if not math.isfinite(price):
+        raise ValueError(f"price must be finite, got {price}")
 
-    return handler()
+    if price < 0:
+        raise ValueError(f"price must be non-negative, got {price}")
+
+    if seller == buyer:
+        raise ValueError(f"seller and buyer cannot be the same: {seller}")
+
+    # Get bond state
+    state = view.get_unit_state(symbol)
+
+    # Check if bond is redeemed
+    if state.get('redeemed'):
+        raise ValueError(f"Bond {symbol} has already been redeemed and cannot be traded")
+
+    # Get currency from state
+    currency = state.get('currency', 'USD')
+
+    # Calculate accrued interest
+    accrued_interest = compute_accrued_interest(view, symbol, view.current_time)
+
+    # Calculate dirty price
+    dirty_price = price + accrued_interest
+
+    # Calculate total settlement amount
+    total_settlement = qty * dirty_price
+
+    # Create moves
+    moves = [
+        # Transfer bonds from seller to buyer
+        Move(
+            quantity=qty,
+            unit_symbol=symbol,
+            source=seller,
+            dest=buyer,
+            contract_id=f'bond_trade_{symbol}_bond',
+        ),
+        # Transfer cash from buyer to seller
+        Move(
+            quantity=total_settlement,
+            unit_symbol=currency,
+            source=buyer,
+            dest=seller,
+            contract_id=f'bond_trade_{symbol}_cash',
+        ),
+    ]
+
+    return build_transaction(view, moves)
 
 
 # ============================================================================
@@ -644,7 +679,7 @@ def bond_contract(
     symbol: str,
     timestamp: datetime,
     prices: Dict[str, float]
-) -> ContractResult:
+) -> PendingTransaction:
     """
     SmartContract function for automatic bond lifecycle processing.
 
@@ -658,7 +693,7 @@ def bond_contract(
         prices: Price data (unused for bond processing)
 
     Returns:
-        ContractResult with coupon payment or redemption moves if due,
+        PendingTransaction with coupon payment or redemption moves if due,
         or empty result if no events are due.
     """
     state = view.get_unit_state(symbol)
@@ -679,4 +714,4 @@ def bond_contract(
         if timestamp >= scheduled_date:
             return compute_coupon_payment(view, symbol, timestamp)
 
-    return ContractResult()
+    return empty_pending_transaction(view)

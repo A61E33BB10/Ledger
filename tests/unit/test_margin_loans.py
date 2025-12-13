@@ -598,8 +598,8 @@ class TestComputeInterestAccrual:
 
         # Interest = 100,000 * 0.08 / 365 * 30 = $657.53
         assert len(result.moves) == 0  # No moves, just state update
-        updated = result.state_updates['LOAN_001']
-        assert updated['accrued_interest'] == pytest.approx(657.53, abs=0.01)
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['accrued_interest'] == pytest.approx(657.53, abs=0.01)
 
     def test_interest_accrual_one_year(self):
         """Accrue full year of interest at 8%."""
@@ -612,8 +612,8 @@ class TestComputeInterestAccrual:
         result = compute_interest_accrual(view, 'LOAN_001', 365)
 
         # Interest = 100,000 * 0.08 = 8,000
-        updated = result.state_updates['LOAN_001']
-        assert updated['accrued_interest'] == pytest.approx(8000.0, abs=0.01)
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['accrued_interest'] == pytest.approx(8000.0, abs=0.01)
 
     def test_interest_accrual_cumulative(self):
         """Interest accrues cumulatively."""
@@ -630,8 +630,8 @@ class TestComputeInterestAccrual:
 
         # New interest = 100,000 * 0.08 / 365 * 30 = $657.53
         # Total = 500 + 657.53 = 1157.53
-        updated = result.state_updates['LOAN_001']
-        assert updated['accrued_interest'] == pytest.approx(1157.53, abs=0.01)
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['accrued_interest'] == pytest.approx(1157.53, abs=0.01)
 
     def test_interest_accrual_zero_days(self):
         """Zero days accrues no interest."""
@@ -669,8 +669,8 @@ class TestComputeInterestAccrual:
 
         result = compute_interest_accrual(view, 'LOAN_001', 30)
 
-        updated = result.state_updates['LOAN_001']
-        assert updated['accrued_interest'] == 0.0
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['accrued_interest'] == 0.0
 
     def test_interest_accrual_liquidated_loan(self):
         """Liquidated loan does not accrue interest."""
@@ -727,9 +727,9 @@ class TestComputeMarginCall:
         result = compute_margin_call(view, 'LOAN_001', prices)
 
         assert len(result.moves) == 0
-        updated = result.state_updates['LOAN_001']
-        assert updated['margin_call_amount'] == pytest.approx(5000.0, abs=0.01)
-        assert updated['margin_call_deadline'] == datetime(2024, 1, 18)  # +3 days
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['margin_call_amount'] == pytest.approx(5000.0, abs=0.01)
+        assert sc.new_state['margin_call_deadline'] == datetime(2024, 1, 18)  # +3 days
 
     def test_no_margin_call_when_healthy(self):
         """No margin call when above maintenance margin."""
@@ -824,14 +824,14 @@ class TestComputeMarginCure:
         assert move.source == 'alice'
         assert move.dest == 'bank'
         assert move.quantity == 1500.0
-        assert move.unit == 'USD'
+        assert move.unit_symbol == 'USD'
 
-        updated = result.state_updates['LOAN_001']
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
         # 1000 interest paid first, then 500 to principal
-        assert updated['accrued_interest'] == 0.0
-        assert updated['loan_amount'] == pytest.approx(99500.0, abs=0.01)
-        assert updated['total_interest_paid'] == 1000.0
-        assert updated['total_principal_paid'] == 500.0
+        assert sc.new_state['accrued_interest'] == 0.0
+        assert sc.new_state['loan_amount'] == pytest.approx(99500.0, abs=0.01)
+        assert sc.new_state['total_interest_paid'] == 1000.0
+        assert sc.new_state['total_principal_paid'] == 500.0
 
     def test_cure_clears_margin_call_on_full_payoff(self):
         """Cure clears margin call when debt is fully paid."""
@@ -850,11 +850,11 @@ class TestComputeMarginCure:
 
         result = compute_margin_cure(view, 'LOAN_001', 1100.0)
 
-        updated = result.state_updates['LOAN_001']
-        assert updated['loan_amount'] == pytest.approx(0.0, abs=0.01)
-        assert updated['accrued_interest'] == pytest.approx(0.0, abs=0.01)
-        assert updated['margin_call_amount'] == 0.0
-        assert updated['margin_call_deadline'] is None
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['loan_amount'] == pytest.approx(0.0, abs=0.01)
+        assert sc.new_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+        assert sc.new_state['margin_call_amount'] == 0.0
+        assert sc.new_state['margin_call_deadline'] is None
 
     def test_cure_zero_amount_raises(self):
         """Zero cure_amount raises ValueError."""
@@ -949,11 +949,11 @@ class TestComputeLiquidation:
         assert surplus_move.dest == 'alice'
         assert surplus_move.quantity == pytest.approx(8000.0, abs=0.01)
 
-        updated = result.state_updates['LOAN_001']
-        assert updated['liquidated'] is True
-        assert updated['collateral'] == {}
-        assert updated['loan_amount'] == 0.0
-        assert updated['accrued_interest'] == 0.0
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['liquidated'] is True
+        assert sc.new_state['collateral'] == {}
+        assert sc.new_state['loan_amount'] == 0.0
+        assert sc.new_state['accrued_interest'] == 0.0
 
     def test_liquidation_partial_recovery(self):
         """Liquidation with proceeds less than debt (bad debt)."""
@@ -976,14 +976,14 @@ class TestComputeLiquidation:
         move = result.moves[0]
         assert move.quantity == pytest.approx(80000.0, abs=0.01)
 
-        updated = result.state_updates['LOAN_001']
-        assert updated['liquidated'] is True
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['liquidated'] is True
         # On liquidation, loan_amount and accrued_interest are zeroed.
         # The deficiency (unpaid debt) is tracked separately as bad debt.
         # Remaining debt = 102,000 - 80,000 = 22,000 (tracked as deficiency)
-        assert updated['accrued_interest'] == 0.0
-        assert updated['loan_amount'] == 0.0
-        assert updated['liquidation_deficiency'] == pytest.approx(22000.0, abs=0.01)
+        assert sc.new_state['accrued_interest'] == 0.0
+        assert sc.new_state['loan_amount'] == 0.0
+        assert sc.new_state['liquidation_deficiency'] == pytest.approx(22000.0, abs=0.01)
 
     def test_liquidation_already_liquidated_raises(self):
         """Cannot liquidate already liquidated loan."""
@@ -1040,7 +1040,8 @@ class TestComputeLiquidation:
         status = compute_margin_status(view, 'LOAN_001', prices)
         assert status['status'] == MARGIN_STATUS_LIQUIDATION
         result = compute_margin_loan_liquidation(view, 'LOAN_001', prices, 95000.0)
-        assert result.state_updates['LOAN_001']['liquidated'] is True
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['liquidated'] is True
 
     def test_margin_call_3day_deadline_liquidate_after_1day_fails(self):
         """CRITICAL: Issue margin call with 3-day deadline, try to liquidate after 1 day - should fail."""
@@ -1067,7 +1068,7 @@ class TestComputeLiquidation:
         )
         prices = {'AAPL': 150.0}
         result_call = compute_margin_call(view_day0, 'LOAN_001', prices)
-        state_after_call = result_call.state_updates['LOAN_001']
+        state_after_call = next(d for d in result_call.state_changes if d.unit == 'LOAN_001').new_state
         assert state_after_call['margin_call_deadline'] == datetime(2024, 1, 18)
         view_day1 = FakeView(
             balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
@@ -1104,7 +1105,7 @@ class TestComputeLiquidation:
         )
         prices = {'AAPL': 150.0}
         result_call = compute_margin_call(view_day0, 'LOAN_001', prices)
-        state_after_call = result_call.state_updates['LOAN_001']
+        state_after_call = next(d for d in result_call.state_changes if d.unit == 'LOAN_001').new_state
         assert state_after_call['margin_call_deadline'] == datetime(2024, 1, 18, 10, 0)
         view_day4 = FakeView(
             balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
@@ -1114,10 +1115,10 @@ class TestComputeLiquidation:
         status = compute_margin_status(view_day4, 'LOAN_001', prices)
         assert status['status'] == MARGIN_STATUS_LIQUIDATION
         result = compute_margin_loan_liquidation(view_day4, 'LOAN_001', prices, 115000.0)
-        updated = result.state_updates['LOAN_001']
-        assert updated['liquidated'] is True
-        assert updated['collateral'] == {}
-        assert updated['loan_amount'] == 0.0
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['liquidated'] is True
+        assert sc.new_state['collateral'] == {}
+        assert sc.new_state['loan_amount'] == 0.0
 
 
 # ============================================================================
@@ -1166,9 +1167,9 @@ class TestComputeRepayment:
         assert move.dest == 'bank'
         assert move.quantity == 101000.0
 
-        updated = result.state_updates['LOAN_001']
-        assert updated['loan_amount'] == pytest.approx(0.0, abs=0.01)
-        assert updated['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['loan_amount'] == pytest.approx(0.0, abs=0.01)
+        assert sc.new_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
 
     def test_partial_repayment(self):
         """Partial repayment reduces debt."""
@@ -1186,10 +1187,10 @@ class TestComputeRepayment:
         move = result.moves[0]
         assert move.quantity == 20000.0
 
-        updated = result.state_updates['LOAN_001']
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
         # 1000 interest first, then 19000 principal
-        assert updated['accrued_interest'] == 0.0
-        assert updated['loan_amount'] == pytest.approx(81000.0, abs=0.01)
+        assert sc.new_state['accrued_interest'] == 0.0
+        assert sc.new_state['loan_amount'] == pytest.approx(81000.0, abs=0.01)
 
     def test_repayment_interest_only(self):
         """Repayment less than accrued interest pays only interest."""
@@ -1204,9 +1205,9 @@ class TestComputeRepayment:
 
         result = compute_repayment(view, 'LOAN_001', 500.0)
 
-        updated = result.state_updates['LOAN_001']
-        assert updated['accrued_interest'] == pytest.approx(500.0, abs=0.01)
-        assert updated['loan_amount'] == 100000.0  # Unchanged
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['accrued_interest'] == pytest.approx(500.0, abs=0.01)
+        assert sc.new_state['loan_amount'] == 100000.0  # Unchanged
 
     def test_repayment_zero_raises(self):
         """Zero repayment raises ValueError."""
@@ -1280,8 +1281,8 @@ class TestComputeAddCollateral:
 
         result = compute_add_collateral(view, 'LOAN_001', 'AAPL', 500)
 
-        updated = result.state_updates['LOAN_001']
-        assert updated['collateral']['AAPL'] == 1500
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['collateral']['AAPL'] == 1500
 
     def test_add_new_collateral_asset(self):
         """Add new asset type as collateral."""
@@ -1293,9 +1294,9 @@ class TestComputeAddCollateral:
 
         result = compute_add_collateral(view, 'LOAN_001', 'MSFT', 200)
 
-        updated = result.state_updates['LOAN_001']
-        assert updated['collateral']['MSFT'] == 200
-        assert updated['collateral']['AAPL'] == 1000  # Unchanged
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['collateral']['MSFT'] == 200
+        assert sc.new_state['collateral']['AAPL'] == 1000  # Unchanged
 
     def test_add_collateral_zero_quantity_raises(self):
         """Zero quantity raises ValueError."""
@@ -1373,8 +1374,8 @@ class TestTransact:
         result = margin_loan_transact(view, 'LOAN_001', 'INTEREST_ACCRUAL',
                                        datetime(2024, 2, 1), days=30)
 
-        updated = result.state_updates['LOAN_001']
-        assert updated['accrued_interest'] > 0
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['accrued_interest'] > 0
 
     def test_transact_margin_call(self):
         """transact handles MARGIN_CALL event."""
@@ -1388,8 +1389,8 @@ class TestTransact:
         result = margin_loan_transact(view, 'LOAN_001', 'MARGIN_CALL',
                                        datetime(2024, 1, 15), prices=prices)
 
-        updated = result.state_updates['LOAN_001']
-        assert updated['margin_call_amount'] > 0
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['margin_call_amount'] > 0
 
     def test_transact_repayment(self):
         """transact handles REPAYMENT event."""
@@ -1419,8 +1420,8 @@ class TestTransact:
         result = margin_loan_transact(view, 'LOAN_001', 'ADD_COLLATERAL',
                                        datetime(2024, 1, 15), asset='AAPL', quantity=500)
 
-        updated = result.state_updates['LOAN_001']
-        assert updated['collateral']['AAPL'] == 1500
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['collateral']['AAPL'] == 1500
 
     def test_transact_unknown_event_returns_empty(self):
         """transact returns empty for unknown event type."""
@@ -1492,7 +1493,7 @@ class TestMarginLoanFullLifecycle:
 
         # Step 2: Accrue 30 days of interest (updates last_accrual_date to Jan 1)
         result2 = compute_interest_accrual(view1, 'LOAN_001', 30)
-        state_after_interest = result2.state_updates['LOAN_001']
+        state_after_interest = next(d for d in result2.state_changes if d.unit == 'LOAN_001').new_state
         # Interest = 100,000 * 0.08 / 365 * 30 = $657.53
         expected_interest = 100000 * 0.08 / 365 * 30
         assert state_after_interest['accrued_interest'] == pytest.approx(expected_interest, abs=0.01)
@@ -1511,7 +1512,7 @@ class TestMarginLoanFullLifecycle:
         assert len(result3.moves) == 1
         assert result3.moves[0].quantity == pytest.approx(total_due, abs=0.01)
 
-        final_state = result3.state_updates['LOAN_001']
+        final_state = next(d for d in result3.state_changes if d.unit == 'LOAN_001').new_state
         assert final_state['loan_amount'] == pytest.approx(0.0, abs=0.01)
         assert final_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
 
@@ -1550,7 +1551,7 @@ class TestMarginLoanFullLifecycle:
         assert status1['shortfall'] == pytest.approx(5000.0, abs=0.01)
 
         result1 = compute_margin_call(view1, 'LOAN_001', prices)
-        state_after_call = result1.state_updates['LOAN_001']
+        state_after_call = next(d for d in result1.state_changes if d.unit == 'LOAN_001').new_state
         assert state_after_call['margin_call_amount'] == pytest.approx(5000.0, abs=0.01)
         assert state_after_call['margin_call_deadline'] == datetime(2024, 1, 18)
 
@@ -1567,7 +1568,7 @@ class TestMarginLoanFullLifecycle:
         assert len(result2.moves) == 1
         assert result2.moves[0].quantity == 10000.0
 
-        state_after_cure = result2.state_updates['LOAN_001']
+        state_after_cure = next(d for d in result2.state_changes if d.unit == 'LOAN_001').new_state
         assert state_after_cure['loan_amount'] == pytest.approx(90000.0, abs=0.01)
 
         # Verify margin is now healthy
@@ -1622,15 +1623,15 @@ class TestMarginLoanFullLifecycle:
         assert len(result.moves) == 1
         assert result.moves[0].quantity == pytest.approx(95000.0, abs=0.01)
 
-        final_state = result.state_updates['LOAN_001']
-        assert final_state['liquidated'] is True
-        assert final_state['collateral'] == {}
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['liquidated'] is True
+        assert sc.new_state['collateral'] == {}
         # On liquidation, loan_amount and accrued_interest are zeroed.
         # The deficiency (unpaid debt) is tracked separately as bad debt.
         # Remaining debt = 102,000 - 95,000 = 7,000 (tracked as deficiency)
-        assert final_state['loan_amount'] == 0.0
-        assert final_state['accrued_interest'] == 0.0
-        assert final_state['liquidation_deficiency'] == pytest.approx(7000.0, abs=0.01)
+        assert sc.new_state['loan_amount'] == 0.0
+        assert sc.new_state['accrued_interest'] == 0.0
+        assert sc.new_state['liquidation_deficiency'] == pytest.approx(7000.0, abs=0.01)
 
 
 # ============================================================================
@@ -1933,9 +1934,9 @@ class TestPendingInterest:
         assert result.moves[0].quantity == pytest.approx(expected_total_debt, abs=0.01)
 
         # Final state should have zero debt
-        updated = result.state_updates['LOAN_001']
-        assert updated['loan_amount'] == pytest.approx(0.0, abs=0.01)
-        assert updated['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['loan_amount'] == pytest.approx(0.0, abs=0.01)
+        assert sc.new_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
 
     def test_cure_exceeding_debt_with_pending_interest_raises(self):
         """Cure amount exceeding total debt (including pending) raises error."""
@@ -1976,13 +1977,13 @@ class TestPendingInterest:
         assert result.moves[0].quantity == pytest.approx(expected_total_debt, abs=0.01)
 
         # Final state should have zero debt
-        updated = result.state_updates['LOAN_001']
-        assert updated['loan_amount'] == pytest.approx(0.0, abs=0.01)
-        assert updated['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['loan_amount'] == pytest.approx(0.0, abs=0.01)
+        assert sc.new_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
 
         # Total interest paid should equal the pending interest (no accrued)
-        assert updated['total_interest_paid'] == pytest.approx(expected_pending, abs=0.01)
-        assert updated['total_principal_paid'] == pytest.approx(100000.0, abs=0.01)
+        assert sc.new_state['total_interest_paid'] == pytest.approx(expected_pending, abs=0.01)
+        assert sc.new_state['total_principal_paid'] == pytest.approx(100000.0, abs=0.01)
 
     def test_repayment_exceeding_debt_with_pending_interest_raises(self):
         """Repayment exceeding total debt (including pending) raises error."""
@@ -2049,13 +2050,13 @@ class TestPendingInterest:
         assert surplus_move.quantity == pytest.approx(expected_surplus, abs=0.01)
 
         # Verify liquidation state
-        updated = result.state_updates['LOAN_001']
-        assert updated['liquidated'] is True
-        assert updated['loan_amount'] == 0.0
-        assert updated['accrued_interest'] == 0.0
-        assert updated['collateral'] == {}
-        assert updated['liquidation_proceeds'] == sale_proceeds
-        assert updated['liquidation_deficiency'] == 0.0  # Full recovery
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['liquidated'] is True
+        assert sc.new_state['loan_amount'] == 0.0
+        assert sc.new_state['accrued_interest'] == 0.0
+        assert sc.new_state['collateral'] == {}
+        assert sc.new_state['liquidation_proceeds'] == sale_proceeds
+        assert sc.new_state['liquidation_deficiency'] == 0.0  # Full recovery
 
     def test_pending_interest_payment_waterfall(self):
         """Test that pending interest is paid before accrued interest and principal."""
@@ -2080,16 +2081,16 @@ class TestPendingInterest:
         repayment = 1000.0
         result = compute_repayment(view, 'LOAN_001', repayment)
 
-        updated = result.state_updates['LOAN_001']
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
 
         # All interest should be paid first (accrued + pending)
-        assert updated['accrued_interest'] == pytest.approx(0.0, abs=0.01)
-        assert updated['total_interest_paid'] == pytest.approx(total_interest, abs=0.01)
+        assert sc.new_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+        assert sc.new_state['total_interest_paid'] == pytest.approx(total_interest, abs=0.01)
 
         # Remaining goes to principal
         principal_payment = repayment - total_interest  # ~390.41
-        assert updated['loan_amount'] == pytest.approx(100000 - principal_payment, abs=0.01)
-        assert updated['total_principal_paid'] == pytest.approx(principal_payment, abs=0.01)
+        assert sc.new_state['loan_amount'] == pytest.approx(100000 - principal_payment, abs=0.01)
+        assert sc.new_state['total_principal_paid'] == pytest.approx(principal_payment, abs=0.01)
 
     def test_pending_interest_updates_last_accrual_date(self):
         """Verify that operations with pending interest update last_accrual_date."""
@@ -2105,10 +2106,10 @@ class TestPendingInterest:
         # Make a repayment that includes pending interest
         result = compute_repayment(view, 'LOAN_001', 1000.0)
 
-        updated = result.state_updates['LOAN_001']
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
 
         # last_accrual_date should be updated to current time
-        assert updated['last_accrual_date'] == datetime(2024, 1, 6)
+        assert sc.new_state['last_accrual_date'] == datetime(2024, 1, 6)
 
     def test_add_collateral_includes_pending_interest_in_cure_check(self):
         """
@@ -2178,17 +2179,17 @@ class TestPendingInterest:
             view, 'LOAN_001', 'AAPL', 50.0, prices=prices
         )
 
-        updated = result.state_updates['LOAN_001']
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
 
         # Margin call should NOT be cleared because pending interest
         # keeps the true ratio below maintenance margin
-        assert updated['margin_call_deadline'] is not None, \
+        assert sc.new_state['margin_call_deadline'] is not None, \
             "Margin call should NOT be cleared when pending interest keeps ratio below maintenance"
-        assert updated['margin_call_amount'] == 5000.0, \
+        assert sc.new_state['margin_call_amount'] == 5000.0, \
             "Margin call amount should remain unchanged"
 
         # Verify collateral was added
-        assert updated['collateral']['AAPL'] == 1050
+        assert sc.new_state['collateral']['AAPL'] == 1050
 
     def test_add_collateral_clears_margin_call_when_truly_above_maintenance(self):
         """
@@ -2236,13 +2237,13 @@ class TestPendingInterest:
             view, 'LOAN_001', 'AAPL', 100.0, prices=prices
         )
 
-        updated = result.state_updates['LOAN_001']
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
 
         # Margin call SHOULD be cleared
-        assert updated['margin_call_deadline'] is None, \
+        assert sc.new_state['margin_call_deadline'] is None, \
             "Margin call should be cleared when ratio is truly above maintenance"
-        assert updated['margin_call_amount'] == 0.0
-        assert updated['collateral']['AAPL'] == 1100
+        assert sc.new_state['margin_call_amount'] == 0.0
+        assert sc.new_state['collateral']['AAPL'] == 1100
 
 
 class TestPendingInterestAfterPartialRepayment:
@@ -2385,8 +2386,9 @@ class TestMarginLoanContract:
 
         result = margin_loan_contract(view, 'LOAN_001', datetime(2024, 1, 15), prices)
 
-        assert 'LOAN_001' in result.state_updates
-        assert result.state_updates['LOAN_001']['margin_call_amount'] > 0
+        assert any(d.unit == 'LOAN_001' for d in result.state_changes)
+        sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
+        assert sc.new_state['margin_call_amount'] > 0
 
     def test_contract_no_action_when_healthy(self):
         """Smart contract takes no action when loan is healthy."""

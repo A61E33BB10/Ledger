@@ -40,8 +40,9 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple, Mapping
 
 from ..core import (
-    LedgerView, Move, ContractResult, Unit,
+    LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     QUANTITY_EPSILON, UNIT_TYPE_MARGIN_LOAN,
+    build_transaction, empty_pending_transaction,
 )
 
 
@@ -190,14 +191,14 @@ def to_state_dict(terms: MarginLoanTerms, state: MarginLoanState) -> Dict[str, A
     Convert typed dataclasses back to state dict for ledger storage.
 
     This is the inverse of load_margin_loan() - used when building
-    ContractResult.state_updates.
+    PendingTransaction.state_updates.
 
     Args:
         terms: Immutable loan terms
         state: Current loan state
 
     Returns:
-        Dictionary suitable for state_updates in ContractResult
+        Dictionary suitable for state_updates in PendingTransaction
     """
     return {
         'loan_amount': state.loan_amount,
@@ -767,7 +768,7 @@ def compute_interest_accrual(
     view: LedgerView,
     loan_symbol: str,
     days: float,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Accrue interest on the outstanding loan balance.
 
@@ -783,7 +784,7 @@ def compute_interest_accrual(
         days: Number of days to accrue interest for
 
     Returns:
-        ContractResult with state updates (no moves).
+        PendingTransaction with state updates (no moves).
         Returns empty result if loan is liquidated or days <= 0.
 
     Raises:
@@ -793,22 +794,22 @@ def compute_interest_accrual(
         # Accrue 30 days of interest on $100,000 @ 8%
         # Interest = 100000 * 0.08 / 365 * 30 = $657.53
         result = compute_interest_accrual(view, "LOAN_001", 30)
-        ledger.execute_contract(result)
+        ledger.execute(result)
     """
     if days < 0:
         raise ValueError(f"days cannot be negative, got {days}")
 
     if days < QUANTITY_EPSILON:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     state = view.get_unit_state(loan_symbol)
 
     if state.get('liquidated', False):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     loan_amount = state.get('loan_amount', 0.0)
     if loan_amount < QUANTITY_EPSILON:
-        return ContractResult()  # No loan to accrue on
+        return empty_pending_transaction(view)  # No loan to accrue on
 
     interest_rate = state.get('interest_rate', 0.0)
     current_accrued = state.get('accrued_interest', 0.0)
@@ -817,15 +818,14 @@ def compute_interest_accrual(
     new_interest = loan_amount * (interest_rate / 365.0) * days
     total_accrued = current_accrued + new_interest
 
-    state_updates = {
-        loan_symbol: {
-            **state,
-            'accrued_interest': total_accrued,
-            'last_accrual_date': view.current_time,
-        }
+    new_state = {
+        **state,
+        'accrued_interest': total_accrued,
+        'last_accrual_date': view.current_time,
     }
+    state_changes = [UnitStateChange(unit=loan_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=(), state_updates=state_updates)
+    return build_transaction(view, [], state_changes)
 
 
 # ============================================================================
@@ -836,7 +836,7 @@ def compute_margin_call(
     view: LedgerView,
     loan_symbol: str,
     prices: PriceDict,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Issue a margin call if the loan is below maintenance margin.
 
@@ -863,7 +863,7 @@ def compute_margin_call(
         prices: Dictionary mapping asset symbols to current market prices
 
     Returns:
-        ContractResult with state updates setting margin_call_amount and
+        PendingTransaction with state updates setting margin_call_amount and
         margin_call_deadline. Returns empty result if margin is adequate
         or loan is already liquidated.
 
@@ -876,30 +876,29 @@ def compute_margin_call(
     state = view.get_unit_state(loan_symbol)
 
     if state.get('liquidated', False):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Already has an active margin call
     if state.get('margin_call_deadline') is not None:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     margin_status = compute_margin_status(view, loan_symbol, prices)
 
     if margin_status['status'] not in (MARGIN_STATUS_BREACH, MARGIN_STATUS_LIQUIDATION):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     shortfall = margin_status['shortfall']
     deadline_days = state.get('margin_call_deadline_days', 3)
     deadline = view.current_time + timedelta(days=deadline_days)
 
-    state_updates = {
-        loan_symbol: {
-            **state,
-            'margin_call_amount': shortfall,
-            'margin_call_deadline': deadline,
-        }
+    new_state = {
+        **state,
+        'margin_call_amount': shortfall,
+        'margin_call_deadline': deadline,
     }
+    state_changes = [UnitStateChange(unit=loan_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=(), state_updates=state_updates)
+    return build_transaction(view, [], state_changes)
 
 
 # ============================================================================
@@ -911,7 +910,7 @@ def compute_margin_cure(
     loan_symbol: str,
     cure_amount: float,
     prices: Optional[PriceDict] = None,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Cure a margin call by making a cash payment to reduce debt.
 
@@ -925,7 +924,7 @@ def compute_margin_cure(
         prices: Optional prices to verify cure is sufficient (not required)
 
     Returns:
-        ContractResult with:
+        PendingTransaction with:
         - moves: Cash transfer from borrower to lender
         - state_updates: Reduced debt and potentially cleared margin call
 
@@ -935,7 +934,7 @@ def compute_margin_cure(
     Example:
         # Cure margin call with $10,000 payment
         result = compute_margin_cure(view, "LOAN_001", 10000.0)
-        ledger.execute_contract(result)
+        ledger.execute(result)
     """
     if cure_amount <= 0:
         raise ValueError(f"cure_amount must be positive, got {cure_amount}")
@@ -978,10 +977,10 @@ def compute_margin_cure(
     # Generate cash move
     moves = [
         Move(
+            quantity=cure_amount,
+            unit_symbol=currency,
             source=borrower,
             dest=lender,
-            unit=currency,
-            quantity=cure_amount,
             contract_id=f'margin_cure_{loan_symbol}',
         )
     ]
@@ -1025,9 +1024,9 @@ def compute_margin_cure(
             if new_margin_call < QUANTITY_EPSILON:
                 new_state['margin_call_deadline'] = None
 
-    state_updates = {loan_symbol: new_state}
+    state_changes = [UnitStateChange(unit=loan_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 # ============================================================================
@@ -1039,7 +1038,7 @@ def compute_liquidation(
     loan_symbol: str,
     prices: PriceDict,
     sale_proceeds: float,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Liquidate the loan by selling collateral and settling the debt.
 
@@ -1067,7 +1066,7 @@ def compute_liquidation(
         sale_proceeds: Total cash received from selling collateral
 
     Returns:
-        ContractResult with:
+        PendingTransaction with:
         - moves: Cash flows for debt settlement and any surplus to borrower
         - state_updates: Marks loan as liquidated, clears collateral
 
@@ -1078,7 +1077,7 @@ def compute_liquidation(
     Example:
         # Liquidate collateral that sold for $80,000 (after deadline passed)
         result = compute_liquidation(view, "LOAN_001", prices, 80000.0)
-        ledger.execute_contract(result)
+        ledger.execute(result)
         # Debt paid from proceeds, any surplus to borrower
     """
     if sale_proceeds < 0:
@@ -1117,10 +1116,10 @@ def compute_liquidation(
         # Full debt recovery
         if total_debt > QUANTITY_EPSILON:
             moves.append(Move(
+                quantity=total_debt,
+                unit_symbol=currency,
                 source=borrower,
                 dest=lender,
-                unit=currency,
-                quantity=total_debt,
                 contract_id=f'liquidation_debt_{loan_symbol}',
             ))
 
@@ -1128,20 +1127,20 @@ def compute_liquidation(
         surplus = sale_proceeds - total_debt
         if surplus > QUANTITY_EPSILON:
             moves.append(Move(
+                quantity=surplus,
+                unit_symbol=currency,
                 source=lender,
                 dest=borrower,
-                unit=currency,
-                quantity=surplus,
                 contract_id=f'liquidation_surplus_{loan_symbol}',
             ))
     else:
         # Partial debt recovery - shortfall becomes bad debt (tracked as deficiency)
         if sale_proceeds > QUANTITY_EPSILON:
             moves.append(Move(
+                quantity=sale_proceeds,
+                unit_symbol=currency,
                 source=borrower,
                 dest=lender,
-                unit=currency,
-                quantity=sale_proceeds,
                 contract_id=f'liquidation_partial_{loan_symbol}',
             ))
 
@@ -1151,22 +1150,21 @@ def compute_liquidation(
     # outstanding loan balances. This prevents phantom debt from accruing interest
     # if compute_interest_accrual() is called after liquidation.
     deficiency = max(0.0, total_debt - sale_proceeds)
-    state_updates = {
-        loan_symbol: {
-            **state,
-            'loan_amount': 0.0,
-            'accrued_interest': 0.0,
-            'collateral': {},  # Collateral has been sold
-            'liquidated': True,
-            'liquidation_date': view.current_time,
-            'liquidation_proceeds': sale_proceeds,
-            'liquidation_deficiency': deficiency,  # Track bad debt separately
-            'margin_call_amount': 0.0,
-            'margin_call_deadline': None,
-        }
+    new_state = {
+        **state,
+        'loan_amount': 0.0,
+        'accrued_interest': 0.0,
+        'collateral': {},  # Collateral has been sold
+        'liquidated': True,
+        'liquidation_date': view.current_time,
+        'liquidation_proceeds': sale_proceeds,
+        'liquidation_deficiency': deficiency,  # Track bad debt separately
+        'margin_call_amount': 0.0,
+        'margin_call_deadline': None,
     }
+    state_changes = [UnitStateChange(unit=loan_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 # ============================================================================
@@ -1177,7 +1175,7 @@ def compute_repayment(
     view: LedgerView,
     loan_symbol: str,
     repayment_amount: float,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Process full or partial loan repayment.
 
@@ -1191,7 +1189,7 @@ def compute_repayment(
         repayment_amount: Amount to repay (must be positive)
 
     Returns:
-        ContractResult with:
+        PendingTransaction with:
         - moves: Cash transfer from borrower to lender
         - state_updates: Reduced loan_amount and accrued_interest
 
@@ -1202,7 +1200,7 @@ def compute_repayment(
     Example:
         # Full repayment of $100,000 loan + $500 interest
         result = compute_repayment(view, "LOAN_001", 100500.0)
-        ledger.execute_contract(result)
+        ledger.execute(result)
     """
     if repayment_amount <= 0:
         raise ValueError(f"repayment_amount must be positive, got {repayment_amount}")
@@ -1248,10 +1246,10 @@ def compute_repayment(
     # Generate cash move
     moves = [
         Move(
+            quantity=repayment_amount,
+            unit_symbol=currency,
             source=borrower,
             dest=lender,
-            unit=currency,
-            quantity=repayment_amount,
             contract_id=f'repayment_{loan_symbol}',
         )
     ]
@@ -1271,9 +1269,9 @@ def compute_repayment(
         new_state['margin_call_amount'] = 0.0
         new_state['margin_call_deadline'] = None
 
-    state_updates = {loan_symbol: new_state}
+    state_changes = [UnitStateChange(unit=loan_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 # ============================================================================
@@ -1286,7 +1284,7 @@ def compute_add_collateral(
     asset: str,
     quantity: float,
     prices: Optional[PriceDict] = None,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Add collateral to the loan to improve margin ratio.
 
@@ -1301,7 +1299,7 @@ def compute_add_collateral(
         prices: Optional prices to check if margin call is cured
 
     Returns:
-        ContractResult with state updates adding to collateral pool.
+        PendingTransaction with state updates adding to collateral pool.
         Does not generate moves (asset transfer handled separately).
 
     Raises:
@@ -1311,7 +1309,7 @@ def compute_add_collateral(
     Example:
         # Pledge 500 additional shares of AAPL
         result = compute_add_collateral(view, "LOAN_001", "AAPL", 500)
-        ledger.execute_contract(result)
+        ledger.execute(result)
     """
     if quantity <= 0:
         raise ValueError(f"quantity must be positive, got {quantity}")
@@ -1353,9 +1351,9 @@ def compute_add_collateral(
                 new_state['margin_call_amount'] = 0.0
                 new_state['margin_call_deadline'] = None
 
-    state_updates = {loan_symbol: new_state}
+    state_changes = [UnitStateChange(unit=loan_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=(), state_updates=state_updates)
+    return build_transaction(view, [], state_changes)
 
 
 # ============================================================================
@@ -1368,7 +1366,7 @@ def transact(
     event_type: str,
     event_date: datetime,
     **kwargs
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Generate moves and state updates for a margin loan lifecycle event.
 
@@ -1389,7 +1387,7 @@ def transact(
         **kwargs: Event-specific parameters
 
     Returns:
-        ContractResult with moves and state_updates, or empty result
+        PendingTransaction with moves and state_updates, or empty result
         if event_type is unknown or required parameters are missing.
 
     Example:
@@ -1408,19 +1406,19 @@ def transact(
     if event_type == 'INTEREST_ACCRUAL':
         days = kwargs.get('days')
         if days is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
         return compute_interest_accrual(view, symbol, days)
 
     elif event_type == 'MARGIN_CALL':
         prices = kwargs.get('prices')
         if prices is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
         return compute_margin_call(view, symbol, prices)
 
     elif event_type == 'MARGIN_CURE':
         cure_amount = kwargs.get('cure_amount')
         if cure_amount is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
         prices = kwargs.get('prices')
         return compute_margin_cure(view, symbol, cure_amount, prices)
 
@@ -1428,25 +1426,25 @@ def transact(
         prices = kwargs.get('prices')
         sale_proceeds = kwargs.get('sale_proceeds')
         if prices is None or sale_proceeds is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
         return compute_liquidation(view, symbol, prices, sale_proceeds)
 
     elif event_type == 'REPAYMENT':
         repayment_amount = kwargs.get('repayment_amount')
         if repayment_amount is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
         return compute_repayment(view, symbol, repayment_amount)
 
     elif event_type == 'ADD_COLLATERAL':
         asset = kwargs.get('asset')
         quantity = kwargs.get('quantity')
         if asset is None or quantity is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
         prices = kwargs.get('prices')
         return compute_add_collateral(view, symbol, asset, quantity, prices)
 
     else:
-        return ContractResult()  # Unknown event type
+        return empty_pending_transaction(view)  # Unknown event type
 
 
 # ============================================================================
@@ -1458,7 +1456,7 @@ def margin_loan_contract(
     symbol: str,
     timestamp: datetime,
     prices: Dict[str, float]
-) -> ContractResult:
+) -> PendingTransaction:
     """
     SmartContract function for automatic margin loan processing.
 
@@ -1472,17 +1470,17 @@ def margin_loan_contract(
         prices: Price data for collateral assets
 
     Returns:
-        ContractResult with margin call if loan is below maintenance,
+        PendingTransaction with margin call if loan is below maintenance,
         or empty result if loan is healthy or already has active margin call.
     """
     state = view.get_unit_state(symbol)
 
     if state.get('liquidated', False):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Check if we should issue a margin call
     if state.get('margin_call_deadline') is None:
         # No active margin call - check if we need to issue one
         return compute_margin_call(view, symbol, prices)
 
-    return ContractResult()
+    return empty_pending_transaction(view)

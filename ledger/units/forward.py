@@ -6,13 +6,16 @@ All functions are pure: they take LedgerView (read-only) and return immutable re
 """
 
 from __future__ import annotations
+import math
 from datetime import datetime
 from typing import Dict, Any, List
 
 from ..core import (
-    LedgerView, Move, ContractResult, Unit,
+    LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     bilateral_transfer_rule,
+    TransferRuleViolation,
     UNIT_TYPE_BILATERAL_FORWARD,
+    build_transaction, empty_pending_transaction,
 )
 
 
@@ -82,7 +85,7 @@ def compute_forward_settlement(
     view: LedgerView,
     forward_symbol: str,
     force_settlement: bool = False,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Compute physical delivery settlement for a bilateral forward contract.
 
@@ -98,25 +101,25 @@ def compute_forward_settlement(
         force_settlement: If True, settle even before delivery_date. Defaults to False.
 
     Returns:
-        ContractResult: Contains moves for cash payment, asset delivery, and position
+        PendingTransaction: Contains moves for cash payment, asset delivery, and position
         closure, plus state updates marking the contract as settled. Returns empty
         result if already settled, delivery date not reached, or long position is zero.
     """
     state = view.get_unit_state(forward_symbol)
 
     if state.get('settled'):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     delivery_date = state['delivery_date']
     if view.current_time < delivery_date and not force_settlement:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     long_wallet = state['long_wallet']
     short_wallet = state['short_wallet']
     long_position = view.get_balance(long_wallet, forward_symbol)
 
     if long_position <= 0:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     quantity = state['quantity']
     forward_price = state['forward_price']
@@ -128,36 +131,35 @@ def compute_forward_settlement(
 
     moves = [
         Move(
+            quantity=total_cash,
+            unit_symbol=currency,
             source=long_wallet,
             dest=short_wallet,
-            unit=currency,
-            quantity=total_cash,
             contract_id=f'settle_{forward_symbol}_cash',
         ),
         Move(
+            quantity=total_underlying,
+            unit_symbol=underlying,
             source=short_wallet,
             dest=long_wallet,
-            unit=underlying,
-            quantity=total_underlying,
             contract_id=f'settle_{forward_symbol}_delivery',
         ),
         Move(
+            quantity=long_position,
+            unit_symbol=forward_symbol,
             source=long_wallet,
             dest=short_wallet,
-            unit=forward_symbol,
-            quantity=long_position,
             contract_id=f'close_{forward_symbol}',
         ),
     ]
 
-    state_updates = {
-        forward_symbol: {
-            **state,
-            'settled': True,
-        }
+    new_state = {
+        **state,
+        'settled': True,
     }
+    state_changes = [UnitStateChange(unit=forward_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 def get_forward_value(
@@ -189,7 +191,7 @@ def get_forward_value(
 def compute_early_termination(
     view: LedgerView,
     forward_symbol: str,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Compute early termination of a forward contract (before delivery date).
 
@@ -198,7 +200,7 @@ def compute_early_termination(
         forward_symbol: Symbol of the forward contract to terminate
 
     Returns:
-        ContractResult with early settlement moves and state updates.
+        PendingTransaction with early settlement moves and state updates.
     """
     return compute_forward_settlement(view, forward_symbol, force_settlement=True)
 
@@ -206,44 +208,130 @@ def compute_early_termination(
 def transact(
     view: LedgerView,
     symbol: str,
-    event_type: str,
-    event_date: datetime,
-    **kwargs
-) -> ContractResult:
+    seller: str,
+    buyer: str,
+    qty: float,
+    price: float,
+) -> PendingTransaction:
     """
-    Generate moves and state updates for a forward contract lifecycle event.
+    Execute a secondary market trade (novation/assignment) for forward contracts.
 
-    This is the unified entry point for all forward contract lifecycle events,
-    routing to the appropriate handler based on event_type.
+    In forward markets, secondary trading involves novation or assignment where
+    the forward contract position is transferred from the seller to the buyer.
+    The price represents the mark-to-market value or assignment fee.
 
     Args:
-        view: Read-only ledger access
-        symbol: Forward contract symbol
-        event_type: Type of event (DELIVERY, EARLY_TERMINATION)
-        event_date: When the event occurs
-        **kwargs: Event-specific parameters (currently none required)
+        view: Read-only view of the ledger state
+        symbol: Symbol of the forward contract to trade
+        seller: Wallet address of the seller (current position holder)
+        buyer: Wallet address of the buyer (new position holder)
+        qty: Number of forward contracts to transfer (must be positive)
+        price: Mark-to-market value or assignment fee per contract
+               Positive = buyer pays seller
+               Negative = seller pays buyer
 
     Returns:
-        ContractResult with moves and state_updates, or empty result
-        if event_type is unknown.
+        PendingTransaction with two moves:
+            1. Forward contract transfer: seller → buyer (qty contracts)
+            2. Cash transfer: direction depends on price sign
+
+    Raises:
+        ValueError: If qty <= 0, seller == buyer, forward is settled,
+                   or price is not finite
+        TransferRuleViolation: If seller or buyer is not authorized to trade
+                              the forward contract
 
     Example:
-        # Process delivery at maturity
-        result = transact(ledger, "OIL_FWD_MAR25", "DELIVERY", datetime(2025, 3, 15))
+        # Buyer pays seller 100 for 5 forward contracts
+        result = transact(view, "OIL_FWD_MAR25", "alice", "bob", 5.0, 100.0)
 
-        # Process early termination
-        result = transact(ledger, "OIL_FWD_MAR25", "EARLY_TERMINATION", datetime(2025, 2, 1))
+        # Seller pays buyer 50 (negative price) for 3 forward contracts
+        result = transact(view, "OIL_FWD_MAR25", "alice", "bob", 3.0, -50.0)
     """
-    handlers = {
-        'DELIVERY': lambda: compute_forward_settlement(view, symbol, force_settlement=False),
-        'EARLY_TERMINATION': lambda: compute_early_termination(view, symbol),
-    }
+    # Validation
+    if qty <= 0:
+        raise ValueError(f"qty must be positive, got {qty}")
 
-    handler = handlers.get(event_type)
-    if handler is None:
-        return ContractResult()  # Unknown event type - no action
+    if seller == buyer:
+        raise ValueError(f"seller and buyer must be different, got {seller}")
 
-    return handler()
+    if not math.isfinite(price):
+        raise ValueError(f"price must be finite, got {price}")
+
+    # Get forward contract state
+    state = view.get_unit_state(symbol)
+
+    # Check if already settled
+    if state.get('settled'):
+        raise ValueError(f"Forward contract {symbol} is already settled")
+
+    # Transfer rule validation: check if seller and buyer are authorized
+    long_wallet = state.get('long_wallet')
+    short_wallet = state.get('short_wallet')
+
+    if not long_wallet or not short_wallet:
+        raise TransferRuleViolation(
+            f"Bilateral unit {symbol} missing counterparty state"
+        )
+
+    # Build set of authorized wallets (includes novation source if present)
+    novation_from = state.get('_novation_from')
+    authorized = {long_wallet, short_wallet}
+    if novation_from:
+        authorized.add(novation_from)
+
+    # Check if seller and buyer are authorized
+    if seller not in authorized:
+        raise TransferRuleViolation(
+            f"Bilateral {symbol}: seller {seller} not authorized"
+        )
+    if buyer not in authorized:
+        raise TransferRuleViolation(
+            f"Bilateral {symbol}: buyer {buyer} not authorized"
+        )
+
+    # Get currency from state for cash transfer
+    currency = state['currency']
+
+    # Create moves
+    moves = [
+        # Transfer forward contracts from seller to buyer
+        Move(
+            quantity=qty,
+            unit_symbol=symbol,
+            source=seller,
+            dest=buyer,
+            contract_id=f'forward_trade_{symbol}_contract',
+        )
+    ]
+
+    # Add cash move based on price sign
+    total_value = qty * abs(price)
+    if price > 0:
+        # Buyer pays seller
+        moves.append(
+            Move(
+                quantity=total_value,
+                unit_symbol=currency,
+                source=buyer,
+                dest=seller,
+                contract_id=f'forward_trade_{symbol}_value',
+            )
+        )
+    elif price < 0:
+        # Seller pays buyer
+        moves.append(
+            Move(
+                quantity=total_value,
+                unit_symbol=currency,
+                source=seller,
+                dest=buyer,
+                contract_id=f'forward_trade_{symbol}_value',
+            )
+        )
+    # If price == 0, no cash transfer needed
+
+    return build_transaction(view, moves)
 
 
 def forward_contract(
@@ -251,7 +339,7 @@ def forward_contract(
     symbol: str,
     timestamp: datetime,
     prices: Dict[str, float]
-) -> ContractResult:
+) -> PendingTransaction:
     """
     SmartContract function for automatic settlement of bilateral forward contracts.
 
@@ -266,16 +354,16 @@ def forward_contract(
         prices: Market prices (not used for forward settlement)
 
     Returns:
-        ContractResult: Settlement moves and state updates if delivery date reached,
+        PendingTransaction: Settlement moves and state updates if delivery date reached,
         otherwise empty result.
     """
     state = view.get_unit_state(symbol)
 
     if state.get('settled'):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     delivery_date = state.get('delivery_date')
     if not delivery_date or timestamp < delivery_date:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     return compute_forward_settlement(view, symbol)

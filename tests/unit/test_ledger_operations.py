@@ -8,14 +8,14 @@ Tests:
 - Balance operations
 - Time management
 - Transaction execution
-- execute_contract with state updates
+- execute with state updates
 """
 
 import pytest
 from datetime import datetime, timedelta
 from ledger import (
-    Ledger, Move, Transaction, ContractResult, ExecuteResult,
-    cash, StateDelta,
+    Ledger, Move, Transaction, ExecuteResult,
+    cash, UnitStateChange, build_transaction,
     create_stock_unit,
     LedgerError, InsufficientFunds, WalletNotRegistered, UnitNotRegistered,
 )
@@ -33,8 +33,6 @@ class TestLedgerCreation:
         """Create ledger with minimal arguments."""
         ledger = Ledger("test")
         assert ledger.name == "test"
-        assert ledger.fast_mode is False
-        assert ledger.no_log is False
 
     def test_create_ledger_with_options(self):
         """Create ledger with all options."""
@@ -42,15 +40,11 @@ class TestLedgerCreation:
         ledger = Ledger(
             name="test",
             initial_time=t,
-            verbose=False,
-            fast_mode=True,
-            no_log=True
+            verbose=False
         )
         assert ledger.name == "test"
         assert ledger.current_time == t
         assert ledger.verbose is False
-        assert ledger.fast_mode is True
-        assert ledger.no_log is True
 
     def test_create_ledger_default_time(self):
         """Ledger has reasonable default time."""
@@ -74,7 +68,8 @@ class TestWalletRegistration:
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
         ledger.register_wallet("charlie")
-        assert len(ledger.list_wallets()) == 3
+        # 4 wallets: alice, bob, charlie, and the auto-registered 'system' wallet
+        assert len(ledger.list_wallets()) == 4
 
     def test_register_duplicate_wallet_raises(self):
         """Registering duplicate wallet raises."""
@@ -276,8 +271,8 @@ class TestTransactionExecution:
         ledger.register_wallet("bob")
         ledger.set_balance("alice", "USD", 1000.0)
 
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "USD", 100.0, "payment")
+        tx = build_transaction(ledger, [
+            Move(100.0, "USD", "alice", "bob", "payment")
         ])
         result = ledger.execute(tx)
 
@@ -297,9 +292,9 @@ class TestTransactionExecution:
         ledger.set_balance("bob", "AAPL", 100.0)
 
         # Trade: alice pays cash, bob delivers stock
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "USD", 1500.0, "trade"),
-            Move("bob", "alice", "AAPL", 10.0, "trade"),
+        tx = build_transaction(ledger, [
+            Move(1500.0, "USD", "alice", "bob", "trade"),
+            Move(10.0, "AAPL", "bob", "alice", "trade"),
         ])
         result = ledger.execute(tx)
 
@@ -317,8 +312,8 @@ class TestTransactionExecution:
         ledger.register_wallet("bob")
         ledger.set_balance("alice", "USD", 1000.0)
 
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "USD", 100.0, "payment")
+        tx = build_transaction(ledger, [
+            Move(100.0, "USD", "alice", "bob", "payment")
         ])
 
         result1 = ledger.execute(tx)
@@ -335,8 +330,8 @@ class TestTransactionExecution:
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
 
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "AAPL", 100.0, "trade")
+        tx = build_transaction(ledger, [
+            Move(100.0, "AAPL", "alice", "bob", "trade")
         ])
         result = ledger.execute(tx)
 
@@ -348,8 +343,8 @@ class TestTransactionExecution:
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
 
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "UNKNOWN", 100.0, "trade")
+        tx = build_transaction(ledger, [
+            Move(100.0, "UNKNOWN", "alice", "bob", "trade")
         ])
         result = ledger.execute(tx)
 
@@ -361,43 +356,12 @@ class TestTransactionExecution:
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
 
-        tx = ledger.create_transaction([
-            Move("alice", "unknown", "USD", 100.0, "trade")
+        tx = build_transaction(ledger, [
+            Move(100.0, "USD", "alice", "unknown", "trade")
         ])
         result = ledger.execute(tx)
 
         assert result == ExecuteResult.REJECTED
-
-    def test_execute_fast_mode_skips_validation(self):
-        """fast_mode=True skips balance validation."""
-        ledger = Ledger("test", verbose=False, fast_mode=True)
-        ledger.register_unit(_stock("AAPL", "Apple", "treasury", shortable=False))
-        ledger.register_wallet("alice")
-        ledger.register_wallet("bob")
-
-        # Would be rejected in normal mode
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "AAPL", 100.0, "trade")
-        ])
-        result = ledger.execute(tx)
-
-        assert result == ExecuteResult.APPLIED
-        assert ledger.get_balance("alice", "AAPL") == -100.0
-
-    def test_execute_no_log_mode(self):
-        """no_log=True skips transaction logging."""
-        ledger = Ledger("test", verbose=False, no_log=True)
-        ledger.register_unit(cash("USD", "US Dollar"))
-        ledger.register_wallet("alice")
-        ledger.register_wallet("bob")
-        ledger.set_balance("alice", "USD", 1000.0)
-
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "USD", 100.0, "payment")
-        ])
-        ledger.execute(tx)
-
-        assert len(ledger.transaction_log) == 0
 
     def test_execute_applies_rounding(self):
         """Transaction applies unit rounding."""
@@ -407,8 +371,8 @@ class TestTransactionExecution:
         ledger.register_wallet("bob")
         ledger.set_balance("alice", "USD", 1000.0)
 
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "USD", 100.456, "payment")
+        tx = build_transaction(ledger, [
+            Move(100.456, "USD", "alice", "bob", "payment")
         ])
         ledger.execute(tx)
 
@@ -417,64 +381,69 @@ class TestTransactionExecution:
 
 
 class TestExecuteContract:
-    """Tests for execute_contract method."""
+    """Tests for execute method."""
 
-    def test_execute_contract_with_moves(self):
-        """execute_contract applies moves."""
+    def test_execute_with_moves(self):
+        """execute applies moves."""
         ledger = Ledger("test", verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
         ledger.set_balance("alice", "USD", 1000.0)
 
-        result = ContractResult(moves=[
-            Move("alice", "bob", "USD", 100.0, "payment")
+        pending = build_transaction(ledger, [
+            Move(100.0, "USD", "alice", "bob", "payment")
         ])
-        outcome = ledger.execute_contract(result)
+        outcome = ledger.execute(pending)
 
         assert outcome == ExecuteResult.APPLIED
         assert ledger.get_balance("bob", "USD") == 100.0
 
-    def test_execute_contract_with_state_updates(self):
-        """execute_contract applies state updates."""
+    def test_execute_with_state_changes(self):
+        """execute applies state deltas."""
         ledger = Ledger("test", verbose=False)
         ledger.register_unit(_stock("AAPL", "Apple", "treasury"))
 
-        result = ContractResult(state_updates={
-            "AAPL": {"settled": True, "price": 150.0}
-        })
-        outcome = ledger.execute_contract(result)
+        old_state = ledger.get_unit_state("AAPL")
+        new_state = {**old_state, "settled": True, "price": 150.0}
+        pending = build_transaction(ledger, [], state_changes=[
+            UnitStateChange(unit="AAPL", old_state=old_state, new_state=new_state)
+        ])
+        outcome = ledger.execute(pending)
 
         assert outcome == ExecuteResult.APPLIED
         state = ledger.get_unit_state("AAPL")
         assert state["settled"] is True
         assert state["price"] == 150.0
 
-    def test_execute_contract_records_state_deltas(self):
-        """execute_contract records state deltas in log."""
-        ledger = Ledger("test", verbose=False, no_log=False)
+    def test_execute_records_state_changes(self):
+        """execute records state deltas in log."""
+        ledger = Ledger("test", verbose=False)
         ledger.register_unit(_stock("AAPL", "Apple", "treasury"))
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
         ledger.set_balance("alice", "USD", 1000.0)
 
-        result = ContractResult(
-            moves=[Move("alice", "bob", "USD", 100.0, "payment")],
-            state_updates={"AAPL": {"settled": True}}
+        old_state = ledger.get_unit_state("AAPL")
+        new_state = {**old_state, "settled": True}
+        pending = build_transaction(
+            ledger,
+            [Move(100.0, "USD", "alice", "bob", "payment")],
+            state_changes=[UnitStateChange(unit="AAPL", old_state=old_state, new_state=new_state)]
         )
-        ledger.execute_contract(result)
+        ledger.execute(pending)
 
         tx = ledger.transaction_log[-1]
-        assert len(tx.state_deltas) == 1
-        assert tx.state_deltas[0].unit == "AAPL"
-        assert tx.state_deltas[0].new_state["settled"] is True
+        assert len(tx.state_changes) == 1
+        assert tx.state_changes[0].unit == "AAPL"
+        assert tx.state_changes[0].new_state["settled"] is True
 
-    def test_execute_empty_contract(self):
-        """execute_contract with empty result is APPLIED."""
+    def test_execute_empty_transaction(self):
+        """execute with empty result is APPLIED (no-op is successful)."""
         ledger = Ledger("test", verbose=False)
-        result = ContractResult()
-        outcome = ledger.execute_contract(result)
+        pending = build_transaction(ledger, [])
+        outcome = ledger.execute(pending)
         assert outcome == ExecuteResult.APPLIED
 
 
@@ -540,12 +509,12 @@ class TestCloneAt:
 
         # Day 1
         ledger.advance_time(datetime(2025, 1, 2))
-        tx1 = ledger.create_transaction([Move("alice", "bob", "USD", 100.0, "p1")])
+        tx1 = build_transaction(ledger, [Move(100.0, "USD", "alice", "bob", "p1")])
         ledger.execute(tx1)
 
         # Day 2
         ledger.advance_time(datetime(2025, 1, 3))
-        tx2 = ledger.create_transaction([Move("alice", "bob", "USD", 200.0, "p2")])
+        tx2 = build_transaction(ledger, [Move(200.0, "USD", "alice", "bob", "p2")])
         ledger.execute(tx2)
 
         # Clone at day 1
@@ -563,7 +532,7 @@ class TestCloneAt:
         ledger.set_balance("alice", "USD", 1000.0)
 
         ledger.advance_time(datetime(2025, 1, 2))
-        tx1 = ledger.create_transaction([Move("alice", "bob", "USD", 100.0, "p1")])
+        tx1 = build_transaction(ledger, [Move(100.0, "USD", "alice", "bob", "p1")])
         ledger.execute(tx1)
 
         # Clone at initial time
@@ -571,18 +540,12 @@ class TestCloneAt:
 
         # Execute different transaction on clone
         past_ledger.advance_time(datetime(2025, 1, 2))
-        tx_alt = past_ledger.create_transaction([Move("alice", "bob", "USD", 500.0, "alt")])
+        tx_alt = build_transaction(past_ledger, [Move(500.0, "USD", "alice", "bob", "alt")])
         past_ledger.execute(tx_alt)
 
         # Divergent states
         assert ledger.get_balance("alice", "USD") == 900.0
         assert past_ledger.get_balance("alice", "USD") == 500.0
-
-    def test_clone_at_no_log_raises(self):
-        """clone_at raises when no_log=True."""
-        ledger = Ledger("test", verbose=False, no_log=True)
-        with pytest.raises(LedgerError, match="no_log"):
-            ledger.clone_at(datetime(2025, 1, 1))
 
     def test_clone_at_future_raises(self):
         """clone_at raises for future time."""
@@ -603,11 +566,11 @@ class TestReplay:
         ledger.register_wallet("treasury")
 
         # Initial funding via transaction
-        tx0 = ledger.create_transaction([Move("treasury", "alice", "USD", 1000.0, "fund")])
+        tx0 = build_transaction(ledger, [Move(1000.0, "USD", "treasury", "alice", "fund")])
         ledger.execute(tx0)
 
         ledger.advance_time(datetime(2025, 1, 2))
-        tx1 = ledger.create_transaction([Move("alice", "bob", "USD", 100.0, "p1")])
+        tx1 = build_transaction(ledger, [Move(100.0, "USD", "alice", "bob", "p1")])
         ledger.execute(tx1)
 
         # Replay
@@ -616,8 +579,188 @@ class TestReplay:
         assert replayed.get_balance("alice", "USD") == 900.0
         assert replayed.get_balance("bob", "USD") == 100.0
 
-    def test_replay_no_log_raises(self):
-        """replay() raises when no_log=True."""
-        ledger = Ledger("test", verbose=False, no_log=True)
-        with pytest.raises(LedgerError, match="no_log"):
-            ledger.replay()
+
+class TestReproducibilityWithDynamicUnits:
+    """Tests for replay/clone with dynamically created units (units_to_create)."""
+
+    def test_replay_with_dynamically_created_units(self):
+        """Replay must correctly handle transactions that create units."""
+        from ledger.units.stock import Dividend
+        from ledger.units.deferred_cash import deferred_cash_contract
+        from ledger import LifecycleEngine
+
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger.register_unit(cash("USD", "US Dollar"))
+        ledger.register_wallet("treasury")
+        ledger.register_wallet("alice")
+        ledger.set_balance("treasury", "USD", 1_000_000)
+
+        # Create stock with dividend
+        schedule = [Dividend(
+            ex_date=datetime(2024, 3, 15),
+            payment_date=datetime(2024, 3, 15),
+            amount_per_share=1.00,
+            currency="USD"
+        )]
+        stock = create_stock_unit("AAPL", "Apple", "treasury", "USD", schedule)
+        ledger.register_unit(stock)
+        ledger.set_balance("alice", "AAPL", 100)
+
+        # Process dividend (creates DeferredCash units)
+        ledger.advance_time(datetime(2024, 3, 15))
+        from ledger.units.stock import process_dividends
+        pending = process_dividends(ledger, "AAPL", datetime(2024, 3, 15))
+        ledger.execute(pending)
+
+        # Settle via lifecycle
+        engine = LifecycleEngine(ledger, contracts={"DEFERRED_CASH": deferred_cash_contract})
+        engine.step(datetime(2024, 3, 15), {})
+
+        # Capture original state
+        original_balance = ledger.get_balance("alice", "USD")
+        assert original_balance == 100.0
+
+        # Replay should succeed and produce identical state
+        replayed = ledger.replay()
+        assert replayed.get_balance("alice", "USD") == original_balance
+
+    def test_clone_at_before_unit_was_created(self):
+        """clone_at to time before a unit was dynamically created should not have that unit."""
+        from ledger.core import PendingTransaction, TransactionOrigin, OriginType, Unit
+
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger.register_unit(cash("USD", "US Dollar"))
+        ledger.register_wallet("alice")
+
+        # At t1, execute transaction that creates a unit
+        t1 = datetime(2024, 1, 2)
+        ledger.advance_time(t1)
+
+        new_unit = Unit(symbol="DYNAMIC", name="Dynamic Unit", unit_type="TEST")
+        pending = PendingTransaction(
+            moves=(Move(1.0, "DYNAMIC", "system", "alice", "create"),),
+            state_changes=(),
+            origin=TransactionOrigin(OriginType.CONTRACT, "test"),
+            timestamp=t1,
+            units_to_create=(new_unit,),
+        )
+        ledger.execute(pending)
+
+        # Verify unit exists now
+        assert "DYNAMIC" in ledger.units
+        assert ledger.get_balance("alice", "DYNAMIC") == 1.0
+
+        # clone_at before unit creation
+        t0 = datetime(2024, 1, 1)
+        cloned = ledger.clone_at(t0)
+
+        # The dynamically created unit should NOT exist in the clone
+        assert "DYNAMIC" not in cloned.units
+
+    def test_replay_full_with_dynamic_units(self):
+        """Full replay correctly handles transactions that create units."""
+        from ledger.core import PendingTransaction, TransactionOrigin, OriginType, Unit
+
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger.register_unit(cash("USD", "US Dollar"))
+        ledger.register_wallet("alice")
+        ledger.register_wallet("bob")
+
+        # Transaction 0: creates UnitX
+        t1 = datetime(2024, 1, 2)
+        ledger.advance_time(t1)
+        new_unit = Unit(symbol="UNITX", name="Unit X", unit_type="TEST")
+        tx0 = PendingTransaction(
+            moves=(Move(10.0, "UNITX", "system", "alice", "create"),),
+            state_changes=(),
+            origin=TransactionOrigin(OriginType.CONTRACT, "create"),
+            timestamp=t1,
+            units_to_create=(new_unit,),
+        )
+        ledger.execute(tx0)
+
+        # Transaction 1: transfers UNITX
+        t2 = datetime(2024, 1, 3)
+        ledger.advance_time(t2)
+        tx1 = build_transaction(ledger, [Move(5.0, "UNITX", "alice", "bob", "transfer")])
+        ledger.execute(tx1)
+
+        # Full replay (from_tx=0) should work correctly
+        replayed = ledger.replay(from_tx=0)
+        assert "UNITX" in replayed.units
+        assert replayed.get_balance("alice", "UNITX") == 5.0
+        assert replayed.get_balance("bob", "UNITX") == 5.0
+
+    def test_intent_id_includes_units_to_create(self):
+        """Two transactions with different units_to_create should have different intent_ids."""
+        from ledger.core import PendingTransaction, TransactionOrigin, OriginType, Unit
+
+        origin = TransactionOrigin(OriginType.CONTRACT, "test")
+        t = datetime(2024, 1, 1)
+
+        unit_a = Unit(symbol="UNIT_A", name="Unit A", unit_type="TEST")
+        unit_b = Unit(symbol="UNIT_B", name="Unit B", unit_type="TEST")
+
+        tx1 = PendingTransaction(
+            moves=(),
+            state_changes=(),
+            origin=origin,
+            timestamp=t,
+            units_to_create=(unit_a,),
+        )
+
+        tx2 = PendingTransaction(
+            moves=(),
+            state_changes=(),
+            origin=origin,
+            timestamp=t,
+            units_to_create=(unit_b,),
+        )
+
+        assert tx1.intent_id != tx2.intent_id
+
+    def test_clone_at_with_staggered_unit_creation(self):
+        """clone_at should correctly handle multiple units created at different times."""
+        from ledger.core import PendingTransaction, TransactionOrigin, OriginType, Unit
+
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger.register_unit(cash("USD", "US Dollar"))
+        ledger.register_wallet("alice")
+
+        # t1: create UnitA
+        t1 = datetime(2024, 1, 2)
+        ledger.advance_time(t1)
+        unit_a = Unit(symbol="UNIT_A", name="Unit A", unit_type="TEST")
+        tx1 = PendingTransaction(
+            moves=(Move(1.0, "UNIT_A", "system", "alice", "create"),),
+            state_changes=(),
+            origin=TransactionOrigin(OriginType.CONTRACT, "create_a"),
+            timestamp=t1,
+            units_to_create=(unit_a,),
+        )
+        ledger.execute(tx1)
+
+        # t2: create UnitB
+        t2 = datetime(2024, 1, 3)
+        ledger.advance_time(t2)
+        unit_b = Unit(symbol="UNIT_B", name="Unit B", unit_type="TEST")
+        tx2 = PendingTransaction(
+            moves=(Move(1.0, "UNIT_B", "system", "alice", "create"),),
+            state_changes=(),
+            origin=TransactionOrigin(OriginType.CONTRACT, "create_b"),
+            timestamp=t2,
+            units_to_create=(unit_b,),
+        )
+        ledger.execute(tx2)
+
+        # Current state has both
+        assert "UNIT_A" in ledger.units
+        assert "UNIT_B" in ledger.units
+
+        # clone_at(t1.5) should have UnitA but not UnitB
+        t_mid = datetime(2024, 1, 2, 12, 0)
+        cloned = ledger.clone_at(t_mid)
+
+        assert "UNIT_A" in cloned.units
+        assert "UNIT_B" not in cloned.units
+        assert cloned.get_balance("alice", "UNIT_A") == 1.0

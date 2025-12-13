@@ -3,9 +3,9 @@ Core types and pure functions for the financial ledger system.
 
 This module provides the foundational data structures and protocols for the ledger:
 1. Protocols: LedgerView for read-only ledger access
-2. Immutable data structures: Move, Transaction, ContractResult, Unit
+2. Immutable data structures: Move, PendingTransaction, Transaction, Unit
 3. Exceptions: LedgerError and domain-specific error types
-4. Type aliases: Positions, BalanceMap, UnitState, StateUpdates
+4. Type aliases: Positions, BalanceMap, UnitState
 5. Transfer rules: Pure validation functions for moves
 6. Unit factories: Functions to create standard unit types
 
@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import hashlib
+import json
 import math
 from typing import (
     Dict, List, Set, Optional, Callable, Any, Protocol,
@@ -48,6 +50,13 @@ UNIT_TYPE_STRUCTURED_NOTE = "STRUCTURED_NOTE"
 UNIT_TYPE_PORTFOLIO_SWAP = "PORTFOLIO_SWAP"
 UNIT_TYPE_AUTOCALLABLE = "AUTOCALLABLE"
 
+# SBL (Securities Borrowing and Lending) unit types
+UNIT_TYPE_BORROW_RECORD = "BORROW_RECORD"
+UNIT_TYPE_LOCATE = "LOCATE"
+
+# QIS (Quantitative Investment Strategy)
+UNIT_TYPE_QIS = "QIS"
+
 # Epsilon for floating point comparisons.
 # Quantities with absolute value below this threshold are treated as zero.
 QUANTITY_EPSILON = 1e-12
@@ -75,9 +84,6 @@ BalanceMap = Dict[str, float]
 # Internal state for a unit, containing term sheet data, lifecycle information, etc.
 UnitState = Dict[str, Any]
 
-# Mapping from unit symbol to state changes to be applied.
-StateUpdates = Dict[str, UnitState]
-
 
 # ============================================================================
 # PROTOCOLS
@@ -103,7 +109,7 @@ class LedgerView(Protocol):
         """Return the current logical time of the ledger."""
         ...
 
-    def get_balance(self, wallet: str, unit: str) -> float:
+    def get_balance(self, wallet_id: str, unit_symbol: str) -> float:
         """
         Return the balance of a specific unit in a wallet.
 
@@ -111,7 +117,7 @@ class LedgerView(Protocol):
         """
         ...
 
-    def get_unit_state(self, unit: str) -> UnitState:
+    def get_unit_state(self, unit_symbol: str) -> UnitState:
         """
         Return a copy of the unit's internal state.
 
@@ -120,7 +126,7 @@ class LedgerView(Protocol):
         """
         ...
 
-    def get_positions(self, unit: str) -> Positions:
+    def get_positions(self, unit_symbol: str) -> Positions:
         """
         Return all non-zero positions for a unit across all wallets.
 
@@ -134,6 +140,41 @@ class LedgerView(Protocol):
 
     def get_unit(self, symbol: str) -> 'Unit':
         """Return the Unit object for a given symbol."""
+        ...
+
+
+class SmartContract(Protocol):
+    """
+    Protocol for lifecycle-aware contracts.
+
+    Contracts check if any events should fire based on:
+    - Current time
+    - Current prices
+    - Unit state
+
+    Contracts receive a LedgerView and return a PendingTransaction directly.
+    Use build_transaction() or empty_pending_transaction() to create the return value.
+    """
+
+    def check_lifecycle(
+        self,
+        view: LedgerView,
+        symbol: str,
+        timestamp: datetime,
+        prices: Dict[str, float]
+    ) -> 'PendingTransaction':
+        """
+        Check if lifecycle events should fire.
+
+        Args:
+            view: Read-only ledger access
+            symbol: Unit symbol to check
+            timestamp: Current timestamp
+            prices: Current market prices
+
+        Returns:
+            PendingTransaction with moves/state updates, or empty if nothing to do.
+        """
         ...
 
 
@@ -153,6 +194,19 @@ class ExecuteResult(Enum):
     APPLIED = "applied"
     ALREADY_APPLIED = "already_applied"
     REJECTED = "rejected"
+
+
+class OriginType(Enum):
+    """
+    Classification of where a transaction originated.
+
+    Used for audit trails, reconciliation, and regulatory compliance.
+    """
+    USER_ACTION = "user_action"           # Manual user-initiated transaction
+    CONTRACT = "contract"                 # Unit contract (trade execution)
+    LIFECYCLE = "lifecycle"               # Automatic lifecycle event (expiry, coupon, etc.)
+    SYSTEM = "system"                     # System operations (issuance, initial setup)
+    EXTERNAL = "external"                 # External system integration
 
 
 # ============================================================================
@@ -190,21 +244,79 @@ class WalletNotRegistered(LedgerError):
 
 
 # ============================================================================
-# STATE DELTA
+# TRANSACTION ORIGIN
 # ============================================================================
 
-@dataclass(frozen=True)
-class StateDelta:
+@dataclass(frozen=True, slots=True)
+class TransactionOrigin:
+    """
+    Immutable record of a transaction's origin for audit purposes.
+
+    This structured type captures the provenance of every transaction,
+    enabling audit trails, reconciliation, and regulatory compliance.
+
+    Attributes:
+        origin_type: Classification of the origin source (USER, CONTRACT, LIFECYCLE, etc.)
+        source_id: Identifier of the specific source (contract name, user ID, etc.)
+        unit_symbol: Symbol of the unit that triggered this (if applicable)
+        event_type: Specific event within the source (e.g., "EXPIRY", "SETTLEMENT", "TRADE")
+    """
+    origin_type: OriginType
+    source_id: str
+    unit_symbol: Optional[str] = None
+    event_type: Optional[str] = None
+
+    def __repr__(self) -> str:
+        parts = [f"{self.origin_type.value}:{self.source_id}"]
+        if self.unit_symbol:
+            parts.append(f"unit={self.unit_symbol}")
+        if self.event_type:
+            parts.append(f"event={self.event_type}")
+        return f"Origin({', '.join(parts)})"
+
+
+# ============================================================================
+# UNIT STATE CHANGE
+# ============================================================================
+
+@dataclass(frozen=True, slots=True)
+class UnitStateChange:
     """
     Record of a unit state change for transaction logging and potential rollback.
 
-    Captures the complete before and after state of a unit when its internal
-    state is modified. Both old_state and new_state should be immutable objects
-    (frozen dataclasses or None).
+    Stores complete before/after state snapshots for correctness.
+    This enables:
+    - Forward replay: apply new_state
+    - Backward replay: restore old_state
+    - Audit queries: compute changed_fields() on demand
+
+    Attributes:
+        unit: Symbol of the unit whose state changed
+        old_state: Complete state before the change (dict or None)
+        new_state: Complete state after the change (dict)
     """
     unit: str
-    old_state: Any  # The state before the change (frozen dataclass or None)
-    new_state: Any  # The state after the change (frozen dataclass)
+    old_state: Any  # The state before the change (dict or None)
+    new_state: Any  # The state after the change (dict)
+
+    def changed_fields(self) -> Dict[str, Tuple[Any, Any]]:
+        """
+        Compute fields that differ between old and new state.
+
+        Returns:
+            Dict mapping field name to (old_value, new_value) tuples.
+            Only includes fields that actually changed.
+        """
+        old = self.old_state if isinstance(self.old_state, dict) else {}
+        new = self.new_state if isinstance(self.new_state, dict) else {}
+        changes = {}
+        all_keys = set(old.keys()) | set(new.keys())
+        for key in all_keys:
+            old_val = old.get(key)
+            new_val = new.get(key)
+            if old_val != new_val:
+                changes[key] = (old_val, new_val)
+        return changes
 
 
 # ============================================================================
@@ -217,20 +329,20 @@ class Move:
     A single transfer of value between two wallets.
 
     Attributes:
+        quantity: The amount to transfer (must be finite and non-zero).
+        unit_symbol: The symbol of the unit being transferred (e.g., "USD", "AAPL").
         source: The wallet ID from which value is debited.
         dest: The wallet ID to which value is credited.
-        unit: The unit symbol being transferred.
-        quantity: The amount to transfer (must be finite and non-zero).
         contract_id: Identifier of the contract generating this move.
         metadata: Optional additional information about the move.
 
     This class is immutable (frozen=True) and memory-optimized (slots=True).
     All fields are validated in __post_init__.
     """
+    quantity: float
+    unit_symbol: str
     source: str
     dest: str
-    unit: str
-    quantity: float
     contract_id: str
     metadata: Optional[Dict[str, Any]] = None
 
@@ -239,8 +351,8 @@ class Move:
             raise ValueError("Move source cannot be empty")
         if not self.dest or not self.dest.strip():
             raise ValueError("Move dest cannot be empty")
-        if not self.unit or not self.unit.strip():
-            raise ValueError("Move unit cannot be empty")
+        if not self.unit_symbol or not self.unit_symbol.strip():
+            raise ValueError("Move unit_symbol cannot be empty")
         if not self.contract_id or not self.contract_id.strip():
             raise ValueError("Move contract_id cannot be empty")
         if not math.isfinite(self.quantity):
@@ -251,60 +363,217 @@ class Move:
             raise ValueError("Source and dest must be different")
 
     def __repr__(self) -> str:
-        return f"Move({self.source}→{self.dest}: {self.quantity} {self.unit})"
+        return f"Move({self.quantity} {self.unit_symbol}: {self.source}→{self.dest})"
 
 
-@dataclass(frozen=True)
-class ContractResult:
+def _compute_intent_id(
+    moves: Tuple[Move, ...],
+    state_changes: Tuple[UnitStateChange, ...],
+    origin: TransactionOrigin,
+    units_to_create: Tuple['Unit', ...] = ()
+) -> str:
     """
-    Output from a contract execution containing moves and state changes.
+    Compute a deterministic content hash for a transaction's intent.
+
+    This hash is based solely on the semantic content of the transaction
+    (moves, state_changes, origin, units_to_create), NOT on timestamps or ledger-specific data.
+    Same inputs always produce the same intent_id.
+
+    Used for idempotency checking: prevents duplicate business transactions.
+    """
+    # Canonicalize moves (sort for determinism)
+    sorted_moves = tuple(sorted(
+        moves,
+        key=lambda m: (m.quantity, m.unit_symbol, m.source, m.dest, m.contract_id)
+    ))
+
+    content_parts = []
+
+    # Add origin
+    content_parts.append(f"origin:{origin.origin_type.value}:{origin.source_id}")
+    if origin.unit_symbol:
+        content_parts.append(f"unit:{origin.unit_symbol}")
+    if origin.event_type:
+        content_parts.append(f"event:{origin.event_type}")
+
+    # Add units to create (sorted by symbol for determinism)
+    for unit in sorted(units_to_create, key=lambda u: u.symbol):
+        content_parts.append(f"unit_create:{unit.symbol}|{unit.unit_type}")
+
+    # Add moves
+    for m in sorted_moves:
+        content_parts.append(f"move:{m.quantity}|{m.unit_symbol}|{m.source}|{m.dest}|{m.contract_id}")
+
+    # Add state changes (sorted by unit)
+    for sc in sorted(state_changes, key=lambda s: s.unit):
+        # Use repr for state to get deterministic string representation
+        content_parts.append(f"state_change:{sc.unit}|{repr(sc.old_state)}|{repr(sc.new_state)}")
+
+    content = "|".join(content_parts)
+    return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+
+@dataclass(frozen=True, slots=True)
+class PendingTransaction:
+    """
+    A transaction specification before execution - represents INTENT.
+
+    Created by contracts and submitted to the ledger for execution.
+    Contains everything needed to describe what should happen, but without
+    execution-specific metadata (exec_id, ledger_name, execution_time).
+
+    Lifecycle:
+    1. Contract creates PendingTransaction with moves, state_changes, origin, timestamp
+    2. intent_id is auto-computed from content (deterministic hash)
+    3. Ledger.execute() validates and executes, creating a Transaction record
 
     Attributes:
-        moves: Tuple of balance transfers to execute. Tuples are used for immutability.
-        state_updates: Dictionary mapping unit symbols to their state changes.
-
-    This dataclass is frozen to prevent reassignment of fields. The state_updates
-    dictionary itself can technically be mutated, so callers should treat it as
-    read-only by convention.
+        moves: Tuple of value transfers between wallets
+        state_changes: Tuple of unit state changes (with old_state and new_state)
+        units_to_create: Tuple of Unit objects to register before executing moves
+        origin: Who/what created this transaction and why
+        timestamp: When this pending transaction was created
+        intent_id: Content-addressable hash of the transaction intent (auto-computed)
     """
-    moves: Tuple[Move, ...] = ()
-    state_updates: StateUpdates = field(default_factory=dict)
+    moves: Tuple[Move, ...]
+    state_changes: Tuple[UnitStateChange, ...]
+    origin: TransactionOrigin
+    timestamp: datetime
+    units_to_create: Tuple['Unit', ...] = ()
+    intent_id: str = field(default="")
+
+    def __post_init__(self):
+        # Compute intent_id if not provided
+        if not self.intent_id:
+            computed_id = _compute_intent_id(
+                self.moves, self.state_changes, self.origin, self.units_to_create
+            )
+            object.__setattr__(self, 'intent_id', computed_id)
 
     def is_empty(self) -> bool:
-        """Return True if this result contains no moves and no state updates."""
-        return not self.moves and not self.state_updates
+        """Return True if this pending transaction has no moves, no state deltas, and no units to create."""
+        return not self.moves and not self.state_changes and not self.units_to_create
 
     def __repr__(self) -> str:
-        return f"ContractResult({len(self.moves)} moves, {list(self.state_updates.keys()) or '{}'})"
+        return f"PendingTransaction({len(self.moves)} moves, {len(self.state_changes)} deltas, {self.origin})"
+
+
+def build_transaction(
+    view: LedgerView,
+    moves: List[Move],
+    state_changes: Optional[List[UnitStateChange]] = None,
+    origin: Optional[TransactionOrigin] = None,
+    units_to_create: Optional[Tuple['Unit', ...]] = None,
+) -> PendingTransaction:
+    """
+    Build a PendingTransaction from moves and state deltas.
+
+    This is the standard way to create transactions.
+
+    Args:
+        view: Read-only ledger view (provides current_time)
+        moves: List of moves to include in the transaction
+        state_changes: Optional list of UnitStateChange objects representing state changes
+        origin: Transaction origin (defaults to CONTRACT origin)
+        units_to_create: Optional tuple of Unit objects to register before executing moves
+
+    Returns:
+        A PendingTransaction ready for execution
+
+    Example:
+        def compute_settlement(view, symbol, price):
+            moves = [Move(1000.0, "USD", "alice", "bob", "settlement")]
+            old_state = view.get_unit_state(symbol)
+            new_state = {**old_state, "settled": True, "settlement_price": price}
+            changes = [UnitStateChange(unit=symbol, old_state=old_state, new_state=new_state)]
+            return build_transaction(view, moves, changes)
+    """
+    import copy
+
+    if origin is None:
+        origin = TransactionOrigin(
+            origin_type=OriginType.CONTRACT,
+            source_id="contract",
+        )
+
+    # Deep copy state changes to prevent mutation
+    copied_changes: Tuple[UnitStateChange, ...] = ()
+    if state_changes:
+        copied_changes = tuple(
+            UnitStateChange(
+                unit=sc.unit,
+                old_state=copy.deepcopy(sc.old_state),
+                new_state=copy.deepcopy(sc.new_state),
+            )
+            for sc in state_changes
+        )
+
+    return PendingTransaction(
+        moves=tuple(moves),
+        state_changes=copied_changes,
+        origin=origin,
+        timestamp=view.current_time,
+        units_to_create=units_to_create or (),
+    )
+
+
+def empty_pending_transaction(view: LedgerView) -> PendingTransaction:
+    """
+    Create an empty PendingTransaction (no moves, no state changes).
+
+    Use this when a contract function has nothing to do.
+
+    Args:
+        view: Read-only ledger view (provides current_time)
+
+    Returns:
+        An empty PendingTransaction
+    """
+    return PendingTransaction(
+        moves=(),
+        state_changes=(),
+        origin=TransactionOrigin(OriginType.CONTRACT, "noop"),
+        timestamp=view.current_time,
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class Transaction:
     """
-    An atomic, immutable record of ledger state changes.
+    An executed, immutable record of ledger state changes - represents FACT.
+
+    Created by the ledger when executing a PendingTransaction.
+    All fields are guaranteed to be present (no None values for required fields).
 
     Attributes:
-        moves: Tuple of value transfers between wallets.
-        tx_id: Unique identifier for this transaction.
-        timestamp: Logical time when the transaction was created.
-        ledger_name: Name of the ledger this transaction belongs to.
-        state_deltas: Tuple of unit state changes included in this transaction.
-        contract_ids: Set of contract IDs that generated the moves (auto-populated).
-        execution_time: Actual time when the transaction was executed (optional).
+        moves: Tuple of value transfers between wallets
+        state_changes: Tuple of unit state changes (with old_state and new_state)
+        origin: Who/what created this transaction and why
+        timestamp: When the PendingTransaction was created
+        intent_id: Content hash from PendingTransaction (for idempotency)
+        exec_id: Unique execution identifier (ledger + sequence + time)
+        ledger_name: Name of the ledger that executed this
+        execution_time: When this was executed and logged
+        sequence_number: Monotonic sequence within the ledger (for ordering)
+        contract_ids: Set of contract IDs from moves (auto-populated)
 
     This class is immutable (frozen=True) and memory-optimized (slots=True).
     """
     moves: Tuple[Move, ...]
-    tx_id: str
-    timestamp: datetime
+    state_changes: Tuple[UnitStateChange, ...]
+    origin: TransactionOrigin
+    timestamp: datetime           # When PendingTransaction was created
+    intent_id: str               # Content hash (from PendingTransaction)
+    exec_id: str                 # Unique execution instance ID
     ledger_name: str
-    state_deltas: Tuple[StateDelta, ...] = ()
+    execution_time: datetime     # When executed
+    sequence_number: int         # Monotonic within ledger
+    units_to_create: Tuple['Unit', ...] = ()
     contract_ids: FrozenSet[str] = None
-    execution_time: Optional[datetime] = None
 
     def __post_init__(self):
-        if not self.moves and not self.state_deltas:
-            raise ValueError("Transaction must have moves or state_deltas")
+        if not self.moves and not self.state_changes and not self.units_to_create:
+            raise ValueError("Transaction must have moves, state_changes, or units_to_create")
         if self.contract_ids is None:
             object.__setattr__(
                 self, 'contract_ids',
@@ -324,25 +593,35 @@ class Transaction:
         lines = [
             "",
             f"┌{bar}┐",
-            f"│{pad(' Transaction: ' + self.tx_id)}│",
+            f"│{pad(' Transaction: ' + self.exec_id)}│",
             f"├{bar}┤",
+            f"│{pad('   intent_id      : ' + self.intent_id)}│",
             f"│{pad('   timestamp      : ' + str(self.timestamp))}│",
             f"│{pad('   ledger_name    : ' + self.ledger_name)}│",
             f"│{pad('   execution_time : ' + str(self.execution_time))}│",
+            f"│{pad('   sequence       : ' + str(self.sequence_number))}│",
+            f"│{pad('   origin         : ' + str(self.origin))}│",
             f"│{pad('   contract_ids   : ' + str(set(self.contract_ids)))}│",
-            f"├{bar}┤",
-            f"│{pad(' Moves (' + str(len(self.moves)) + '):')}│",
         ]
-        for i, move in enumerate(self.moves):
-            move_str = f"   [{i}] {move.source} → {move.dest}: {move.quantity} {move.unit}"
-            lines.append(f"│{pad(move_str)}│")
-        if self.state_deltas:
+        if self.units_to_create:
             lines.append(f"├{bar}┤")
-            lines.append(f"│{pad(' State Deltas (' + str(len(self.state_deltas)) + '):')}│")
-            for delta in self.state_deltas:
-                lines.append(f"│{pad('   [' + delta.unit + ']')}│")
-                lines.append(f"│{pad('      old: ' + str(delta.old_state))}│")
-                lines.append(f"│{pad('      new: ' + str(delta.new_state))}│")
+            lines.append(f"│{pad(' Units Created (' + str(len(self.units_to_create)) + '):')}│")
+            for unit in self.units_to_create:
+                lines.append(f"│{pad('   ' + unit.symbol + ' (' + unit.name + ')')}│")
+        lines.append(f"├{bar}┤")
+        lines.append(f"│{pad(' Moves (' + str(len(self.moves)) + '):')}│")
+        for i, move in enumerate(self.moves):
+            move_str = f"   [{i}] {move.quantity} {move.unit_symbol}: {move.source} → {move.dest}"
+            lines.append(f"│{pad(move_str)}│")
+        if self.state_changes:
+            lines.append(f"├{bar}┤")
+            lines.append(f"│{pad(' State Changes (' + str(len(self.state_changes)) + '):')}│")
+            for sc in self.state_changes:
+                lines.append(f"│{pad('   [' + sc.unit + ']')}│")
+                changed = sc.changed_fields()
+                if changed:
+                    for field_name, (old_val, new_val) in changed.items():
+                        lines.append(f"│{pad(f'      {field_name}: {old_val!r} → {new_val!r}')}│")
         lines.append(f"└{bar}┘")
         return "\n".join(lines)
 
@@ -407,13 +686,13 @@ def bilateral_transfer_rule(view: LedgerView, move: Move) -> None:
         TransferRuleViolation: If the unit is missing counterparty state or if
                                either the source or destination wallet is not authorized.
     """
-    state = view.get_unit_state(move.unit)
+    state = view.get_unit_state(move.unit_symbol)
     long_wallet = state.get('long_wallet')
     short_wallet = state.get('short_wallet')
 
     if not long_wallet or not short_wallet:
         raise TransferRuleViolation(
-            f"Bilateral unit {move.unit} missing counterparty state"
+            f"Bilateral unit {move.unit_symbol} missing counterparty state"
         )
 
     # Build set of authorized wallets (includes novation source if present)
@@ -424,11 +703,11 @@ def bilateral_transfer_rule(view: LedgerView, move: Move) -> None:
 
     if move.source not in authorized:
         raise TransferRuleViolation(
-            f"Bilateral {move.unit}: {move.source} not authorized"
+            f"Bilateral {move.unit_symbol}: {move.source} not authorized"
         )
     if move.dest not in authorized:
         raise TransferRuleViolation(
-            f"Bilateral {move.unit}: {move.dest} not authorized"
+            f"Bilateral {move.unit_symbol}: {move.dest} not authorized"
         )
 
 

@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 from ledger import (
     Ledger, Move, cash,
     create_stock_unit,
-    ContractResult,
     create_delta_hedge_unit,
     compute_rebalance, compute_liquidation,
     get_hedge_state, compute_hedge_pnl_breakdown,
@@ -91,17 +90,17 @@ class TestComputeRebalance:
         assert len(result.moves) == 2
 
         # First move: buy shares
-        buy_move = next(m for m in result.moves if m.unit == 'AAPL')
+        buy_move = next(m for m in result.moves if m.unit_symbol == 'AAPL')
         assert buy_move.source == 'market'
         assert buy_move.dest == 'hedge_fund'
         assert buy_move.quantity > 0
 
         # State update should track current_shares
-        assert 'current_shares' in result.state_updates['HEDGE']
-        assert result.state_updates['HEDGE']['current_shares'] == buy_move.quantity
+        sc = next(d for d in result.state_changes if d.unit == "HEDGE")
+        assert sc.new_state['current_shares'] == buy_move.quantity
 
         # Second move: pay for shares
-        pay_move = next(m for m in result.moves if m.unit == 'USD')
+        pay_move = next(m for m in result.moves if m.unit_symbol == 'USD')
         assert pay_move.source == 'hedge_fund'
         assert pay_move.dest == 'market'
 
@@ -138,7 +137,7 @@ class TestComputeRebalance:
 
         if not result.is_empty():
             # First move: sell shares
-            sell_move = next(m for m in result.moves if m.unit == 'AAPL')
+            sell_move = next(m for m in result.moves if m.unit_symbol == 'AAPL')
             assert sell_move.source == 'hedge_fund'
             assert sell_move.dest == 'market'
 
@@ -235,9 +234,9 @@ class TestComputeRebalance:
         result = compute_rebalance(view, 'HEDGE', spot_price=150.0)
 
         if not result.is_empty():
-            assert 'HEDGE' in result.state_updates
-            assert result.state_updates['HEDGE']['rebalance_count'] == 1
-            assert 'cumulative_cash' in result.state_updates['HEDGE']
+            sc = next(d for d in result.state_changes if d.unit == "HEDGE")
+            assert sc.new_state['rebalance_count'] == 1
+            assert 'cumulative_cash' in sc.new_state
 
     def test_small_trade_filtered(self):
         """Trades below min_trade_size are filtered."""
@@ -307,20 +306,21 @@ class TestComputeLiquidation:
         assert len(result.moves) == 2
 
         # Sell shares
-        sell_move = next(m for m in result.moves if m.unit == 'AAPL')
+        sell_move = next(m for m in result.moves if m.unit_symbol == 'AAPL')
         assert sell_move.source == 'hedge_fund'
         assert sell_move.dest == 'market'
         assert sell_move.quantity == 800
 
         # Receive cash
-        cash_move = next(m for m in result.moves if m.unit == 'USD')
+        cash_move = next(m for m in result.moves if m.unit_symbol == 'USD')
         assert cash_move.source == 'market'
         assert cash_move.dest == 'hedge_fund'
         assert cash_move.quantity == 800 * 160.0
 
         # State updates
-        assert result.state_updates['HEDGE']['liquidated'] is True
-        assert result.state_updates['HEDGE']['current_shares'] == 0.0
+        sc = next(d for d in result.state_changes if d.unit == "HEDGE")
+        assert sc.new_state['liquidated'] is True
+        assert sc.new_state['current_shares'] == 0.0
 
     def test_liquidation_no_shares_marks_liquidated(self):
         """If no shares, just mark as liquidated."""
@@ -353,7 +353,8 @@ class TestComputeLiquidation:
 
         assert not result.is_empty()
         assert len(result.moves) == 0
-        assert result.state_updates['HEDGE']['liquidated'] is True
+        sc = next(d for d in result.state_changes if d.unit == "HEDGE")
+        assert sc.new_state['liquidated'] is True
 
     def test_liquidation_already_liquidated_returns_empty(self):
         view = FakeView(
@@ -564,7 +565,8 @@ class TestDeltaHedgeContract:
         result = check(view, 'HEDGE', datetime(2025, 6, 1), {'AAPL': 160.0})
         # Should liquidate
         assert not result.is_empty()
-        assert result.state_updates['HEDGE']['liquidated'] is True
+        sc = next(d for d in result.state_changes if d.unit == "HEDGE")
+        assert sc.new_state['liquidated'] is True
 
     def test_check_lifecycle_already_liquidated(self):
         view = FakeView(

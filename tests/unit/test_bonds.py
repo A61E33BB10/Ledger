@@ -502,7 +502,7 @@ class TestComputeCouponPayment:
         move = result.moves[0]
         assert move.source == 'issuer'
         assert move.dest == 'holder'
-        assert move.unit == 'USD'
+        assert move.unit_symbol == 'USD'
         # 10 bonds × $25 coupon = $250
         assert move.quantity == 250.0
 
@@ -517,12 +517,12 @@ class TestComputeCouponPayment:
         )
 
         result = compute_coupon_payment(view, 'BOND', datetime(2025, 6, 15))
-        updated = result.state_updates['BOND']
+        sc = next(d for d in result.state_changes if d.unit == "BOND")
 
-        assert updated['next_coupon_index'] == 1
-        assert updated['accrued_interest'] == 0.0
-        assert len(updated['paid_coupons']) == 1
-        assert updated['paid_coupons'][0]['payment_number'] == 0
+        assert sc.new_state['next_coupon_index'] == 1
+        assert sc.new_state['accrued_interest'] == 0.0
+        assert len(sc.new_state['paid_coupons']) == 1
+        assert sc.new_state['paid_coupons'][0]['payment_number'] == 0
 
     def test_coupon_payment_before_schedule_returns_empty(self):
         """Coupon payment before scheduled date returns empty result."""
@@ -653,10 +653,10 @@ class TestComputeRedemption:
         )
 
         result = compute_redemption(view, 'BOND', datetime(2025, 12, 15))
-        updated = result.state_updates['BOND']
+        sc = next(d for d in result.state_changes if d.unit == "BOND")
 
-        assert updated['redeemed'] is True
-        assert updated['redemption_amount'] == 1000.0
+        assert sc.new_state['redeemed'] is True
+        assert sc.new_state['redemption_amount'] == 1000.0
 
     def test_redemption_custom_price(self):
         """Redemption with custom price (callable bond)."""
@@ -712,116 +712,6 @@ class TestComputeRedemption:
 
 
 # ============================================================================
-# TRANSACT INTERFACE TESTS
-# ============================================================================
-
-class TestTransact:
-    """Tests for transact() unified interface."""
-
-    def setup_method(self):
-        """Setup common test fixtures."""
-        self.bond_state = {
-            'face_value': 1000.0,
-            'coupon_rate': 0.05,
-            'coupon_frequency': 2,
-            'coupon_schedule': [
-                (datetime(2025, 6, 15), 25.0),
-                (datetime(2025, 12, 15), 25.0),
-            ],
-            'maturity_date': datetime(2025, 12, 15),
-            'currency': 'USD',
-            'issuer_wallet': 'issuer',
-            'holder_wallet': 'holder',
-            'day_count_convention': '30/360',
-            'issue_date': datetime(2024, 12, 15),
-            'next_coupon_index': 0,
-            'accrued_interest': 0.0,
-            'redeemed': False,
-            'paid_coupons': [],
-        }
-
-    def test_transact_coupon_event(self):
-        """transact handles COUPON event."""
-        view = FakeView(
-            balances={
-                'holder': {'BOND': 10},
-                'issuer': {'USD': 10000},
-            },
-            states={'BOND': self.bond_state},
-        )
-
-        result = bond_transact(view, 'BOND', 'COUPON', datetime(2025, 6, 15))
-
-        assert len(result.moves) == 1
-        assert result.state_updates['BOND']['next_coupon_index'] == 1
-
-    def test_transact_redemption_event(self):
-        """transact handles REDEMPTION event."""
-        state = dict(self.bond_state)
-        state['next_coupon_index'] = 2  # Coupons done
-
-        view = FakeView(
-            balances={
-                'holder': {'BOND': 10},
-                'issuer': {'USD': 100000},
-            },
-            states={'BOND': state},
-        )
-
-        result = bond_transact(view, 'BOND', 'REDEMPTION', datetime(2025, 12, 15))
-
-        assert len(result.moves) == 1
-        assert result.state_updates['BOND']['redeemed'] is True
-
-    def test_transact_call_event(self):
-        """transact handles CALL event (early redemption by issuer)."""
-        view = FakeView(
-            balances={
-                'holder': {'BOND': 10},
-                'issuer': {'USD': 100000},
-            },
-            states={'BOND': self.bond_state},
-        )
-
-        result = bond_transact(view, 'BOND', 'CALL', datetime(2025, 9, 15),
-                              redemption_price=1020.0)
-
-        # CALL triggers redemption at call price
-        assert len(result.moves) == 1
-        move = result.moves[0]
-        assert move.quantity == 10200.0  # 10 × 1020
-
-    def test_transact_put_event(self):
-        """transact handles PUT event (early redemption by holder)."""
-        view = FakeView(
-            balances={
-                'holder': {'BOND': 10},
-                'issuer': {'USD': 100000},
-            },
-            states={'BOND': self.bond_state},
-        )
-
-        result = bond_transact(view, 'BOND', 'PUT', datetime(2025, 9, 15),
-                              redemption_price=980.0)
-
-        # PUT triggers redemption at put price
-        assert len(result.moves) == 1
-        move = result.moves[0]
-        assert move.quantity == 9800.0  # 10 × 980
-
-    def test_transact_unknown_event_returns_empty(self):
-        """transact returns empty for unknown event type."""
-        view = FakeView(
-            balances={},
-            states={'BOND': self.bond_state},
-        )
-
-        result = bond_transact(view, 'BOND', 'UNKNOWN', datetime(2025, 6, 15))
-
-        assert len(result.moves) == 0
-
-
-# ============================================================================
 # FULL LIFECYCLE TESTS
 # ============================================================================
 
@@ -866,7 +756,7 @@ class TestBondFullLifecycle:
         assert result1.moves[0].quantity == 150.0
 
         # Update state
-        state_after_coupon1 = result1.state_updates['BOND']
+        state_after_coupon1 = next(d for d in result1.state_changes if d.unit == 'BOND').new_state
         assert state_after_coupon1['next_coupon_index'] == 1
 
         # Step 2: Second coupon payment
@@ -882,7 +772,7 @@ class TestBondFullLifecycle:
         assert len(result2.moves) == 1
         assert result2.moves[0].quantity == 150.0
 
-        state_after_coupon2 = result2.state_updates['BOND']
+        state_after_coupon2 = next(d for d in result2.state_changes if d.unit == 'BOND').new_state
         assert state_after_coupon2['next_coupon_index'] == 2
 
         # Step 3: Redemption at maturity
@@ -899,7 +789,7 @@ class TestBondFullLifecycle:
         # 5 bonds × $1000 = $5000
         assert result3.moves[0].quantity == 5000.0
 
-        state_final = result3.state_updates['BOND']
+        state_final = next(d for d in result3.state_changes if d.unit == 'BOND').new_state
         assert state_final['redeemed'] is True
 
         # Total received by investor: $150 + $150 + $5000 = $5300

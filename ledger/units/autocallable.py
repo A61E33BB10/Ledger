@@ -21,9 +21,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
+import math
+
 from ..core import (
-    LedgerView, Move, ContractResult, Unit,
+    LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     QUANTITY_EPSILON, UNIT_TYPE_AUTOCALLABLE,
+    build_transaction, empty_pending_transaction,
 )
 
 
@@ -196,7 +199,7 @@ def compute_observation(
     symbol: str,
     observation_date: datetime,
     spot: float,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Process an observation date for an autocallable.
 
@@ -216,7 +219,7 @@ def compute_observation(
         spot: Current spot price of underlying
 
     Returns:
-        ContractResult with:
+        PendingTransaction with:
         - moves: Payment moves (coupon and/or redemption)
         - state_updates: Updated observation history, coupon memory, barriers
 
@@ -239,18 +242,18 @@ def compute_observation(
 
     # Check if already autocalled or settled
     if state.get('autocalled', False) or state.get('settled', False):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Check if this observation date is in the schedule
     schedule = state.get('observation_schedule', [])
     if observation_date not in schedule:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Check if already processed
     history = state.get('observation_history', [])
     processed_dates = [obs['date'] for obs in history]
     if observation_date in processed_dates:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Get state values
     initial_spot = state['initial_spot']
@@ -313,10 +316,10 @@ def compute_observation(
             if units_held > 0 and wallet != issuer_wallet:
                 payout = units_held * payout_per_unit
                 moves.append(Move(
+                    quantity=payout,
+                    unit_symbol=currency,
                     source=issuer_wallet,
                     dest=wallet,
-                    unit=currency,
-                    quantity=payout,
                     contract_id=f'autocall_{symbol}_{observation_date.isoformat()}_{wallet}',
                 ))
 
@@ -345,10 +348,10 @@ def compute_observation(
                 if units_held > 0 and wallet != issuer_wallet:
                     total_payment = units_held * payment_per_unit
                     moves.append(Move(
+                        quantity=total_payment,
+                        unit_symbol=currency,
                         source=issuer_wallet,
                         dest=wallet,
-                        unit=currency,
-                        quantity=total_payment,
                         contract_id=f'coupon_{symbol}_{observation_date.isoformat()}_{wallet}',
                     ))
         else:
@@ -365,27 +368,26 @@ def compute_observation(
     new_history = list(history)
     new_history.append(observation_record)
 
-    # Build state updates
-    state_updates = {
-        symbol: {
-            **state,
-            'observation_history': new_history,
-            'coupon_memory': new_coupon_memory,
-            'put_knocked_in': new_put_knocked_in,
-            'autocalled': autocalled,
-            'autocall_date': autocall_date,
-            'settled': autocalled,  # If autocalled, it's settled
-        }
+    # Build state deltas
+    new_state = {
+        **state,
+        'observation_history': new_history,
+        'coupon_memory': new_coupon_memory,
+        'put_knocked_in': new_put_knocked_in,
+        'autocalled': autocalled,
+        'autocall_date': autocall_date,
+        'settled': autocalled,  # If autocalled, it's settled
     }
+    state_changes = [UnitStateChange(unit=symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 def compute_maturity_payoff(
     view: LedgerView,
     symbol: str,
     final_spot: float,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Compute final settlement at maturity if not already autocalled.
 
@@ -401,7 +403,7 @@ def compute_maturity_payoff(
         final_spot: Final spot price at maturity
 
     Returns:
-        ContractResult with:
+        PendingTransaction with:
         - moves: Final redemption payment
         - state_updates: Mark as settled
 
@@ -424,7 +426,7 @@ def compute_maturity_payoff(
 
     # Check if already autocalled or settled
     if state.get('autocalled', False) or state.get('settled', False):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Get state values
     initial_spot = state['initial_spot']
@@ -461,36 +463,130 @@ def compute_maturity_payoff(
             if units_held > 0 and wallet != issuer_wallet:
                 payout = units_held * payout_per_unit
                 moves.append(Move(
+                    quantity=payout,
+                    unit_symbol=currency,
                     source=issuer_wallet,
                     dest=wallet,
-                    unit=currency,
-                    quantity=payout,
                     contract_id=f'maturity_{symbol}_{wallet}',
                 ))
 
-    # Build state updates
-    state_updates = {
-        symbol: {
-            **state,
-            'settled': True,
-            'settlement_date': view.current_time,
-            'final_spot': final_spot,
-            'final_performance': final_perf,
-            'final_payout': payout_per_unit,
-            'coupon_memory': 0.0,  # Paid out
-        }
+    # Build state deltas
+    new_state = {
+        **state,
+        'settled': True,
+        'settlement_date': view.current_time,
+        'final_spot': final_spot,
+        'final_performance': final_perf,
+        'final_payout': payout_per_unit,
+        'coupon_memory': 0.0,  # Paid out
     }
+    state_changes = [UnitStateChange(unit=symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 def transact(
     view: LedgerView,
     symbol: str,
+    seller: str,
+    buyer: str,
+    qty: float,
+    price: float,
+) -> PendingTransaction:
+    """
+    Execute an autocallable trade (secondary market transfer).
+
+    This enables secondary market trading of autocallable units. The buyer
+    acquires the right to receive future coupons and redemption payoffs.
+
+    Args:
+        view: Read-only ledger access.
+        symbol: Autocallable symbol.
+        seller: Wallet selling the autocallable units.
+        buyer: Wallet buying the autocallable units.
+        qty: Quantity to transfer (positive).
+        price: Price per unit (mark-to-market value).
+
+    Returns:
+        PendingTransaction containing:
+        - Move transferring the autocallable units from seller to buyer.
+        - Move transferring cash from buyer to seller (if price > 0).
+
+    Raises:
+        ValueError: If qty <= 0, price < 0, seller == buyer, or invalid state.
+
+    Example:
+        # Alice sells her autocallable to Bob at a premium
+        result = transact(
+            view, "AUTO_SPX_2025",
+            seller_id="alice",
+            buyer_id="bob",
+            qty=1,
+            price=105000.0  # Premium due to favorable market conditions
+        )
+        ledger.execute(result)
+    """
+    # Validate quantity
+    if qty <= 0:
+        raise ValueError(f"qty must be positive, got {qty}")
+
+    # Validate price
+    if not math.isfinite(price) or price < 0:
+        raise ValueError(f"price must be non-negative and finite, got {price}")
+
+    # Validate wallets
+    if seller == buyer:
+        raise ValueError("seller and buyer must be different")
+
+    # Get unit state
+    state = view.get_unit_state(symbol)
+
+    # Check if already autocalled or settled
+    if state.get('autocalled', False) or state.get('settled', False):
+        raise ValueError(f"Autocallable {symbol} has already been settled or autocalled")
+
+    # Check seller has sufficient balance
+    seller_balance = view.get_balance(seller, symbol)
+    if seller_balance < qty - QUANTITY_EPSILON:
+        raise ValueError(
+            f"Seller {seller} has insufficient balance: {seller_balance} < {qty}"
+        )
+
+    currency = state['currency']
+
+    # Build moves
+    moves = [
+        # Transfer the autocallable units
+        Move(
+            quantity=qty,
+            unit_symbol=symbol,
+            source=seller,
+            dest=buyer,
+            contract_id=f'autocallable_trade_{symbol}_unit',
+        ),
+    ]
+
+    # Cash payment if price > 0
+    total_payment = qty * price
+    if total_payment > QUANTITY_EPSILON:
+        moves.append(Move(
+            quantity=total_payment,
+            unit_symbol=currency,
+            source=buyer,
+            dest=seller,
+            contract_id=f'autocallable_trade_{symbol}_cash',
+        ))
+
+    return build_transaction(view, moves)
+
+
+def _process_lifecycle_event(
+    view: LedgerView,
+    symbol: str,
     event_type: str,
     event_date: datetime,
     **kwargs
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Generate moves and state updates for an autocallable lifecycle event.
 
@@ -507,32 +603,32 @@ def transact(
             - For MATURITY: final_spot (float, required) - final spot price
 
     Returns:
-        ContractResult with moves and state_updates, or empty result
+        PendingTransaction with moves and state_updates, or empty result
         if event_type is unknown or required parameters are missing.
 
     Example:
         # Process an observation
-        result = transact(view, "AUTO_SPX_2025", "OBSERVATION",
+        result = _process_lifecycle_event(view, "AUTO_SPX_2025", "OBSERVATION",
                          datetime(2024, 4, 15), spot=4800.0)
 
         # Process maturity settlement
-        result = transact(view, "AUTO_SPX_2025", "MATURITY",
+        result = _process_lifecycle_event(view, "AUTO_SPX_2025", "MATURITY",
                          datetime(2025, 1, 15), final_spot=4200.0)
     """
     if event_type == 'OBSERVATION':
         spot = kwargs.get('spot')
         if spot is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
         return compute_observation(view, symbol, event_date, spot)
 
     elif event_type == 'MATURITY':
         final_spot = kwargs.get('final_spot')
         if final_spot is None:
-            return ContractResult()
+            return empty_pending_transaction(view)
         return compute_maturity_payoff(view, symbol, final_spot)
 
     else:
-        return ContractResult()  # Unknown event type
+        return empty_pending_transaction(view)  # Unknown event type
 
 
 def autocallable_contract(
@@ -540,7 +636,7 @@ def autocallable_contract(
     symbol: str,
     timestamp: datetime,
     prices: Dict[str, float]
-) -> ContractResult:
+) -> PendingTransaction:
     """
     SmartContract function for automatic autocallable lifecycle processing.
 
@@ -559,7 +655,7 @@ def autocallable_contract(
         prices: Price data dictionary (must contain underlying price)
 
     Returns:
-        ContractResult with payment moves if an observation or maturity
+        PendingTransaction with payment moves if an observation or maturity
         is triggered, or empty result if no events are due.
 
     Example:
@@ -576,12 +672,12 @@ def autocallable_contract(
 
     # Check if already settled
     if state.get('settled', False) or state.get('autocalled', False):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     underlying = state.get('underlying')
     spot = prices.get(underlying)
     if spot is None:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Check for observation dates
     schedule = state.get('observation_schedule', [])
@@ -598,7 +694,7 @@ def autocallable_contract(
     if maturity_date and timestamp >= maturity_date:
         return compute_maturity_payoff(view, symbol, spot)
 
-    return ContractResult()
+    return empty_pending_transaction(view)
 
 
 def get_autocallable_status(

@@ -301,7 +301,7 @@ class Transaction:
     tx_id: str                           # Unique identifier
     timestamp: datetime                  # When created
     ledger_name: str                     # Ledger this belongs to
-    state_deltas: Tuple[StateDelta, ...] # Unit state changes
+    state_changes: Tuple[UnitStateChange, ...] # Unit state changes
     contract_ids: FrozenSet[str]         # What generated this
     execution_time: Optional[datetime]   # When applied
 ```
@@ -312,19 +312,19 @@ Transactions provide:
 - **Auditability**: Complete record of what changed and why
 - **Time travel**: execution_time enables state reconstruction
 
-### 5.4 StateDelta
+### 5.4 UnitStateChange
 
 Records complete before/after state for unit state changes:
 
 ```python
 @dataclass(frozen=True)
-class StateDelta:
+class UnitStateChange:
     unit: str      # Which unit's state changed
     old_state: Any # Complete state before (immutable)
     new_state: Any # Complete state after (immutable)
 ```
 
-Since unit states are immutable, a StateDelta simply records the before and after objects. This makes state reconstruction trivial:
+Since unit states are immutable, a UnitStateChange simply records the before and after objects. This makes state reconstruction trivial:
 - **Forward**: Apply new_state
 - **Backward**: Apply old_state
 
@@ -422,7 +422,7 @@ result2 = ledger.execute(tx)  # → ALREADY_APPLIED (same tx_id)
 ```
 1. CREATION
    Smart contract or user creates Transaction
-   with moves and state_deltas
+   with moves and state_changes
                 ↓
 2. VALIDATION
    - tx_id not already applied?
@@ -441,7 +441,7 @@ result2 = ledger.execute(tx)  # → ALREADY_APPLIED (same tx_id)
     - Return APPLIED       - Return REJECTED
 ```
 
-### 6.3 State Deltas with Immutable States
+### 6.3 State Changes with Immutable States
 
 Since unit states are immutable, reversing state changes is trivial:
 
@@ -450,8 +450,8 @@ Since unit states are immutable, reversing state changes is trivial:
 Transaction(
     tx_id="settle_option",
     moves=[...],
-    state_deltas=[
-        StateDelta(
+    state_changes=[
+        UnitStateChange(
             unit="OPT_123",
             old_state=OptionState(..., settled=False),
             new_state=OptionState(..., settled=True),
@@ -574,9 +574,9 @@ def clone_at(target_time):
             cloned.balances[move.source][move.unit] += move.quantity
             cloned.balances[move.dest][move.unit] -= move.quantity
 
-        # 4. Restore old_state from StateDelta
-        for delta in tx.state_deltas:
-            cloned.units[delta.unit]._state = delta.old_state
+        # 4. Restore old_state from UnitStateChange
+        for sc in tx.state_changes:
+            cloned.units[sc.unit]._state = sc.old_state
 
     return cloned
 ```
@@ -584,7 +584,7 @@ def clone_at(target_time):
 This works because:
 - Current state includes all `set_balance()` effects
 - We only undo documented changes (transactions)
-- StateDelta.old_state contains the exact prior state
+- UnitStateChange.old_state contains the exact prior state
 
 ### 7.4 Cloning for Monte Carlo
 
@@ -1239,7 +1239,7 @@ The UNWIND algorithm reconstructs state at any past time:
 1. Start with current state (includes all effects)
 2. Walk backward through transactions after target time
 3. Reverse each move
-4. Restore old_state from StateDelta
+4. Restore old_state from UnitStateChange
 
 ```python
 past_ledger = ledger.clone_at(target_time)

@@ -57,17 +57,17 @@ class FakeView:
     def current_time(self) -> datetime:
         return self._time
 
-    def get_balance(self, wallet: str, unit: str) -> float:
-        return self._balances.get(wallet, {}).get(unit, 0.0)
+    def get_balance(self, wallet_id: str, unit_symbol: str) -> float:
+        return self._balances.get(wallet_id, {}).get(unit_symbol, 0.0)
 
-    def get_unit_state(self, unit: str) -> UnitState:
-        return dict(self._states.get(unit, {}))
+    def get_unit_state(self, unit_symbol: str) -> UnitState:
+        return dict(self._states.get(unit_symbol, {}))
 
-    def get_positions(self, unit: str) -> Positions:
+    def get_positions(self, unit_symbol: str) -> Positions:
         return {
-            w: b[unit]
+            w: b[unit_symbol]
             for w, b in self._balances.items()
-            if unit in b and b[unit] != 0
+            if unit_symbol in b and b[unit_symbol] != 0
         }
 
     def list_wallets(self) -> Set[str]:

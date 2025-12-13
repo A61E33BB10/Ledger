@@ -32,6 +32,7 @@ from ledger import (
     get_total_coupons_paid,
     UNIT_TYPE_AUTOCALLABLE,
 )
+from ledger.units.autocallable import _process_lifecycle_event as autocallable_lifecycle_event
 
 
 # ============================================================================
@@ -351,14 +352,14 @@ class TestComputeObservationAutocall:
         move = result.moves[0]
         assert move.source == 'bank'
         assert move.dest == 'investor'
-        assert move.unit == 'USD'
+        assert move.unit_symbol == 'USD'
         # Principal + coupon = 100000 + 8000 = 108000
         assert move.quantity == 108000.0
 
-        state = result.state_updates['AUTO']
-        assert state['autocalled'] is True
-        assert state['autocall_date'] == datetime(2024, 4, 15)
-        assert state['settled'] is True
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['autocalled'] is True
+        assert sc.new_state['autocall_date'] == datetime(2024, 4, 15)
+        assert sc.new_state['settled'] is True
 
     def test_autocall_triggered_above_barrier(self):
         """Autocall when spot > 100% of initial."""
@@ -383,8 +384,8 @@ class TestComputeObservationAutocall:
         view = self._make_view(memory=16000.0)  # Two missed coupons
         result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=100.0)
 
-        state = result.state_updates['AUTO']
-        assert state['coupon_memory'] == 0.0
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['coupon_memory'] == 0.0
 
 
 # ============================================================================
@@ -440,12 +441,12 @@ class TestComputeObservationCoupon:
         move = result.moves[0]
         assert move.source == 'bank'
         assert move.dest == 'investor'
-        assert move.unit == 'USD'
+        assert move.unit_symbol == 'USD'
         assert move.quantity == 8000.0  # 8% of 100000
 
-        state = result.state_updates['AUTO']
-        assert state['autocalled'] is False
-        assert state['settled'] is False
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['autocalled'] is False
+        assert sc.new_state['settled'] is False
 
     def test_coupon_at_exact_barrier(self):
         """Coupon paid when spot exactly at 70%."""
@@ -464,15 +465,16 @@ class TestComputeObservationCoupon:
         # Current coupon + memory = 8000 + 16000 = 24000
         assert move.quantity == 24000.0
 
-        state = result.state_updates['AUTO']
-        assert state['coupon_memory'] == 0.0  # Memory cleared
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['coupon_memory'] == 0.0  # Memory cleared
 
     def test_observation_history_updated(self):
         """Observation history is properly recorded."""
         view = self._make_view()
         result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=80.0)
 
-        history = result.state_updates['AUTO']['observation_history']
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        history = sc.new_state['observation_history']
         assert len(history) == 1
         obs = history[0]
         assert obs['date'] == datetime(2024, 4, 15)
@@ -538,24 +540,24 @@ class TestComputeObservationMissedCoupon:
 
         # But state is updated
         assert not result.is_empty()
-        state = result.state_updates['AUTO']
-        assert state['coupon_memory'] == 8000.0  # Coupon added to memory
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['coupon_memory'] == 8000.0  # Coupon added to memory
 
     def test_memory_accumulates_over_periods(self):
         """Memory accumulates when multiple coupons are missed."""
         view = self._make_view(memory=8000.0)  # One already missed
         result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=65.0)
 
-        state = result.state_updates['AUTO']
-        assert state['coupon_memory'] == 16000.0  # Two missed coupons
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['coupon_memory'] == 16000.0  # Two missed coupons
 
     def test_no_memory_without_memory_feature(self):
         """Without memory feature, missed coupons are lost."""
         view = self._make_view(memory_feature=False)
         result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=65.0)
 
-        state = result.state_updates['AUTO']
-        assert state['coupon_memory'] == 0.0  # No memory accumulation
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['coupon_memory'] == 0.0  # No memory accumulation
 
 
 # ============================================================================
@@ -604,10 +606,10 @@ class TestComputeObservationPutKnockIn:
         view = self._make_view()
         result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=60.0)
 
-        state = result.state_updates['AUTO']
-        assert state['put_knocked_in'] is True
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['put_knocked_in'] is True
 
-        history = state['observation_history']
+        history = sc.new_state['observation_history']
         assert history[0]['put_knocked_in'] is True
 
     def test_put_knocked_in_below_barrier(self):
@@ -615,16 +617,16 @@ class TestComputeObservationPutKnockIn:
         view = self._make_view()
         result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=50.0)
 
-        state = result.state_updates['AUTO']
-        assert state['put_knocked_in'] is True
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['put_knocked_in'] is True
 
     def test_put_not_knocked_above_barrier(self):
         """Put does not knock in above 60%."""
         view = self._make_view()
         result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=65.0)
 
-        state = result.state_updates['AUTO']
-        assert state['put_knocked_in'] is False
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['put_knocked_in'] is False
 
     def test_put_stays_knocked_in(self):
         """Once knocked in, put stays knocked in."""
@@ -632,8 +634,8 @@ class TestComputeObservationPutKnockIn:
         # Even if spot is above barrier now
         result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=80.0)
 
-        state = result.state_updates['AUTO']
-        assert state['put_knocked_in'] is True  # Still knocked in
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['put_knocked_in'] is True  # Still knocked in
 
 
 # ============================================================================
@@ -686,8 +688,8 @@ class TestComputeMaturityPayoff:
         move = result.moves[0]
         assert move.quantity == 100000.0  # Full notional
 
-        state = result.state_updates['AUTO']
-        assert state['settled'] is True
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['settled'] is True
 
     def test_maturity_with_knockin_reduced_payout(self):
         """Reduced payout if put knocked in and spot < initial."""
@@ -872,7 +874,8 @@ class TestEdgeCases:
         # Should pay coupon but not autocall
         assert len(result.moves) == 1
         assert result.moves[0].quantity == 8000.0
-        assert result.state_updates['AUTO']['autocalled'] is False
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['autocalled'] is False
 
 
 # ============================================================================
@@ -916,10 +919,10 @@ class TestTransact:
             time=datetime(2024, 4, 15)
         )
 
-    def test_transact_observation(self):
-        """Transact OBSERVATION event routes correctly."""
+    def test_lifecycle_event_observation(self):
+        """_process_lifecycle_event OBSERVATION event routes correctly."""
         view = self._make_view()
-        result = autocallable_transact(
+        result = autocallable_lifecycle_event(
             view, 'AUTO', 'OBSERVATION',
             datetime(2024, 4, 15),
             spot=80.0
@@ -928,10 +931,10 @@ class TestTransact:
         assert len(result.moves) == 1
         assert result.moves[0].quantity == 8000.0
 
-    def test_transact_maturity(self):
-        """Transact MATURITY event routes correctly."""
+    def test_lifecycle_event_maturity(self):
+        """_process_lifecycle_event MATURITY event routes correctly."""
         view = self._make_view()
-        result = autocallable_transact(
+        result = autocallable_lifecycle_event(
             view, 'AUTO', 'MATURITY',
             datetime(2025, 1, 15),
             final_spot=90.0
@@ -940,30 +943,30 @@ class TestTransact:
         assert len(result.moves) == 1
         assert result.moves[0].quantity == 100000.0
 
-    def test_transact_missing_spot(self):
-        """Transact OBSERVATION without spot returns empty."""
+    def test_lifecycle_event_missing_spot(self):
+        """_process_lifecycle_event OBSERVATION without spot returns empty."""
         view = self._make_view()
-        result = autocallable_transact(
+        result = autocallable_lifecycle_event(
             view, 'AUTO', 'OBSERVATION',
             datetime(2024, 4, 15)
             # spot missing
         )
         assert result.is_empty()
 
-    def test_transact_missing_final_spot(self):
-        """Transact MATURITY without final_spot returns empty."""
+    def test_lifecycle_event_missing_final_spot(self):
+        """_process_lifecycle_event MATURITY without final_spot returns empty."""
         view = self._make_view()
-        result = autocallable_transact(
+        result = autocallable_lifecycle_event(
             view, 'AUTO', 'MATURITY',
             datetime(2025, 1, 15)
             # final_spot missing
         )
         assert result.is_empty()
 
-    def test_transact_unknown_event(self):
-        """Transact with unknown event type returns empty."""
+    def test_lifecycle_event_unknown(self):
+        """_process_lifecycle_event with unknown event type returns empty."""
         view = self._make_view()
-        result = autocallable_transact(
+        result = autocallable_lifecycle_event(
             view, 'AUTO', 'UNKNOWN_EVENT',
             datetime(2024, 4, 15),
             spot=80.0
@@ -1224,7 +1227,8 @@ class TestFullLifecycle:
 
         result = compute_observation(view, 'AUTO', datetime(2024, 4, 15), spot=100.0)
 
-        assert result.state_updates['AUTO']['autocalled'] is True
+        sc = next(d for d in result.state_changes if d.unit == "AUTO")
+        assert sc.new_state['autocalled'] is True
         assert result.moves[0].quantity == 108000.0
 
     def test_lifecycle_coupons_then_maturity(self):
@@ -1270,7 +1274,7 @@ class TestFullLifecycle:
             balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
             states={
                 'AUTO': {
-                    **result1.state_updates['AUTO'],
+                    **(next(d for d in result1.state_changes if d.unit == 'AUTO').new_state),
                 }
             },
             time=datetime(2024, 7, 15)
@@ -1284,7 +1288,7 @@ class TestFullLifecycle:
             balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
             states={
                 'AUTO': {
-                    **result2.state_updates['AUTO'],
+                    **(next(d for d in result2.state_changes if d.unit == 'AUTO').new_state),
                 }
             },
             time=datetime(2025, 1, 15)
@@ -1331,30 +1335,30 @@ class TestFullLifecycle:
 
         result1 = compute_observation(view1, 'AUTO', datetime(2024, 4, 15), spot=65.0)
         assert len(result1.moves) == 0  # No coupon
-        assert result1.state_updates['AUTO']['coupon_memory'] == 8000.0
+        assert next(d for d in result1.state_changes if d.unit == 'AUTO').new_state['coupon_memory'] == 8000.0
 
         # Second observation - also missed
         view2 = FakeView(
             balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
-            states={'AUTO': result1.state_updates['AUTO']},
+            states={'AUTO': next(d for d in result1.state_changes if d.unit == 'AUTO').new_state},
             time=datetime(2024, 7, 15)
         )
 
         result2 = compute_observation(view2, 'AUTO', datetime(2024, 7, 15), spot=60.0)
         assert len(result2.moves) == 0
-        assert result2.state_updates['AUTO']['coupon_memory'] == 16000.0
+        assert next(d for d in result2.state_changes if d.unit == 'AUTO').new_state['coupon_memory'] == 16000.0
 
         # Third observation - above coupon barrier, pay all memory
         view3 = FakeView(
             balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
-            states={'AUTO': result2.state_updates['AUTO']},
+            states={'AUTO': next(d for d in result2.state_changes if d.unit == 'AUTO').new_state},
             time=datetime(2024, 10, 15)
         )
 
         result3 = compute_observation(view3, 'AUTO', datetime(2024, 10, 15), spot=80.0)
         # Current coupon + 2 missed = 8000 + 16000 = 24000
         assert result3.moves[0].quantity == 24000.0
-        assert result3.state_updates['AUTO']['coupon_memory'] == 0.0
+        assert next(d for d in result3.state_changes if d.unit == 'AUTO').new_state['coupon_memory'] == 0.0
 
     def test_lifecycle_knockin_then_loss(self):
         """Put knocks in, then loss at maturity."""
@@ -1389,14 +1393,14 @@ class TestFullLifecycle:
         )
 
         result1 = compute_observation(view1, 'AUTO', datetime(2024, 4, 15), spot=55.0)
-        assert result1.state_updates['AUTO']['put_knocked_in'] is True
+        assert next(d for d in result1.state_changes if d.unit == 'AUTO').new_state['put_knocked_in'] is True
         # Coupon was missed (55% < 70% coupon barrier), so memory = 8000
-        assert result1.state_updates['AUTO']['coupon_memory'] == 8000.0
+        assert next(d for d in result1.state_changes if d.unit == 'AUTO').new_state['coupon_memory'] == 8000.0
 
         # Maturity with loss
         view2 = FakeView(
             balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
-            states={'AUTO': result1.state_updates['AUTO']},
+            states={'AUTO': next(d for d in result1.state_changes if d.unit == 'AUTO').new_state},
             time=datetime(2025, 1, 15)
         )
 
@@ -1456,7 +1460,7 @@ class TestPositionTransfer:
         move = result.moves[0]
         assert move.source == 'bank'
         assert move.dest == 'bob'  # Current holder gets payment
-        assert move.unit == 'USD'
+        assert move.unit_symbol == 'USD'
         assert move.quantity == 8000.0  # 8% of 100000
 
     def test_autocall_redemption_to_current_holder_after_transfer(self):
@@ -1503,7 +1507,7 @@ class TestPositionTransfer:
         move = result.moves[0]
         assert move.source == 'bank'
         assert move.dest == 'bob'  # Current holder
-        assert move.unit == 'USD'
+        assert move.unit_symbol == 'USD'
         assert move.quantity == 108000.0  # 100000 principal + 8000 coupon
 
     def test_maturity_payoff_to_current_holder_after_transfer(self):
@@ -1550,7 +1554,7 @@ class TestPositionTransfer:
         move = result.moves[0]
         assert move.source == 'bank'
         assert move.dest == 'bob'  # Current holder
-        assert move.unit == 'USD'
+        assert move.unit_symbol == 'USD'
         assert move.quantity == 100000.0  # Full principal (no knock-in)
 
     def test_multiple_holders_share_coupon_payment(self):
@@ -1599,13 +1603,13 @@ class TestPositionTransfer:
         alice_move = result.moves[0]
         assert alice_move.source == 'bank'
         assert alice_move.dest == 'alice'
-        assert alice_move.unit == 'USD'
+        assert alice_move.unit_symbol == 'USD'
         assert alice_move.quantity == 4000.0  # 0.5 * 8000
 
         bob_move = result.moves[1]
         assert bob_move.source == 'bank'
         assert bob_move.dest == 'bob'
-        assert bob_move.unit == 'USD'
+        assert bob_move.unit_symbol == 'USD'
         assert bob_move.quantity == 4000.0  # 0.5 * 8000
 
     def test_issuer_holding_units_does_not_receive_payment(self):

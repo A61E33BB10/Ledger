@@ -21,7 +21,7 @@ import random
 
 from ledger import (
     # Core
-    Ledger, Move, cash,
+    Ledger, Move, cash, build_transaction, SYSTEM_WALLET,
 
     # Stock module
     create_stock_unit,
@@ -157,8 +157,6 @@ enabling divergent scenario analysis from historical states.
         name="state_at_demo",
         initial_time=start_date,
         verbose=False,
-        fast_mode=False,  # Validation enabled for accurate state tracking
-        no_log=False      # Logging enabled (required for clone_at)
     )
 
     # Register assets with explicit decimal places for rounding
@@ -172,26 +170,17 @@ enabling divergent scenario analysis from historical states.
     market = ledger.register_wallet("market")
     ledger.register_wallet("treasury")
 
-    # Fund wallets with initial balances via transactions for proper tracking
-    initial_fund_moves = [
-        Move("treasury", market, "USD", 50_000_000.0, "initial_fund_market_usd"),
-        Move("treasury", strategy1, "USD", 500_000.0, "initial_fund_s1_usd"),
-        Move("treasury", strategy2, "USD", 500_000.0, "initial_fund_s2_usd"),
-        Move("treasury", strategy3, "USD", 500_000.0, "initial_fund_s3_usd"),
-    ]
+    # Fund wallets via SYSTEM_WALLET (proper issuance)
+    # SYSTEM_WALLET is auto-registered by the ledger
 
-    # Set treasury balances directly (it's the source)
-    ledger.balances["treasury"]["USD"] = 100_000_000.0
-    ledger.balances["treasury"]["AAPL"] = 1_000_000.0
-
-    tx = ledger.create_transaction(initial_fund_moves, tx_id="initial_funding")
-    ledger.execute(tx)
-
-    # Transfer AAPL to market
-    tx2 = ledger.create_transaction([
-        Move("treasury", market, "AAPL", 500_000.0, "initial_fund_market_aapl")
-    ], tx_id="initial_aapl")
-    ledger.execute(tx2)
+    funding_tx = build_transaction(ledger, [
+        Move(50_000_000.0, "USD", SYSTEM_WALLET, market, "initial_fund_market_usd"),
+        Move(500_000.0, "AAPL", SYSTEM_WALLET, market, "initial_fund_market_aapl"),
+        Move(500_000.0, "USD", SYSTEM_WALLET, strategy1, "initial_fund_s1_usd"),
+        Move(500_000.0, "USD", SYSTEM_WALLET, strategy2, "initial_fund_s2_usd"),
+        Move(500_000.0, "USD", SYSTEM_WALLET, strategy3, "initial_fund_s3_usd"),
+    ])
+    ledger.execute(funding_tx)
 
     print(f"Start date: {start_date}")
     print(f"Maturity:   {maturity_date}")
@@ -407,8 +396,8 @@ enabling divergent scenario analysis from historical states.
 
     # Execute a new transaction on the clone (divergent timeline)
     week5_ledger.advance_time(clone_times[4] + timedelta(hours=1))
-    test_move = Move("strategy_atm", "market", "USD", 1000.0, "test_move")
-    tx = week5_ledger.create_transaction([test_move])
+    test_move = Move(1000.0, "USD", "strategy_atm", "market", "test_move")
+    tx = build_transaction(week5_ledger, [test_move])
     week5_ledger.execute(tx)
 
     print(f"\nExecuted test transaction on week 5 clone")

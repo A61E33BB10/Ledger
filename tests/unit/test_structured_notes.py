@@ -24,6 +24,7 @@ from ledger.units.structured_note import (
     compute_coupon_payment,
     compute_maturity_payoff,
     transact,
+    _process_lifecycle_event as sn_lifecycle_event,
     structured_note_contract,
     generate_structured_note_coupon_schedule,
 )
@@ -544,7 +545,7 @@ class TestComputeCouponPayment:
         move = result.moves[0]
         assert move.source == 'bank'
         assert move.dest == 'investor'
-        assert move.unit == 'USD'
+        assert move.unit_symbol == 'USD'
         # 5 notes * $1000 coupon = $5000
         assert move.quantity == 5000.0
 
@@ -559,10 +560,10 @@ class TestComputeCouponPayment:
         )
 
         result = compute_coupon_payment(view, 'SN_TEST', datetime(2024, 7, 15))
-        updated = result.state_updates['SN_TEST']
+        sc = next(d for d in result.state_changes if d.unit == "SN_TEST")
 
-        assert updated['next_coupon_index'] == 1
-        assert len(updated['paid_coupons']) == 1
+        assert sc.new_state['next_coupon_index'] == 1
+        assert len(sc.new_state['paid_coupons']) == 1
 
     def test_coupon_before_schedule_returns_empty(self):
         """Coupon before scheduled date returns empty."""
@@ -729,10 +730,10 @@ class TestComputeMaturityPayoff:
         )
 
         result = compute_maturity_payoff(view, 'SN_TEST', 4950.0)
-        updated = result.state_updates['SN_TEST']
+        sc = next(d for d in result.state_changes if d.unit == "SN_TEST")
 
-        assert updated['matured'] is True
-        assert 'maturity_settlement' in updated
+        assert sc.new_state['matured'] is True
+        assert 'maturity_settlement' in sc.new_state
 
     def test_maturity_already_matured_returns_empty(self):
         """Already matured note returns empty."""
@@ -833,8 +834,8 @@ class TestTransact:
             'next_coupon_index': 0,
         }
 
-    def test_transact_coupon_event(self):
-        """transact handles COUPON event."""
+    def test_lifecycle_event_coupon(self):
+        """_process_lifecycle_event handles COUPON event."""
         view = FakeView(
             balances={
                 'investor': {'SN_TEST': 5},
@@ -843,12 +844,12 @@ class TestTransact:
             states={'SN_TEST': self.note_state},
         )
 
-        result = transact(view, 'SN_TEST', 'COUPON', datetime(2024, 7, 15))
+        result = sn_lifecycle_event(view, 'SN_TEST', 'COUPON', datetime(2024, 7, 15))
 
         assert len(result.moves) == 1
 
-    def test_transact_maturity_event(self):
-        """transact handles MATURITY event."""
+    def test_lifecycle_event_maturity(self):
+        """_process_lifecycle_event handles MATURITY event."""
         view = FakeView(
             balances={
                 'investor': {'SN_TEST': 1},
@@ -858,12 +859,12 @@ class TestTransact:
             time=datetime(2025, 1, 15),
         )
 
-        result = transact(view, 'SN_TEST', 'MATURITY', datetime(2025, 1, 15),
+        result = sn_lifecycle_event(view, 'SN_TEST', 'MATURITY', datetime(2025, 1, 15),
                           final_price=4950.0)
 
         assert len(result.moves) == 1
 
-    def test_transact_maturity_missing_price_returns_empty(self):
+    def test_lifecycle_event_maturity_missing_price_returns_empty(self):
         """MATURITY without final_price returns empty."""
         view = FakeView(
             balances={
@@ -874,18 +875,18 @@ class TestTransact:
             time=datetime(2025, 1, 15),
         )
 
-        result = transact(view, 'SN_TEST', 'MATURITY', datetime(2025, 1, 15))
+        result = sn_lifecycle_event(view, 'SN_TEST', 'MATURITY', datetime(2025, 1, 15))
 
         assert len(result.moves) == 0
 
-    def test_transact_unknown_event_returns_empty(self):
+    def test_lifecycle_event_unknown_returns_empty(self):
         """Unknown event type returns empty."""
         view = FakeView(
             balances={},
             states={'SN_TEST': self.note_state},
         )
 
-        result = transact(view, 'SN_TEST', 'UNKNOWN', datetime(2024, 7, 15))
+        result = sn_lifecycle_event(view, 'SN_TEST', 'UNKNOWN', datetime(2024, 7, 15))
 
         assert len(result.moves) == 0
 
@@ -1018,7 +1019,7 @@ class TestFullLifecycle:
         assert len(result1.moves) == 1
         assert result1.moves[0].quantity == 1000.0
 
-        state_after_c1 = result1.state_updates['SN_TEST']
+        state_after_c1 = next(d for d in result1.state_changes if d.unit == 'SN_TEST').new_state
 
         # Step 2: Second coupon
         view2 = FakeView(
@@ -1033,7 +1034,7 @@ class TestFullLifecycle:
         assert len(result2.moves) == 1
         assert result2.moves[0].quantity == 1000.0
 
-        state_after_c2 = result2.state_updates['SN_TEST']
+        state_after_c2 = next(d for d in result2.state_changes if d.unit == 'SN_TEST').new_state
 
         # Step 3: Maturity (10% up, 8% participation return)
         view3 = FakeView(

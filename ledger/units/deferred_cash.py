@@ -29,9 +29,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, Any
 
+import math
+
 from ..core import (
-    LedgerView, Move, ContractResult, Unit,
+    LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     SYSTEM_WALLET, UNIT_TYPE_DEFERRED_CASH, QUANTITY_EPSILON,
+    build_transaction, empty_pending_transaction,
 )
 
 
@@ -117,7 +120,7 @@ def compute_deferred_cash_settlement(
     view: LedgerView,
     dc_symbol: str,
     settlement_time: datetime,
-) -> ContractResult:
+) -> PendingTransaction:
     """
     Execute deferred cash payment if due.
 
@@ -132,12 +135,12 @@ def compute_deferred_cash_settlement(
         settlement_time: Current timestamp to check against payment_date
 
     Returns:
-        ContractResult containing:
+        PendingTransaction containing:
         - Cash move from payer to payee
         - Extinguish move (payee → system)
         - State update marking as settled
 
-        Returns empty ContractResult if:
+        Returns empty PendingTransaction if:
         - Payment date not yet reached
         - Already settled
         - Payee has no DeferredCash position (already extinguished)
@@ -149,7 +152,7 @@ def compute_deferred_cash_settlement(
             "DC_trade_123",
             datetime(2024, 3, 17)
         )
-        ledger.execute_contract(result)
+        ledger.execute(result)
         # Result contains:
         # - Move(payer, payee, currency, amount)
         # - Move(payee, system, dc_symbol, 1)
@@ -158,12 +161,12 @@ def compute_deferred_cash_settlement(
 
     # Check if already settled
     if state.get('settled', False):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Check if payment date reached
     payment_date = state['payment_date']
     if settlement_time < payment_date:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Get payment details
     amount = state['amount']
@@ -186,77 +189,133 @@ def compute_deferred_cash_settlement(
         holder_balance = payee_balance
     else:
         # Nobody holds it - already settled or invalid state
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Generate settlement moves
     moves = [
         # Cash payment from payer to payee
         Move(
+            quantity=amount,
+            unit_symbol=currency,
             source=payer_wallet,
             dest=payee_wallet,
-            unit=currency,
-            quantity=amount,
             contract_id=f'settlement_{dc_symbol}_cash',
         ),
         # Extinguish the obligation/entitlement (holder returns to system)
         Move(
+            quantity=holder_balance,
+            unit_symbol=dc_symbol,
             source=holder,
             dest=SYSTEM_WALLET,
-            unit=dc_symbol,
-            quantity=holder_balance,
             contract_id=f'settlement_{dc_symbol}_extinguish',
         ),
     ]
 
     # Mark as settled in unit state
-    state_updates = {
-        dc_symbol: {
-            **state,
-            'settled': True,
-            'settlement_time': settlement_time,
-        }
+    new_state = {
+        **state,
+        'settled': True,
+        'settlement_time': settlement_time,
     }
+    state_changes = [UnitStateChange(unit=dc_symbol, old_state=state, new_state=new_state)]
 
-    return ContractResult(moves=tuple(moves), state_updates=state_updates)
+    return build_transaction(view, moves, state_changes)
 
 
 def transact(
     view: LedgerView,
     symbol: str,
-    event_type: str,
-    event_date: datetime,
-    **kwargs
-) -> ContractResult:
+    seller: str,
+    buyer: str,
+    qty: float,
+    price: float,
+) -> PendingTransaction:
     """
-    Generate moves and state updates for a DeferredCash lifecycle event.
+    Execute a DeferredCash unit trade (assignment of the payment obligation).
+
+    This enables secondary market trading of deferred payment obligations.
+    The buyer acquires the right to receive (or obligation to pay) based on
+    whether they're buying the payee or payer position.
 
     Args:
-        view: Read-only ledger access
-        symbol: DeferredCash unit symbol
-        event_type: Type of event (currently only 'SETTLEMENT' is supported)
-        event_date: When the event occurs
-        **kwargs: Event-specific parameters (unused for SETTLEMENT)
+        view: Read-only ledger access.
+        symbol: DeferredCash unit symbol.
+        seller: Wallet selling the DeferredCash unit.
+        buyer: Wallet buying the DeferredCash unit.
+        qty: Quantity to transfer (positive, typically 1 for DeferredCash).
+        price: Assignment price per unit (present value of the obligation).
 
     Returns:
-        ContractResult with moves and state_updates
+        PendingTransaction containing:
+        - Move transferring the DeferredCash unit from seller to buyer.
+        - Move transferring cash from buyer to seller (if price > 0).
 
-    Supported event types:
-        SETTLEMENT: Execute the deferred cash payment on payment_date
+    Raises:
+        ValueError: If qty <= 0, price < 0, seller == buyer, or invalid state.
 
     Example:
-        # Manual settlement trigger
+        # Alice assigns her T+2 settlement right to Bob for $14,900
         result = transact(
-            ledger,
-            "DC_trade_123",
-            "SETTLEMENT",
-            datetime(2024, 3, 17)
+            view, "DC_trade_123",
+            seller_id="alice",
+            buyer_id="bob",
+            qty=1,
+            price=14900.0  # Slight discount to face value
         )
-        ledger.execute_contract(result)
+        ledger.execute(result)
     """
-    if event_type == 'SETTLEMENT':
-        return compute_deferred_cash_settlement(view, symbol, event_date)
-    else:
-        raise ValueError(f"Unknown event_type for DeferredCash: {event_type}")
+    # Validate quantity
+    if qty <= 0:
+        raise ValueError(f"qty must be positive, got {qty}")
+
+    # Validate price
+    if not math.isfinite(price) or price < 0:
+        raise ValueError(f"price must be non-negative and finite, got {price}")
+
+    # Validate wallets
+    if seller == buyer:
+        raise ValueError("seller and buyer must be different")
+
+    # Get unit state
+    state = view.get_unit_state(symbol)
+
+    # Check if already settled
+    if state.get('settled', False):
+        raise ValueError(f"DeferredCash {symbol} has already been settled")
+
+    # Check seller has sufficient balance
+    seller_balance = view.get_balance(seller, symbol)
+    if seller_balance < qty - QUANTITY_EPSILON:
+        raise ValueError(
+            f"Seller {seller} has insufficient balance: {seller_balance} < {qty}"
+        )
+
+    currency = state['currency']
+
+    # Build moves
+    moves = [
+        # Transfer the DeferredCash unit
+        Move(
+            quantity=qty,
+            unit_symbol=symbol,
+            source=seller,
+            dest=buyer,
+            contract_id=f'dc_trade_{symbol}_unit',
+        ),
+    ]
+
+    # Cash payment if price > 0
+    total_payment = qty * price
+    if total_payment > QUANTITY_EPSILON:
+        moves.append(Move(
+            quantity=total_payment,
+            unit_symbol=currency,
+            source=buyer,
+            dest=seller,
+            contract_id=f'dc_trade_{symbol}_cash',
+        ))
+
+    return build_transaction(view, moves)
 
 
 def deferred_cash_contract(
@@ -264,7 +323,7 @@ def deferred_cash_contract(
     symbol: str,
     timestamp: datetime,
     prices: Dict[str, float]
-) -> ContractResult:
+) -> PendingTransaction:
     """
     SmartContract interface for DeferredCash with LifecycleEngine.
 
@@ -278,7 +337,7 @@ def deferred_cash_contract(
         prices: Price data (unused for DeferredCash settlement)
 
     Returns:
-        ContractResult with settlement moves if payment is due,
+        PendingTransaction with settlement moves if payment is due,
         or empty result if not yet due or already settled.
 
     Example:
@@ -294,11 +353,11 @@ def deferred_cash_contract(
 
     # Check if already settled
     if state.get('settled', False):
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     # Check if payment date reached
     payment_date = state.get('payment_date')
     if not payment_date or timestamp < payment_date:
-        return ContractResult()
+        return empty_pending_transaction(view)
 
     return compute_deferred_cash_settlement(view, symbol, timestamp)

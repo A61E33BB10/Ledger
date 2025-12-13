@@ -3,7 +3,7 @@ test_futures.py - Tests for simplified futures module
 
 Tests the 3-function API:
 - create_future(): factory
-- transact(view, symbol, wallet, qty, price): algebraic qty (positive=buy, negative=sell)
+- transact(view, symbol, seller, buyer, qty, price): two-party trade via clearinghouse
 - future_contract(): SmartContract for MTM and expiry
 
 === THE VIRTUAL CASH MODEL ===
@@ -12,7 +12,8 @@ Per-wallet state:
     virtual_cash: Sum of (-qty * price * mult) for all trades
 
 On TRADE at price P:
-    virtual_cash -= qty * P * mult
+    Buyer: virtual_cash -= qty * P * mult
+    Seller: virtual_cash += qty * P * mult
 
 On MTM at price P:
     target_vcash = -position * P * mult
@@ -47,12 +48,12 @@ class TestCreateFuture:
             create_future("X", "X", "X", datetime(2024, 12, 20), 0.0, "USD", "clearing")
 
     def test_empty_clearinghouse(self):
-        with pytest.raises(ValueError, match="clearinghouse cannot be empty"):
+        with pytest.raises(ValueError, match="clearinghouse_id cannot be empty"):
             create_future("X", "X", "X", datetime(2024, 12, 20), 50.0, "USD", "")
 
 
 # ============================================================================
-# TRANSACT - ALGEBRAIC QUANTITY
+# TRANSACT - TWO-PARTY TRADE VIA CLEARINGHOUSE
 # ============================================================================
 
 class TestTransact:
@@ -62,59 +63,61 @@ class TestTransact:
             'currency': 'USD', 'clearinghouse': 'clearing', 'wallets': {}, 'settled': False,
         }
 
-    def test_buy_positive_qty(self):
-        """Positive qty = buy = clearinghouse -> wallet"""
+    def test_buy_from_market_maker(self):
+        """Trader buys from market_maker: market_maker sells to trader via clearinghouse"""
+        # market_maker has position tracked in wallets state
+        state = {**self.state, 'wallets': {'market_maker': {'position': 100, 'virtual_cash': 0.0}}}
         view = FakeView(
-            balances={'trader': {}, 'clearing': {'ESZ24': 100}},
-            states={'ESZ24': self.state},
-        )
-        result = future_transact(view, "ESZ24", "trader", qty=10, price=4500.0)
-
-        # Check move
-        assert len(result.moves) == 1
-        m = result.moves[0]
-        assert m.source == "clearing"
-        assert m.dest == "trader"
-        assert m.quantity == 10
-
-        # Check virtual_cash: -qty * price * mult = -10 * 4500 * 50 = -2,250,000
-        w = result.state_updates['ESZ24']['wallets']['trader']
-        assert w['virtual_cash'] == -2_250_000.0
-
-    def test_sell_negative_qty(self):
-        """Negative qty = sell = wallet -> clearinghouse"""
-        # Trader has 10 contracts entered at 4500
-        # virtual_cash = -10 * 4500 * 50 = -2,250,000
-        state = {**self.state, 'wallets': {'trader': {'position': 10, 'virtual_cash': -2_250_000.0}}}
-        view = FakeView(
-            balances={'trader': {'ESZ24': 10}, 'clearing': {}},
+            balances={'trader': {}, 'market_maker': {'ESZ24': 100}, 'clearing': {}},
             states={'ESZ24': state},
         )
-        result = future_transact(view, "ESZ24", "trader", qty=-5, price=4520.0)
+        result = future_transact(view, "ESZ24", seller_id="market_maker", buyer_id="trader", qty=10, price=4500.0)
 
-        # Check move
-        assert len(result.moves) == 1
-        m = result.moves[0]
-        assert m.source == "trader"
-        assert m.dest == "clearing"
-        assert m.quantity == 5
+        # Two moves: seller->CH, CH->buyer
+        assert len(result.moves) == 2
+        # Check buyer gets the contracts
+        buyer_move = next(m for m in result.moves if m.dest == "trader")
+        assert buyer_move.source == "clearing"
+        assert buyer_move.quantity == 10
 
-        # Check virtual_cash: old + (-(-5) * 4520 * 50) = -2,250,000 + 1,130,000 = -1,120,000
-        w = result.state_updates['ESZ24']['wallets']['trader']
+        # Check buyer's virtual_cash: -qty * price * mult = -10 * 4500 * 50 = -2,250,000
+        sc = next(d for d in result.state_changes if d.unit == "ESZ24")
+        w = sc.new_state['wallets']['trader']
+        assert w['virtual_cash'] == -2_250_000.0
+
+    def test_sell_to_market_maker(self):
+        """Trader sells to market_maker: trader sells, market_maker buys"""
+        # Trader has 10 contracts entered at 4500
+        state = {**self.state, 'wallets': {'trader': {'position': 10, 'virtual_cash': -2_250_000.0}}}
+        view = FakeView(
+            balances={'trader': {'ESZ24': 10}, 'market_maker': {}, 'clearing': {}},
+            states={'ESZ24': state},
+        )
+        result = future_transact(view, "ESZ24", seller_id="trader", buyer_id="market_maker", qty=5, price=4520.0)
+
+        # Two moves: seller->CH, CH->buyer
+        assert len(result.moves) == 2
+
+        # Check seller's virtual_cash: old + qty * price * mult = -2,250,000 + 5 * 4520 * 50 = -1,120,000
+        sc = next(d for d in result.state_changes if d.unit == "ESZ24")
+        w = sc.new_state['wallets']['trader']
         assert w['virtual_cash'] == -1_120_000.0
 
     def test_virtual_cash_accumulates(self):
         """Adding to position accumulates virtual_cash"""
-        # Alice has 10 contracts entered at 4500 (after MTM at 4500)
-        # virtual_cash = -10 * 4500 * 50 = -2,250,000
-        state = {**self.state, 'wallets': {'alice': {'position': 10, 'virtual_cash': -2_250_000.0}}}
+        # Alice has 10 contracts, market_maker sells 10 more
+        state = {**self.state, 'wallets': {
+            'alice': {'position': 10, 'virtual_cash': -2_250_000.0},
+            'market_maker': {'position': 100, 'virtual_cash': 0.0}
+        }}
         view = FakeView(
-            balances={'alice': {'ESZ24': 10}, 'clearing': {'ESZ24': 100}},
+            balances={'alice': {'ESZ24': 10}, 'market_maker': {'ESZ24': 100}, 'clearing': {}},
             states={'ESZ24': state},
         )
         # Buy 10 more at 4600
-        result = future_transact(view, "ESZ24", "alice", qty=10, price=4600.0)
-        w = result.state_updates['ESZ24']['wallets']['alice']
+        result = future_transact(view, "ESZ24", seller_id="market_maker", buyer_id="alice", qty=10, price=4600.0)
+        sc = next(d for d in result.state_changes if d.unit == "ESZ24")
+        w = sc.new_state['wallets']['alice']
 
         # virtual_cash = -2,250,000 + (-10 * 4600 * 50) = -2,250,000 - 2,300,000 = -4,550,000
         assert w['virtual_cash'] == -4_550_000.0
@@ -123,17 +126,12 @@ class TestTransact:
         state = {**self.state, 'settled': True}
         view = FakeView(balances={}, states={'ESZ24': state})
         with pytest.raises(ValueError, match="Cannot trade settled contract"):
-            future_transact(view, "ESZ24", "trader", qty=10, price=4500.0)
+            future_transact(view, "ESZ24", seller_id="market_maker", buyer_id="trader", qty=10, price=4500.0)
 
     def test_zero_qty_raises(self):
         view = FakeView(balances={}, states={'ESZ24': self.state})
-        with pytest.raises(ValueError, match="qty must be non-zero"):
-            future_transact(view, "ESZ24", "trader", qty=0, price=4500.0)
-
-    def test_wallet_cannot_be_clearinghouse(self):
-        view = FakeView(balances={}, states={'ESZ24': self.state})
-        with pytest.raises(ValueError, match="wallet cannot be clearinghouse"):
-            future_transact(view, "ESZ24", "clearing", qty=10, price=4500.0)
+        with pytest.raises(ValueError, match="qty must be positive"):
+            future_transact(view, "ESZ24", seller_id="market_maker", buyer_id="trader", qty=0, price=4500.0)
 
 
 # ============================================================================
@@ -169,7 +167,8 @@ class TestFutureContract:
         assert m.quantity == 10000.0
 
         # virtual_cash updated to target
-        assert result.state_updates['ESZ24']['wallets']['alice']['virtual_cash'] == -2_260_000.0
+        sc = next(d for d in result.state_changes if d.unit == "ESZ24")
+        assert sc.new_state['wallets']['alice']['virtual_cash'] == -2_260_000.0
 
     def test_daily_mtm_loss(self):
         """Price down = long loses"""
@@ -272,8 +271,9 @@ class TestFutureContract:
         result = future_contract(view, "ESZ24", expiry, {'SPX': 4600.0})
 
         assert result.moves[0].quantity == 50000.0
-        assert result.state_updates['ESZ24']['settled'] is True
-        assert result.state_updates['ESZ24']['settlement_price'] == 4600.0
+        sc = next(d for d in result.state_changes if d.unit == "ESZ24")
+        assert sc.new_state['settled'] is True
+        assert sc.new_state['settlement_price'] == 4600.0
 
     def test_before_expiry_not_settled(self):
         """MTM before expiry does not mark as settled"""
@@ -289,7 +289,8 @@ class TestFutureContract:
         )
         result = future_contract(view, "ESZ24", datetime(2024, 12, 19), {'SPX': 4520.0})
 
-        assert result.state_updates['ESZ24'].get('settled') is False
+        sc = next(d for d in result.state_changes if d.unit == "ESZ24")
+        assert sc.new_state.get('settled') is False
 
     def test_no_price_returns_empty(self):
         """No underlying price = no MTM"""
@@ -370,7 +371,8 @@ class TestClosedPosition:
         assert m.quantity == 10000.0
 
         # Wallet should be removed after settlement
-        assert 'trader' not in result.state_updates['ESZ24']['wallets']
+        sc = next(d for d in result.state_changes if d.unit == "ESZ24")
+        assert 'trader' not in sc.new_state['wallets']
 
 
 # ============================================================================
@@ -394,7 +396,7 @@ class TestMultiCurrency:
         # target = -5 * 510 * 10 = -25,500
         # vm = -25,000 - (-25,500) = +500 EUR
         result = future_contract(view, "FESX", datetime(2024, 11, 1), {'SX5E': 510.0})
-        assert result.moves[0].unit == 'EUR'
+        assert result.moves[0].unit_symbol == 'EUR'
         assert result.moves[0].quantity == 500.0
 
 

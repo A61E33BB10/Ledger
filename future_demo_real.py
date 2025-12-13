@@ -20,7 +20,10 @@ Run with: python future_demo_real.py
 from datetime import datetime
 from ledger import (
     Ledger,
+    Move,
     cash,
+    build_transaction,
+    SYSTEM_WALLET,
     create_future,
     future_transact,
     future_mark_to_market,
@@ -117,18 +120,22 @@ Participants: Alice, Bob, Charlie, CME (clearinghouse)
         expiry=expiry,
         multiplier=50.0,
         currency="USD",
-        clearinghouse="CME"
+        clearinghouse_id="CME"
     ))
 
     # Register wallets
     for wallet in ["alice", "bob", "charlie", "CME"]:
         ledger.register_wallet(wallet)
 
-    # Fund accounts with cash
-    ledger.set_balance("alice", "USD", 500_000)
-    ledger.set_balance("bob", "USD", 500_000)
-    ledger.set_balance("charlie", "USD", 500_000)
-    ledger.set_balance("CME", "USD", 50_000_000)  # Clearinghouse has deep pockets
+    # Fund accounts with cash via SYSTEM_WALLET (proper issuance)
+    # SYSTEM_WALLET is auto-registered by the ledger
+    funding_tx = build_transaction(ledger, [
+        Move(500_000, "USD", SYSTEM_WALLET, "alice", "fund_alice"),
+        Move(500_000, "USD", SYSTEM_WALLET, "bob", "fund_bob"),
+        Move(500_000, "USD", SYSTEM_WALLET, "charlie", "fund_charlie"),
+        Move(50_000_000, "USD", SYSTEM_WALLET, "CME", "fund_cme"),  # Clearinghouse has deep pockets
+    ])
+    ledger.execute(funding_tx)
 
     print(f"  Created ledger: {ledger.name}")
     print(f"  Registered units: {ledger.list_units()}")
@@ -148,19 +155,19 @@ Participants: Alice, Bob, Charlie, CME (clearinghouse)
   Charlie goes LONG 3 contracts at 4510 (late entry)
 """)
 
-    # Alice buys 10 contracts
-    result = future_transact(ledger, "ESZ24", "alice", qty=10, price=4500.0)
-    ledger.execute_contract(result)
+    # Alice buys 10 contracts (long: CH sells to alice)
+    result = future_transact(ledger, "ESZ24", seller_id="CME", buyer_id="alice", qty=10, price=4500.0)
+    ledger.execute(result)
     print(f"  Alice buys 10 @ 4500: virtual_cash = {ledger.get_unit_state('ESZ24')['wallets']['alice']['virtual_cash']:+,.0f}")
 
-    # Bob sells 5 contracts (goes short)
-    result = future_transact(ledger, "ESZ24", "bob", qty=-5, price=4500.0)
-    ledger.execute_contract(result)
+    # Bob sells 5 contracts (short: bob sells to CH)
+    result = future_transact(ledger, "ESZ24", seller_id="bob", buyer_id="CME", qty=5, price=4500.0)
+    ledger.execute(result)
     print(f"  Bob sells 5 @ 4500:   virtual_cash = {ledger.get_unit_state('ESZ24')['wallets']['bob']['virtual_cash']:+,.0f}")
 
-    # Charlie buys 3 contracts at slightly higher price
-    result = future_transact(ledger, "ESZ24", "charlie", qty=3, price=4510.0)
-    ledger.execute_contract(result)
+    # Charlie buys 3 contracts at slightly higher price (long: CH sells to charlie)
+    result = future_transact(ledger, "ESZ24", seller_id="CME", buyer_id="charlie", qty=3, price=4510.0)
+    ledger.execute(result)
     print(f"  Charlie buys 3 @ 4510: virtual_cash = {ledger.get_unit_state('ESZ24')['wallets']['charlie']['virtual_cash']:+,.0f}")
 
     print_state(ledger, "ESZ24")
@@ -180,7 +187,7 @@ Participants: Alice, Bob, Charlie, CME (clearinghouse)
 """)
 
     result = future_mark_to_market(ledger, "ESZ24", price=4520.0, settle_date=datetime(2024, 11, 1).date())
-    ledger.execute_contract(result)
+    ledger.execute(result)
 
     print(f"  Moves executed: {len(result.moves)}")
     for move in result.moves:
@@ -204,7 +211,7 @@ Participants: Alice, Bob, Charlie, CME (clearinghouse)
 
     ledger.advance_time(datetime(2024, 11, 2))
     result = future_mark_to_market(ledger, "ESZ24", price=4480.0, settle_date=datetime(2024, 11, 2).date())
-    ledger.execute_contract(result)
+    ledger.execute(result)
 
     print(f"  Moves executed: {len(result.moves)}")
     for move in result.moves:
@@ -226,8 +233,9 @@ Participants: Alice, Bob, Charlie, CME (clearinghouse)
 
     ledger.advance_time(datetime(2024, 11, 3))
 
-    result = future_transact(ledger, "ESZ24", "bob", qty=5, price=4490.0)
-    ledger.execute_contract(result)
+    # Bob closes short by buying back (long: CH sells to bob)
+    result = future_transact(ledger, "ESZ24", seller_id="CME", buyer_id="bob", qty=5, price=4490.0)
+    ledger.execute(result)
 
     bob_state = ledger.get_unit_state('ESZ24')['wallets'].get('bob', {})
     print(f"  Bob buys 5 @ 4490")
@@ -237,7 +245,7 @@ Participants: Alice, Bob, Charlie, CME (clearinghouse)
     # End of day MTM at 4495
     print(f"\n  Day 3 MTM at 4495:")
     result = future_mark_to_market(ledger, "ESZ24", price=4495.0, settle_date=datetime(2024, 11, 3).date())
-    ledger.execute_contract(result)
+    ledger.execute(result)
 
     for move in result.moves:
         direction = "receives" if move.dest != "CME" else "pays"
@@ -263,7 +271,7 @@ Participants: Alice, Bob, Charlie, CME (clearinghouse)
 
     # Use future_contract which handles both MTM and expiry
     result = future_contract(ledger, "ESZ24", expiry, {"SPX": 4550.0})
-    ledger.execute_contract(result)
+    ledger.execute(result)
 
     print(f"  Moves executed: {len(result.moves)}")
     for move in result.moves:

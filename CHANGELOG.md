@@ -127,7 +127,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `Move` - Immutable transfer record
   - `Transaction` - Atomic, timestamped collection of moves
   - `ContractResult` - Output from contract execution
-  - `StateDelta` - Unit state change record
+  - `UnitStateChange` - Unit state change record
   - `Unit` - Asset type definition with constraints
   - `LedgerView` - Read-only ledger protocol
 - **Ledger** (`ledger/ledger.py`)

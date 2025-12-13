@@ -217,7 +217,7 @@ All agents noted these strengths:
 1. **Pure function pattern implemented** - margin_loan.py demonstrates the correct approach
 2. **All critical bugs fixed** - Pending interest, position tracking, liquidation protection verified
 3. **Pure function architecture** - Clear separation between pure contracts and stateful ledger
-4. **Immutable core data structures** - Move, Transaction, StateDelta are properly frozen
+4. **Immutable core data structures** - Move, Transaction, UnitStateChange are properly frozen
 5. **New frozen dataclasses** - MarginLoanTerms, MarginLoanState, MarginStatusResult
 6. **Position tracking pattern** - Bonds, autocallables correctly use `get_positions()`
 7. **Comprehensive testing** - 905 tests with good edge case coverage

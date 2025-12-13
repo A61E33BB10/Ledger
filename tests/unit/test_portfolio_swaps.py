@@ -428,7 +428,7 @@ class TestComputeSwapReset:
         assert move.source == 'dealer'
         assert move.dest == 'hedge_fund'
         assert move.quantity == pytest.approx(expected_net, rel=1e-6)
-        assert move.unit == 'USD'
+        assert move.unit_symbol == 'USD'
 
     def test_negative_return_settlement(self):
         """Negative portfolio return - receiver pays payer."""
@@ -494,14 +494,14 @@ class TestComputeSwapReset:
         )
 
         result = compute_swap_reset(view, 'TRS_TECH', 1_050_000.0, 0.005, 90)
-        updated = result.state_updates['TRS_TECH']
+        sc = next(d for d in result.state_changes if d.unit == "TRS_TECH")
 
-        assert updated['last_nav'] == 1_050_000.0
-        assert updated['last_reset_date'] == datetime(2025, 3, 31)
-        assert updated['next_reset_index'] == 1
-        assert len(updated['reset_history']) == 1
+        assert sc.new_state['last_nav'] == 1_050_000.0
+        assert sc.new_state['last_reset_date'] == datetime(2025, 3, 31)
+        assert sc.new_state['next_reset_index'] == 1
+        assert len(sc.new_state['reset_history']) == 1
 
-        history = updated['reset_history'][0]
+        history = sc.new_state['reset_history'][0]
         assert history['reset_number'] == 0
         assert history['last_nav'] == 1_000_000.0
         assert history['current_nav'] == 1_050_000.0
@@ -519,7 +519,7 @@ class TestComputeSwapReset:
 
         result = compute_swap_reset(view, 'TRS_TECH', 1_050_000.0, 0.005, 90)
         assert len(result.moves) == 0
-        assert len(result.state_updates) == 0
+        assert len(result.state_changes) == 0
 
     def test_reset_without_last_nav_raises(self):
         """Reset without initialized last_nav raises ValueError."""
@@ -623,7 +623,8 @@ class TestComputeTermination:
         result = compute_termination(view, 'TRS_TECH', 1_020_000.0, 0.005, 45)
 
         assert len(result.moves) == 1
-        assert result.state_updates['TRS_TECH']['terminated'] is True
+        sc = next(d for d in result.state_changes if d.unit == "TRS_TECH")
+        assert sc.new_state['terminated'] is True
 
         move = result.moves[0]
         # return_amount = 1M * 0.02 = 20,000
@@ -649,7 +650,8 @@ class TestComputeTermination:
 
         result = compute_termination(view, 'TRS_TECH', 980_000.0, 0.005, 45)
 
-        assert result.state_updates['TRS_TECH']['terminated'] is True
+        sc = next(d for d in result.state_changes if d.unit == "TRS_TECH")
+        assert sc.new_state['terminated'] is True
 
         move = result.moves[0]
         # return_amount = 1M * (-0.02) = -20,000
@@ -671,12 +673,12 @@ class TestComputeTermination:
         )
 
         result = compute_termination(view, 'TRS_TECH', 1_000_000.0, 0.005, 45)
-        updated = result.state_updates['TRS_TECH']
+        sc = next(d for d in result.state_changes if d.unit == "TRS_TECH")
 
-        assert updated['terminated'] is True
-        assert updated['termination_date'] == datetime(2025, 2, 15)
-        assert updated['termination_nav'] == 1_000_000.0
-        assert any(h.get('is_termination') for h in updated['reset_history'])
+        assert sc.new_state['terminated'] is True
+        assert sc.new_state['termination_date'] == datetime(2025, 2, 15)
+        assert sc.new_state['termination_nav'] == 1_000_000.0
+        assert any(h.get('is_termination') for h in sc.new_state['reset_history'])
 
     def test_termination_already_terminated_returns_empty(self):
         """Termination on already-terminated swap returns empty."""
@@ -727,8 +729,8 @@ class TestTransact:
         result = transact(view, 'TRS_TECH', 'INITIALIZE', datetime(2025, 1, 1),
                          initial_nav=1_000_000.0)
 
-        assert 'TRS_TECH' in result.state_updates
-        assert result.state_updates['TRS_TECH']['last_nav'] == 1_000_000.0
+        sc = next(d for d in result.state_changes if d.unit == "TRS_TECH")
+        assert sc.new_state['last_nav'] == 1_000_000.0
 
     def test_transact_reset_event(self):
         """transact handles RESET event."""
@@ -748,7 +750,8 @@ class TestTransact:
                          current_nav=1_050_000.0, days_elapsed=90)
 
         assert len(result.moves) == 1
-        assert result.state_updates['TRS_TECH']['next_reset_index'] == 1
+        sc = next(d for d in result.state_changes if d.unit == "TRS_TECH")
+        assert sc.new_state['next_reset_index'] == 1
 
     def test_transact_termination_event(self):
         """transact handles TERMINATION event."""
@@ -768,7 +771,8 @@ class TestTransact:
                          final_nav=1_020_000.0, days_elapsed=45)
 
         assert len(result.moves) == 1
-        assert result.state_updates['TRS_TECH']['terminated'] is True
+        sc = next(d for d in result.state_changes if d.unit == "TRS_TECH")
+        assert sc.new_state['terminated'] is True
 
     def test_transact_unknown_event_returns_empty(self):
         """transact returns empty for unknown event type."""
@@ -779,7 +783,7 @@ class TestTransact:
 
         result = transact(view, 'TRS_TECH', 'UNKNOWN', datetime(2025, 1, 1))
         assert len(result.moves) == 0
-        assert len(result.state_updates) == 0
+        assert len(result.state_changes) == 0
 
     def test_transact_missing_params_returns_empty(self):
         """transact returns empty when required params are missing."""
@@ -842,7 +846,7 @@ class TestPortfolioSwapContract:
         result = portfolio_swap_contract(view, 'TRS_TECH', datetime(2025, 3, 31), prices)
 
         # Should process the reset
-        assert 'TRS_TECH' in result.state_updates
+        assert any(d.unit == 'TRS_TECH' for d in result.state_changes)
 
     def test_contract_returns_empty_before_reset(self):
         """Contract returns empty before reset date."""
@@ -908,7 +912,7 @@ class TestMultiPeriodScenarios:
         )
 
         result1 = compute_swap_reset(view1, 'TRS_SPY', 1_050_000.0, 0.004, 90)
-        state_after_reset1 = result1.state_updates['TRS_SPY']
+        state_after_reset1 = next(d for d in result1.state_changes if d.unit == 'TRS_SPY').new_state
 
         assert state_after_reset1['last_nav'] == 1_050_000.0
         assert state_after_reset1['next_reset_index'] == 1
@@ -926,7 +930,7 @@ class TestMultiPeriodScenarios:
         # NAV drops from 1.05M to 1.0185M (-3%)
         new_nav = 1_050_000.0 * 0.97
         result2 = compute_swap_reset(view2, 'TRS_SPY', new_nav, 0.004, 91)
-        state_after_reset2 = result2.state_updates['TRS_SPY']
+        state_after_reset2 = next(d for d in result2.state_changes if d.unit == 'TRS_SPY').new_state
 
         assert state_after_reset2['last_nav'] == pytest.approx(new_nav, rel=1e-6)
         assert state_after_reset2['next_reset_index'] == 2

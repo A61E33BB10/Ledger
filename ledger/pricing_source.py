@@ -28,7 +28,7 @@ class PricingSource(Protocol):
     """
     base_currency: str
 
-    def get_price(self, unit: str, timestamp: datetime) -> Optional[float]:
+    def get_price(self, unit_symbol: str, timestamp: datetime) -> Optional[float]:
         """Get the price of a single unit at a specific timestamp."""
         ...
 
@@ -58,17 +58,17 @@ class StaticPricingSource:
         # Base currency always prices at 1.0
         self.prices[base_currency] = 1.0
 
-    def get_price(self, unit: str, timestamp: datetime) -> Optional[float]:
+    def get_price(self, unit_symbol: str, timestamp: datetime) -> Optional[float]:
         """Get static price (timestamp is ignored)."""
-        return self.prices.get(unit)
+        return self.prices.get(unit_symbol)
 
     def get_prices(self, units: Set[str], timestamp: datetime) -> Dict[str, float]:
         """Get prices for multiple units at a specific timestamp."""
         return {unit: self.prices[unit] for unit in units if unit in self.prices}
 
-    def update_price(self, unit: str, price: float):
+    def update_price(self, unit_symbol: str, price: float):
         """Update the price of a unit."""
-        self.prices[unit] = price
+        self.prices[unit_symbol] = price
 
     def update_prices(self, prices: Dict[str, float]):
         """Update multiple prices at once."""
@@ -124,21 +124,21 @@ class TimeSeriesPricingSource:
                 # Sort by timestamp to ensure chronological order
                 self.price_history[unit] = sorted(path, key=lambda x: x[0])
 
-    def add_price(self, unit: str, timestamp: datetime, price: float):
+    def add_price(self, unit_symbol: str, timestamp: datetime, price: float):
         """
         Add a price observation for a unit at a specific time.
 
         Args:
-            unit: Unit symbol
+            unit_symbol: Unit symbol
             timestamp: Time of the price observation
             price: Price in base currency
         """
-        if unit not in self.price_history:
-            self.price_history[unit] = []
+        if unit_symbol not in self.price_history:
+            self.price_history[unit_symbol] = []
 
         # Insert in sorted order (by timestamp)
-        self.price_history[unit].append((timestamp, price))
-        self.price_history[unit].sort(key=lambda x: x[0])
+        self.price_history[unit_symbol].append((timestamp, price))
+        self.price_history[unit_symbol].sort(key=lambda x: x[0])
 
     def add_prices(self, prices: Dict[str, float], timestamp: datetime):
         """
@@ -151,7 +151,7 @@ class TimeSeriesPricingSource:
         for unit, price in prices.items():
             self.add_price(unit, timestamp, price)
 
-    def get_price(self, unit: str, timestamp: datetime) -> Optional[float]:
+    def get_price(self, unit_symbol: str, timestamp: datetime) -> Optional[float]:
         """
         Get price at or before the specified timestamp.
 
@@ -161,13 +161,13 @@ class TimeSeriesPricingSource:
         Uses binary search for efficient O(log n) lookup.
         """
         # Base currency always prices at 1.0
-        if unit == self.base_currency:
+        if unit_symbol == self.base_currency:
             return 1.0
 
-        if unit not in self.price_history:
+        if unit_symbol not in self.price_history:
             return None
 
-        history = self.price_history[unit]
+        history = self.price_history[unit_symbol]
         if not history:
             return None
 
@@ -192,20 +192,20 @@ class TimeSeriesPricingSource:
                 prices[unit] = price
         return prices
 
-    def get_all_timestamps(self, unit: Optional[str] = None) -> List[datetime]:
+    def get_all_timestamps(self, unit_symbol: Optional[str] = None) -> List[datetime]:
         """
         Get all timestamps in the price history.
 
         Args:
-            unit: If specified, get timestamps for that unit only.
-                  If None, get union of all timestamps.
+            unit_symbol: If specified, get timestamps for that unit only.
+                         If None, get union of all timestamps.
 
         Returns:
             Sorted list of unique timestamps
         """
-        if unit:
-            if unit in self.price_history:
-                return [ts for ts, _ in self.price_history[unit]]
+        if unit_symbol:
+            if unit_symbol in self.price_history:
+                return [ts for ts, _ in self.price_history[unit_symbol]]
             return []
 
         # Get union of all timestamps

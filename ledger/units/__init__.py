@@ -11,8 +11,9 @@ All unit factories and related functions are re-exported here for convenience.
 
 # Stock units
 from .stock import (
+    Dividend,
     create_stock_unit,
-    compute_scheduled_dividend,
+    process_dividends,
     compute_stock_split,
     stock_contract,
     transact as stock_transact,
@@ -21,7 +22,6 @@ from .stock import (
 # Option units
 from .option import (
     create_option_unit,
-    build_option_trade,
     compute_option_settlement,
     compute_option_exercise,
     get_option_intrinsic_value,
@@ -65,6 +65,7 @@ from .future import (
     create_future,
     future_contract,
     transact as future_transact,
+    mark_to_market as future_mark_to_market,
 )
 
 # Structured notes
@@ -81,14 +82,14 @@ from .structured_note import (
 
 __all__ = [
     # Stocks
+    'Dividend',
     'create_stock_unit',
-    'compute_scheduled_dividend',
+    'process_dividends',
     'compute_stock_split',
     'stock_contract',
     'stock_transact',
     # Options
     'create_option_unit',
-    'build_option_trade',
     'compute_option_settlement',
     'compute_option_exercise',
     'get_option_intrinsic_value',
@@ -120,6 +121,7 @@ __all__ = [
     'create_future',
     'future_contract',
     'future_transact',
+    'future_mark_to_market',
     # Structured Notes
     'create_structured_note',
     'compute_performance',

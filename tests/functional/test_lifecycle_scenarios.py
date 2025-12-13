@@ -13,7 +13,7 @@ Tests complete instrument lifecycles:
 import pytest
 from datetime import datetime, timedelta
 from ledger import (
-    Ledger, Move, ContractResult,
+    Ledger, Move, build_transaction,
     cash,
     create_stock_unit,
     create_option_unit,
@@ -24,11 +24,13 @@ from ledger import (
     option_contract,
     forward_contract,
     delta_hedge_contract,
+    deferred_cash_contract,
     compute_option_settlement,
     compute_forward_settlement,
     compute_liquidation,
     compute_hedge_pnl_breakdown,
     TimeSeriesPricingSource,
+    Dividend,
 )
 
 
@@ -38,10 +40,10 @@ class TestDividendLifecycle:
     def test_quarterly_dividends(self):
         """Four quarterly dividends paid correctly."""
         schedule = [
-            (datetime(2025, 3, 15), 0.25),
-            (datetime(2025, 6, 15), 0.25),
-            (datetime(2025, 9, 15), 0.25),
-            (datetime(2025, 12, 15), 0.25),
+            Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD"),
+            Dividend(datetime(2025, 6, 15), datetime(2025, 6, 15), 0.25, "USD"),
+            Dividend(datetime(2025, 9, 15), datetime(2025, 9, 15), 0.25, "USD"),
+            Dividend(datetime(2025, 12, 15), datetime(2025, 12, 15), 0.25, "USD"),
         ]
 
         ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
@@ -64,6 +66,7 @@ class TestDividendLifecycle:
 
         engine = LifecycleEngine(ledger)
         engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
 
         # Process all quarterly payments
         for date in [datetime(2025, 3, 15), datetime(2025, 6, 15),
@@ -79,7 +82,7 @@ class TestDividendLifecycle:
 
     def test_dividend_proportional_to_shares(self):
         """Dividend amount proportional to share holdings."""
-        schedule = [(datetime(2025, 3, 15), 1.0)]  # $1 dividend
+        schedule = [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 1.0, "USD")]  # $1 dividend
 
         ledger = Ledger("test", datetime(2025, 3, 15), verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
@@ -101,6 +104,7 @@ class TestDividendLifecycle:
 
         engine = LifecycleEngine(ledger)
         engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
         engine.step(datetime(2025, 3, 15), {"AAPL": 150.0})
 
         assert ledger.get_balance("alice", "USD") == 100.0
@@ -136,8 +140,8 @@ class TestOptionLifecycle:
 
         # Trade: alice buys 5 contracts from bob
         # Premium: let's say $500 per contract = $2500 total
-        tx = ledger.create_transaction([
-            Move("alice", "bob", "USD", 2500.0, "premium"),
+        tx = build_transaction(ledger, [
+            Move(2500.0, "USD", "alice", "bob", "premium"),
         ])
         ledger.execute(tx)
 
@@ -337,7 +341,7 @@ class TestDeltaHedgeLifecycle:
         ledger.advance_time(final_date)
 
         result = compute_liquidation(ledger, "HEDGE", final_price)
-        ledger.execute_contract(result)
+        ledger.execute(result)
 
         # Verify liquidated
         state = ledger.get_unit_state("HEDGE")
@@ -362,7 +366,7 @@ class TestMixedInstrumentsLifecycle:
         ledger.register_unit(cash("USD", "US Dollar"))
 
         # Stock with dividends
-        schedule = [(datetime(2025, 3, 15), 0.25)]
+        schedule = [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD")]
         ledger.register_unit(create_stock_unit(
             "AAPL", "Apple", "treasury", "USD",
             dividend_schedule=schedule, shortable=True
@@ -403,6 +407,7 @@ class TestMixedInstrumentsLifecycle:
         # Setup engine
         engine = LifecycleEngine(ledger)
         engine.register("STOCK", stock_contract)
+        engine.register("DEFERRED_CASH", deferred_cash_contract)
         engine.register("BILATERAL_OPTION", option_contract)
         engine.register("BILATERAL_FORWARD", forward_contract)
 
@@ -437,7 +442,7 @@ class TestCloneAtWithLifecycle:
         """clone_at before settlement shows unsettled state."""
         maturity = datetime(2025, 6, 20)
 
-        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False, no_log=False)
+        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True))
 
@@ -478,7 +483,7 @@ class TestCloneAtWithLifecycle:
         """clone_at enables divergent scenario analysis."""
         maturity = datetime(2025, 6, 20)
 
-        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False, no_log=False)
+        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True))
 
