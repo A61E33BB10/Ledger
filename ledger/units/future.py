@@ -96,7 +96,8 @@ def transact(
 
     if qty <= Decimal("0"):
         raise ValueError(f"qty must be positive, got {qty}")
-    if not math.isfinite(float(price)):
+    # HIGH-2 FIX (v4.1): Use Decimal.is_finite() instead of float conversion
+    if not price.is_finite():
         raise ValueError(f"price must be finite, got {price}")
 
     ch_id = state['clearinghouse']
@@ -199,7 +200,8 @@ def mark_to_market(
     # Ensure Decimal type
     price = Decimal(str(price)) if not isinstance(price, Decimal) else price
 
-    if not math.isfinite(float(price)):
+    # HIGH-2 FIX (v4.1): Use Decimal.is_finite() instead of float conversion
+    if not price.is_finite():
         raise ValueError(f"price must be finite, got {price}")
     if settle_date and state.get('last_settle_date') == settle_date:
         return empty_pending_transaction(view)  # Idempotent

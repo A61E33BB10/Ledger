@@ -198,7 +198,7 @@ class SmartContract(Protocol):
         view: LedgerView,
         symbol: str,
         timestamp: datetime,
-        prices: Dict[str, float]
+        prices: Dict[str, Decimal]  # HIGH-1 FIX (v4.1): Use Decimal for consistency
     ) -> 'PendingTransaction':
         """
         Check if lifecycle events should fire.

@@ -344,6 +344,10 @@ def compute_swap_reset(
     notional = state['notional']
     notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
 
+    # HIGH-3 FIX (v4.1): Guard against division by zero
+    if last_nav <= Decimal("0"):
+        raise ValueError(f"last_nav must be positive for portfolio return calculation, got {last_nav}")
+
     payer_wallet = state['payer_wallet']
     receiver_wallet = state['receiver_wallet']
     currency = state['currency']
@@ -464,6 +468,10 @@ def compute_termination(
     last_nav = Decimal(str(last_nav)) if not isinstance(last_nav, Decimal) else last_nav
     notional = state['notional']
     notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
+
+    # HIGH-3 FIX (v4.1): Guard against division by zero
+    if last_nav <= Decimal("0"):
+        raise ValueError(f"last_nav must be positive for portfolio return calculation, got {last_nav}")
 
     payer_wallet = state['payer_wallet']
     receiver_wallet = state['receiver_wallet']

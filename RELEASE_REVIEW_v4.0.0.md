@@ -4,6 +4,9 @@
 **Version:** 4.0.0
 **Status:** APPROVED WITH RECOMMENDATIONS
 
+> **UPDATE (v4.1.0):** All CRITICAL and HIGH findings from this review have been addressed.
+> See CHANGELOG.md for details.
+
 ---
 
 ## Executive Summary

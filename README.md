@@ -1,6 +1,6 @@
 # Ledger
 
-**Version 4.0.0**
+**Version 4.1.0**
 
 A formally-structured financial ledger system with compositional correctness guarantees.
 
