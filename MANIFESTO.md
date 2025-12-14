@@ -5,6 +5,26 @@
 
 ---
 
+## On Simplicity
+
+> *"Entities should not be multiplied beyond necessity."*
+> — William of Ockham, 14th century
+
+> *"A designer knows he has achieved perfection not when there is nothing left to add, but when there is nothing left to take away."*
+> — Antoine de Saint-Exupéry
+
+> *"There are two ways of constructing a software design: one way is to make it so simple that there are **obviously no deficiencies**, and the other way is to make it so complicated that there are **no obvious deficiencies**."*
+> — C.A.R. Hoare
+
+> *"Simplicity is a prerequisite for reliability."*
+> — Edsger Dijkstra
+
+**Across 700 years, from medieval philosophy to modern engineering: Remove what is unnecessary. What remains becomes understandable. What is understandable becomes reliable.**
+
+This ledger chooses the first way. A program should be written as a mathematical proof: its reasoning decomposed into referentially transparent, pure functions as elementary lemmas, and its correctness established by compositionality—so that understanding each part suffices to understand, and trust, the correctness of the whole.
+
+---
+
 ## Core Philosophy (5 Sentences)
 
 1. **The log is truth** - The transaction log is the sole source of truth; all state is a derived, rebuildable cache.
@@ -22,14 +42,16 @@
 All balance modifications MUST flow through the Ledger's transaction mechanism. No external system may directly manipulate balances, positions, or unit state.
 
 ```python
+from decimal import Decimal
+
 # CORRECT: State changes through transactions
 tx = build_transaction(ledger, [
-    Move(SYSTEM_WALLET, "alice", "USD", 1000.0, "issuance")
+    Move(Decimal("1000"), "USD", SYSTEM_WALLET, "alice", "issuance")
 ])
 ledger.execute(tx)
 
 # WRONG: Direct state manipulation (forbidden)
-ledger.balances["alice"]["USD"] = 1000.0  # Never do this
+ledger.balances["alice"]["USD"] = Decimal("1000")  # Never do this
 ```
 
 **Invariant:** `sum(all_balances[unit]) == 0` for every unit at all times.
@@ -43,14 +65,16 @@ ledger.balances["alice"]["USD"] = 1000.0  # Never do this
 The system enforces double-entry accounting at the transaction level. Money cannot appear from nowhere or disappear into nothing.
 
 ```python
+from decimal import Decimal
+
 # Issuance: SYSTEM_WALLET goes negative, recipient goes positive
-Move(SYSTEM_WALLET, "alice", "USD", 1000.0, "issue")  # Net change: 0
+Move(Decimal("1000"), "USD", SYSTEM_WALLET, "alice", "issue")  # Net change: 0
 
 # Transfer: Source decreases, destination increases
-Move("alice", "bob", "USD", 500.0, "transfer")  # Net change: 0
+Move(Decimal("500"), "USD", "alice", "bob", "transfer")  # Net change: 0
 
 # Redemption: Holder returns to SYSTEM_WALLET
-Move("alice", SYSTEM_WALLET, "USD", 200.0, "redeem")  # Net change: 0
+Move(Decimal("200"), "USD", "alice", SYSTEM_WALLET, "redeem")  # Net change: 0
 ```
 
 **Invariant:** For any transaction, `sum(debits) == sum(credits)`.
@@ -64,10 +88,12 @@ Move("alice", SYSTEM_WALLET, "USD", 200.0, "redeem")  # Net change: 0
 Multi-leg operations (trades, settlements, corporate actions) execute atomically. Partial application is impossible.
 
 ```python
+from decimal import Decimal
+
 # Atomic trade: both legs succeed or neither does
 tx = build_transaction(ledger, [
-    Move("alice", "bob", "USD", 50_000.0, "payment"),
-    Move("bob", "alice", "AAPL", 100.0, "delivery"),
+    Move(Decimal("50000"), "USD", "alice", "bob", "payment"),
+    Move(Decimal("100"), "AAPL", "bob", "alice", "delivery"),
 ])
 result = ledger.execute(tx)  # All-or-nothing
 ```
@@ -80,19 +106,21 @@ result = ledger.execute(tx)  # All-or-nothing
 
 **Contract logic is pure. Side effects live in `execute()`.**
 
-Contract functions (`option_contract`, `bond_contract`, etc.) are pure functions that take a `LedgerView` and return a `ContractResult`. They cannot mutate state directly.
+Contract functions (`option_contract`, `bond_contract`, etc.) are pure functions that take a `LedgerView` and return a `PendingTransaction`. They cannot mutate state directly.
 
 ```python
-# Pure function: reads view, returns instructions
+from decimal import Decimal
+
+# Pure function: reads view, returns PendingTransaction
 def option_contract(view: LedgerView, symbol: str,
-                   eval_time: datetime, prices: Dict[str, float]) -> ContractResult:
+                   eval_time: datetime, prices: Dict[str, Decimal]) -> PendingTransaction:
     state = view.get_unit_state(symbol)
     # ... pure computation ...
-    return ContractResult(moves=[...], state_updates={...})
+    return build_transaction(view, moves=[...], state_changes=[...])
 
 # Impure execution: Ledger applies the result
-result = option_contract(ledger, "AAPL-CALL-150", now, {"AAPL": 155.0})
-ledger.execute_contract(result)  # Only place where mutation happens
+result = option_contract(ledger, "AAPL-CALL-150", now, {"AAPL": Decimal("155")})
+ledger.execute(result)  # Only place where mutation happens
 ```
 
 **Invariant:** Given the same `LedgerView` and inputs, a contract function always returns the same result.

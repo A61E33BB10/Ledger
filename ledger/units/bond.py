@@ -1,717 +1,396 @@
 """
-bond.py - Bond Units for Fixed Income Instruments
+bond.py - Bond Unit with Coupon Processing and Redemption
 
-This module provides bond unit creation and lifecycle processing:
-1. create_bond_unit() - Factory for bond units with coupon schedules
-2. compute_accrued_interest() - Calculate accrued interest as of a date
-3. compute_coupon_payment() - Process scheduled coupon payments
-4. compute_redemption() - Final principal repayment at maturity
-5. transact() - Execute bond trades with dirty price settlement
-6. bond_contract() - SmartContract for LifecycleEngine integration
+A Bond has:
+    face_value, coupon_schedule (List[Coupon]), maturity_date, currency,
+    issuer_wallet, issue_date, day_count_convention
 
-Bonds represent debt instruments with:
-- Fixed or floating coupon payments
-- Accrued interest calculation using day count conventions
-- Redemption at maturity (or early call/put)
-- Trading with clean/dirty price distinction
+On coupon payment_date: Create DeferredCash units for each bondholder
+On maturity_date: Pay face_value directly (no DeferredCash)
 
-All functions take LedgerView (read-only) and return immutable results.
+Dirty Price = Clean Price + Accrued Interest
+
+~300 lines. One file. No unnecessary abstractions.
 """
-
 from __future__ import annotations
-from datetime import datetime, timedelta
-from typing import Dict, Any, List, Tuple, Optional
+from dataclasses import dataclass
+from datetime import datetime, date
+from typing import Dict, List, Tuple, FrozenSet
+from decimal import Decimal
 import math
 
 from ..core import (
     LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
-    SYSTEM_WALLET,
     build_transaction, empty_pending_transaction,
+    UNIT_TYPE_BOND, QUANTITY_EPSILON, SYSTEM_WALLET,
+    _freeze_state,
 )
+from .deferred_cash import create_deferred_cash_unit
 
 
-# Type alias for coupon schedule
-CouponSchedule = List[Tuple[datetime, float]]
+# =============================================================================
+# COUPON DATACLASS
+# =============================================================================
+
+@dataclass(frozen=True, slots=True)
+class Coupon:
+    """A scheduled coupon payment."""
+    payment_date: datetime
+    amount: Decimal  # per bond
+    currency: str
+
+    def __post_init__(self):
+        # Convert amount to Decimal if it's not already
+        if not isinstance(self.amount, Decimal):
+            object.__setattr__(self, 'amount', Decimal(str(self.amount)))
+        if self.amount <= Decimal("0"):
+            raise ValueError("amount must be positive")
+
+    @property
+    def key(self) -> str:
+        return self.payment_date.date().isoformat()
 
 
-# ============================================================================
-# DAY COUNT CONVENTIONS
-# ============================================================================
+# =============================================================================
+# PURE FUNCTIONS
+# =============================================================================
 
-def days_30_360(start_date: datetime, end_date: datetime) -> float:
+def year_fraction(start: date, end: date, convention: str) -> Decimal:
     """
-    Calculate days between two dates using 30/360 convention.
-
-    This convention assumes 30 days per month and 360 days per year.
-    Commonly used for corporate bonds.
-
-    Args:
-        start_date: Start date
-        end_date: End date
-
-    Returns:
-        Number of days using 30/360 convention
-    """
-    d1 = start_date.day
-    d2 = end_date.day
-    m1 = start_date.month
-    m2 = end_date.month
-    y1 = start_date.year
-    y2 = end_date.year
-
-    # Adjust day counts per 30/360 rules
-    if d1 == 31:
-        d1 = 30
-    if d2 == 31 and d1 >= 30:
-        d2 = 30
-
-    return 360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)
-
-
-def days_act_360(start_date: datetime, end_date: datetime) -> float:
-    """
-    Calculate actual days between two dates.
-
-    Used with ACT/360 convention (actual days / 360).
-    Commonly used for money market instruments.
-
-    Args:
-        start_date: Start date
-        end_date: End date
-
-    Returns:
-        Actual number of days
-    """
-    delta = end_date - start_date
-    return float(delta.days)
-
-
-def days_act_act(start_date: datetime, end_date: datetime) -> float:
-    """
-    Calculate actual days between two dates.
-
-    Used with ACT/ACT convention (actual days / actual days in year).
-    Commonly used for government bonds.
-
-    Args:
-        start_date: Start date
-        end_date: End date
-
-    Returns:
-        Actual number of days
-    """
-    delta = end_date - start_date
-    return float(delta.days)
-
-
-def year_fraction(start_date: datetime, end_date: datetime, convention: str) -> float:
-    """
-    Calculate the year fraction between two dates using a day count convention.
-
-    Args:
-        start_date: Start date
-        end_date: End date
-        convention: Day count convention ("30/360", "ACT/360", "ACT/ACT")
-
-    Returns:
-        Year fraction as a float
-
-    Raises:
-        ValueError: If convention is not supported
+    Calculate year fraction. Supports: "30/360", "ACT/360", "ACT/365".
     """
     if convention == "30/360":
-        days = days_30_360(start_date, end_date)
-        return days / 360.0
+        y1, m1, d1 = start.year, start.month, min(start.day, 30)
+        y2, m2, d2 = end.year, end.month, min(end.day, 30)
+        days = 360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)
+        return Decimal(days) / Decimal("360")
     elif convention == "ACT/360":
-        days = days_act_360(start_date, end_date)
-        return days / 360.0
-    elif convention == "ACT/ACT":
-        days = days_act_act(start_date, end_date)
-        # For ACT/ACT, we need to determine the actual days in the year
-        # Simple implementation: use 365.25 as average
-        # More sophisticated implementations would handle leap years properly
-        return days / 365.25
+        return Decimal((end - start).days) / Decimal("360")
+    elif convention == "ACT/365":
+        return Decimal((end - start).days) / Decimal("365")
     else:
-        raise ValueError(f"Unsupported day count convention: {convention}")
+        raise ValueError(f"Unknown day count convention: {convention}")
 
 
-# ============================================================================
-# COUPON SCHEDULE GENERATION
-# ============================================================================
+def compute_accrued_interest(
+    coupon_amount: Decimal,
+    last_coupon_date: date,
+    next_coupon_date: date,
+    settlement_date: date,
+    day_count_convention: str,
+) -> Decimal:
+    """Accrued = coupon_amount * (days since last / days in period)."""
+    # Ensure coupon_amount is Decimal
+    coupon_amount = Decimal(str(coupon_amount))
 
-def generate_coupon_schedule(
-    issue_date: datetime,
-    maturity_date: datetime,
-    coupon_rate: float,
-    face_value: float,
-    frequency: int,
-) -> CouponSchedule:
-    """
-    Generate a coupon payment schedule.
+    if settlement_date <= last_coupon_date:
+        return Decimal("0")
+    if settlement_date >= next_coupon_date:
+        return coupon_amount
 
-    Args:
-        issue_date: Bond issue date
-        maturity_date: Bond maturity date
-        coupon_rate: Annual coupon rate (e.g., 0.05 for 5%)
-        face_value: Par/notional amount
-        frequency: Payments per year (1=annual, 2=semi-annual, 4=quarterly)
+    accrued_frac = year_fraction(last_coupon_date, settlement_date, day_count_convention)
+    period_frac = year_fraction(last_coupon_date, next_coupon_date, day_count_convention)
 
-    Returns:
-        List of (payment_date, coupon_amount) tuples
-    """
-    if frequency not in [1, 2, 4, 12]:
-        raise ValueError(f"Frequency must be 1, 2, 4, or 12, got {frequency}")
-
-    schedule: CouponSchedule = []
-    months_between = 12 // frequency
-    coupon_amount = (face_value * coupon_rate) / frequency
-
-    # Start from the first coupon date
-    current_date = issue_date
-
-    # Calculate payment dates by adding months
-    while True:
-        # Move to next payment date
-        month = current_date.month + months_between
-        year = current_date.year
-
-        while month > 12:
-            month -= 12
-            year += 1
-
-        try:
-            next_date = current_date.replace(year=year, month=month)
-        except ValueError:
-            # Handle day overflow (e.g., Jan 31 -> Feb 31 doesn't exist)
-            # Move to last day of the month
-            if month == 12:
-                next_month = 1
-                next_year = year + 1
-            else:
-                next_month = month + 1
-                next_year = year
-            next_date = datetime(next_year, next_month, 1) - timedelta(days=1)
-            next_date = next_date.replace(hour=current_date.hour, minute=current_date.minute)
-
-        current_date = next_date
-
-        if current_date > maturity_date:
-            break
-
-        schedule.append((current_date, coupon_amount))
-
-    return schedule
+    if period_frac < Decimal(str(QUANTITY_EPSILON)):
+        return Decimal("0")
+    return coupon_amount * (accrued_frac / period_frac)
 
 
-# ============================================================================
-# BOND UNIT CREATION
-# ============================================================================
+# =============================================================================
+# COUPON ENTITLEMENT
+# =============================================================================
+
+@dataclass(frozen=True, slots=True)
+class CouponEntitlement:
+    """Instruction to create a DeferredCash unit for a coupon payment."""
+    symbol: str
+    amount: Decimal
+    currency: str
+    payment_date: datetime
+    payer_wallet: str
+    payee_wallet: str
+
+
+def compute_coupon_entitlements(
+    coupon: Coupon,
+    today: date,
+    positions: Dict[str, Decimal],
+    processed: FrozenSet[str],
+    issuer: str,
+    bond_symbol: str,
+) -> Tuple[List[CouponEntitlement], FrozenSet[str]]:
+    """Compute coupon entitlements on payment_date. Pure function."""
+    coupon_key = coupon.key
+
+    if coupon_key in processed:
+        return [], processed
+    if today < coupon.payment_date.date():
+        return [], processed
+
+    # Ensure coupon amount is Decimal
+    coupon_amount = Decimal(str(coupon.amount))
+
+    entitlements = []
+    for wallet, quantity in sorted(positions.items()):
+        if wallet == issuer or quantity <= Decimal(str(QUANTITY_EPSILON)):
+            continue
+        entitlements.append(CouponEntitlement(
+            symbol=f"COUPON_{bond_symbol}_{coupon_key}_{wallet}",
+            amount=quantity * coupon_amount,
+            currency=coupon.currency,
+            payment_date=coupon.payment_date,
+            payer_wallet=issuer,
+            payee_wallet=wallet,
+        ))
+
+    return entitlements, processed | {coupon_key}
+
+
+# =============================================================================
+# UNIT CREATION
+# =============================================================================
 
 def create_bond_unit(
     symbol: str,
     name: str,
-    face_value: float,
-    coupon_rate: float,
-    coupon_frequency: int,
+    face_value: Decimal,
     maturity_date: datetime,
     currency: str,
     issuer_wallet: str,
-    holder_wallet: str,
-    issue_date: datetime = None,
+    issue_date: datetime,
+    coupon_schedule: List[Coupon],
     day_count_convention: str = "30/360",
-    coupon_schedule: Optional[CouponSchedule] = None,
 ) -> Unit:
-    """
-    Create a bond unit representing a debt instrument.
+    """Create a bond unit. coupon_schedule is REQUIRED (no auto-generation)."""
+    # Convert face_value to Decimal if it's not already
+    if not isinstance(face_value, Decimal):
+        face_value = Decimal(str(face_value))
 
-    Args:
-        symbol: Unique bond identifier (e.g., "US10Y", "CORP_5Y_2029")
-        name: Human-readable bond name (e.g., "US Treasury 10-Year")
-        face_value: Par/notional amount (principal)
-        coupon_rate: Annual coupon rate (e.g., 0.05 for 5%)
-        coupon_frequency: Payments per year (1=annual, 2=semi-annual, 4=quarterly, 12=monthly)
-        maturity_date: Bond maturity date
-        currency: Settlement currency
-        issuer_wallet: Who pays coupons and redemption
-        holder_wallet: Who receives payments
-        issue_date: Bond issue date (defaults to current time if None)
-        day_count_convention: "30/360", "ACT/360", or "ACT/ACT" (default: "30/360")
-        coupon_schedule: Optional pre-defined schedule. If None, will be generated.
-
-    Returns:
-        Unit configured for bond with coupon lifecycle support.
-        The unit stores bond state including:
-        - face_value: par amount
-        - coupon_rate: annual rate
-        - coupon_frequency: payments per year
-        - coupon_schedule: payment schedule
-        - maturity_date: redemption date
-        - currency: payment currency
-        - issuer_wallet: payer
-        - holder_wallet: payee
-        - day_count_convention: accrual calculation method
-        - next_coupon_index: tracks next payment
-        - accrued_interest: current accrued amount
-        - redeemed: whether principal has been repaid
-        - paid_coupons: history of completed payments
-
-    Example:
-        bond = create_bond_unit(
-            symbol="CORP_5Y_2029",
-            name="Corporate Bond 5% 2029",
-            face_value=1000.0,
-            coupon_rate=0.05,
-            coupon_frequency=2,  # Semi-annual
-            maturity_date=datetime(2029, 12, 15),
-            currency="USD",
-            issuer_wallet="corporation",
-            holder_wallet="investor",
-        )
-        ledger.register_unit(bond)
-    """
-    if face_value <= 0:
+    if face_value <= Decimal("0"):
         raise ValueError(f"face_value must be positive, got {face_value}")
-    if coupon_rate < 0:
-        raise ValueError(f"coupon_rate cannot be negative, got {coupon_rate}")
-    if coupon_frequency not in [1, 2, 4, 12]:
-        raise ValueError(f"coupon_frequency must be 1, 2, 4, or 12, got {coupon_frequency}")
-    if day_count_convention not in ["30/360", "ACT/360", "ACT/ACT"]:
-        raise ValueError(f"day_count_convention must be '30/360', 'ACT/360', or 'ACT/ACT', got {day_count_convention}")
-
-    # Generate coupon schedule if not provided
-    if coupon_schedule is None:
-        if issue_date is None:
-            raise ValueError("issue_date is required when coupon_schedule is not provided")
-        schedule = generate_coupon_schedule(
-            issue_date, maturity_date, coupon_rate, face_value, coupon_frequency
-        )
-    else:
-        schedule = coupon_schedule
+    if not issuer_wallet or not issuer_wallet.strip():
+        raise ValueError("issuer_wallet cannot be empty")
+    if day_count_convention not in ("30/360", "ACT/360", "ACT/365"):
+        raise ValueError(f"Unknown day_count_convention: {day_count_convention}")
 
     return Unit(
         symbol=symbol,
         name=name,
-        unit_type="BOND",
-        min_balance=-10_000.0,
-        max_balance=10_000.0,
-        decimal_places=0,  # Bonds are whole units
-        transfer_rule=None,
-        _state={
+        unit_type=UNIT_TYPE_BOND,
+        min_balance=Decimal("0"),
+        max_balance=Decimal('inf'),
+        decimal_places=6,
+        _frozen_state=_freeze_state({
             'face_value': face_value,
-            'coupon_rate': coupon_rate,
-            'coupon_frequency': coupon_frequency,
-            'coupon_schedule': schedule,
+            'coupon_schedule': coupon_schedule,
             'maturity_date': maturity_date,
             'currency': currency,
             'issuer_wallet': issuer_wallet,
-            'holder_wallet': holder_wallet,
-            'day_count_convention': day_count_convention,
             'issue_date': issue_date,
+            'day_count_convention': day_count_convention,
             'next_coupon_index': 0,
-            'accrued_interest': 0.0,
+            'processed_coupons': [],
             'redeemed': False,
-            'paid_coupons': [],
-        }
+        })
     )
 
 
-# ============================================================================
-# ACCRUED INTEREST
-# ============================================================================
+# =============================================================================
+# LIFECYCLE FUNCTIONS
+# =============================================================================
 
-def compute_accrued_interest(
+def process_coupons(
     view: LedgerView,
-    bond_symbol: str,
-    as_of_date: datetime,
-) -> float:
-    """
-    Calculate accrued interest on a bond as of a specific date.
-
-    Accrued interest = (days since last coupon / days in period) × coupon_amount
-
-    Args:
-        view: Read-only ledger access
-        bond_symbol: Symbol of the bond unit
-        as_of_date: Date to calculate accrued interest
-
-    Returns:
-        Accrued interest amount in the bond's currency
-    """
-    state = view.get_unit_state(bond_symbol)
-
-    schedule = state.get('coupon_schedule', [])
-    next_idx = state.get('next_coupon_index', 0)
-    convention = state.get('day_count_convention', '30/360')
-
-    if next_idx >= len(schedule):
-        # No more coupons - no accrual
-        return 0.0
-
-    # Find the last coupon date
-    if next_idx == 0:
-        # No coupons paid yet - accrue from issue date
-        last_coupon_date = state.get('issue_date')
-        if last_coupon_date is None:
-            # Fallback: calculate the theoretical previous coupon date
-            # by subtracting one coupon period from the first scheduled coupon
-            next_coupon_date, _ = schedule[0]
-            frequency = state.get('coupon_frequency', 2)
-            months_between = 12 // frequency
-
-            # Calculate target month and year with proper underflow handling
-            target_month = next_coupon_date.month - months_between
-            target_year = next_coupon_date.year
-
-            # Handle month underflow (e.g., January - 6 = July previous year)
-            while target_month <= 0:
-                target_month += 12
-                target_year -= 1
-
-            # Handle day overflow (e.g., March 31 - 1 month != February 31)
-            target_day = next_coupon_date.day
-            while target_day > 0:
-                try:
-                    last_coupon_date = datetime(
-                        target_year,
-                        target_month,
-                        target_day,
-                        next_coupon_date.hour,
-                        next_coupon_date.minute,
-                        next_coupon_date.second,
-                    )
-                    break
-                except ValueError:
-                    # Day doesn't exist in this month, try previous day
-                    target_day -= 1
-            else:
-                # Should never happen, but fail safely
-                raise ValueError(
-                    f"Cannot compute fallback coupon date from {next_coupon_date}"
-                )
-    else:
-        last_coupon_date, _ = schedule[next_idx - 1]
-
-    next_coupon_date, coupon_amount = schedule[next_idx]
-
-    # Calculate accrued interest
-    if as_of_date <= last_coupon_date:
-        return 0.0
-
-    if as_of_date >= next_coupon_date:
-        # Full coupon has accrued
-        return coupon_amount
-
-    # Partial accrual
-    days_accrued = year_fraction(last_coupon_date, as_of_date, convention)
-    days_in_period = year_fraction(last_coupon_date, next_coupon_date, convention)
-
-    if days_in_period <= 0:
-        return 0.0
-
-    accrued = (days_accrued / days_in_period) * coupon_amount
-    return accrued
-
-
-# ============================================================================
-# COUPON PAYMENT
-# ============================================================================
-
-def compute_coupon_payment(
-    view: LedgerView,
-    bond_symbol: str,
-    payment_date: datetime,
+    symbol: str,
+    timestamp: datetime,
 ) -> PendingTransaction:
-    """
-    Process a scheduled coupon payment if due.
-
-    This function checks if the next scheduled coupon payment has reached its
-    payment date. If so, it generates payment moves for all bondholders and
-    updates the unit state to track the payment.
-
-    Payment logic:
-    - Only wallets with positive bond balances receive coupons
-    - The issuer wallet does not pay itself coupons
-    - Payment amount = bonds_held × coupon_amount
-    - Payments are sorted by wallet name for deterministic ordering
-
-    Args:
-        view: Read-only ledger access
-        bond_symbol: Symbol of the bond unit
-        payment_date: Current timestamp to check against scheduled payment_date
-
-    Returns:
-        PendingTransaction containing:
-        - moves: Tuple of Move objects transferring currency from issuer to bondholders
-        - state_updates: Updates next_coupon_index and appends to paid_coupons history
-        Returns empty PendingTransaction if no coupon is due or schedule is exhausted.
-    """
-    state = view.get_unit_state(bond_symbol)
-    schedule = state.get('coupon_schedule', [])
-    next_idx = state.get('next_coupon_index', 0)
-
-    if next_idx >= len(schedule):
-        return empty_pending_transaction(view)
-
-    scheduled_date, coupon_amount = schedule[next_idx]
-
-    if payment_date < scheduled_date:
-        return empty_pending_transaction(view)
-
-    issuer = state['issuer_wallet']
-    currency = state['currency']
-    positions = view.get_positions(bond_symbol)
-
-    moves: List[Move] = []
-    total_paid = 0.0
-
-    for wallet in sorted(positions.keys()):
-        bonds_held = positions[wallet]
-        if bonds_held > 0 and wallet != issuer:
-            payout = bonds_held * coupon_amount
-            moves.append(Move(
-                quantity=payout,
-                unit_symbol=currency,
-                source=issuer,
-                dest=wallet,
-                contract_id=f'coupon_{bond_symbol}_{next_idx}_{wallet}',
-            ))
-            total_paid += payout
-
-    paid_coupons = list(state.get('paid_coupons', []))
-    paid_coupons.append({
-        'payment_number': next_idx,
-        'payment_date': scheduled_date,
-        'coupon_amount': coupon_amount,
-        'total_paid': total_paid,
-    })
-
-    # Update accrued interest to 0 after payment
-    new_state = {
-        **state,
-        'next_coupon_index': next_idx + 1,
-        'accrued_interest': 0.0,
-        'paid_coupons': paid_coupons,
-    }
-    state_changes = [UnitStateChange(unit=bond_symbol, old_state=state, new_state=new_state)]
-
-    return build_transaction(view, moves, state_changes)
-
-
-# ============================================================================
-# REDEMPTION
-# ============================================================================
-
-def compute_redemption(
-    view: LedgerView,
-    bond_symbol: str,
-    redemption_date: datetime,
-    redemption_price: Optional[float] = None,
-    allow_early: bool = False,
-) -> PendingTransaction:
-    """
-    Process bond redemption (principal repayment) at maturity or early call/put.
-
-    Redemption pays back the face value (or redemption_price if specified) to
-    bondholders and marks the bond as redeemed.
-
-    Args:
-        view: Read-only ledger access
-        bond_symbol: Symbol of the bond unit
-        redemption_date: Date of redemption
-        redemption_price: Optional redemption amount per bond (defaults to face_value)
-        allow_early: If True, allows redemption before maturity (for CALL/PUT events)
-
-    Returns:
-        PendingTransaction containing:
-        - moves: Principal payments from issuer to bondholders
-        - state_updates: Marks bond as redeemed
-        Returns empty PendingTransaction if already redeemed or maturity not reached
-        (unless allow_early is True).
-    """
-    state = view.get_unit_state(bond_symbol)
+    """Process coupons: create DeferredCash entitlements for each bondholder."""
+    state = view.get_unit_state(symbol)
 
     if state.get('redeemed'):
         return empty_pending_transaction(view)
 
-    # Check maturity date unless early redemption is explicitly allowed
-    maturity_date = state['maturity_date']
-    if not allow_early and redemption_date < maturity_date:
-        return empty_pending_transaction(view)  # Not yet matured
+    schedule: List[Coupon] = state.get('coupon_schedule', [])
+    if not schedule:
+        return empty_pending_transaction(view)
 
-    issuer = state['issuer_wallet']
-    currency = state['currency']
-    face_value = state['face_value']
-    redemption_amount = redemption_price if redemption_price is not None else face_value
+    issuer = state.get('issuer_wallet')
+    if not issuer:
+        raise ValueError(f"Bond {symbol} has no issuer_wallet defined")
 
-    positions = view.get_positions(bond_symbol)
+    positions = view.get_positions(symbol)
+    today = timestamp.date()
+    processed = frozenset(state.get('processed_coupons', []))
+
+    all_entitlements: List[CouponEntitlement] = []
+    new_processed = processed
+
+    for coupon in schedule:
+        entitlements, new_processed = compute_coupon_entitlements(
+            coupon, today, positions, new_processed, issuer, symbol
+        )
+        all_entitlements.extend(entitlements)
+
+    if not all_entitlements:
+        return empty_pending_transaction(view)
 
     moves: List[Move] = []
-    total_redeemed = 0.0
+    units_to_create: List[Unit] = []
 
-    for wallet in sorted(positions.keys()):
-        bonds_held = positions[wallet]
-        if bonds_held > 0 and wallet != issuer:
-            payment = bonds_held * redemption_amount
-            moves.append(Move(
-                quantity=payment,
-                unit_symbol=currency,
-                source=issuer,
-                dest=wallet,
-                contract_id=f'redemption_{bond_symbol}_{wallet}',
-            ))
-            total_redeemed += payment
+    for ent in all_entitlements:
+        dc_unit = create_deferred_cash_unit(
+            symbol=ent.symbol,
+            amount=ent.amount,
+            currency=ent.currency,
+            payment_date=ent.payment_date,
+            payer_wallet=ent.payer_wallet,
+            payee_wallet=ent.payee_wallet,
+            reference=f"{symbol}_coupon_{ent.symbol}",
+        )
+        units_to_create.append(dc_unit)
+        moves.append(Move(
+            quantity=Decimal("1"),
+            unit_symbol=ent.symbol,
+            source=SYSTEM_WALLET,
+            dest=ent.payee_wallet,
+            contract_id=f'coupon_entitlement_{ent.symbol}',
+        ))
 
-    new_state = {
-        **state,
-        'redeemed': True,
-        'redemption_date': redemption_date,
-        'redemption_amount': redemption_amount,
-        'total_redeemed': total_redeemed,
-    }
-    state_changes = [UnitStateChange(unit=bond_symbol, old_state=state, new_state=new_state)]
+    new_state = {**state, 'processed_coupons': list(new_processed)}
+    state_changes = [UnitStateChange(unit=symbol, old_state=state, new_state=new_state)]
+
+    return build_transaction(view, moves, state_changes, units_to_create=tuple(units_to_create))
+
+
+def compute_redemption(
+    view: LedgerView,
+    symbol: str,
+    timestamp: datetime,
+) -> PendingTransaction:
+    """Redeem bond at maturity - pay face_value directly (no DeferredCash)."""
+    state = view.get_unit_state(symbol)
+
+    if state.get('redeemed'):
+        return empty_pending_transaction(view)
+
+    maturity = state['maturity_date']
+    if timestamp < maturity:
+        return empty_pending_transaction(view)
+
+    face_value = Decimal(str(state['face_value']))
+    currency = state['currency']
+    issuer = state['issuer_wallet']
+    positions = view.get_positions(symbol)
+
+    moves: List[Move] = []
+    for wallet, quantity in sorted(positions.items()):
+        if wallet == issuer or quantity <= Decimal(str(QUANTITY_EPSILON)):
+            continue
+        moves.append(Move(
+            quantity=quantity * face_value,
+            unit_symbol=currency,
+            source=issuer,
+            dest=wallet,
+            contract_id=f'bond_redemption_{symbol}_{wallet}',
+        ))
+
+    if not moves:
+        return empty_pending_transaction(view)
+
+    new_state = {**state, 'redeemed': True}
+    state_changes = [UnitStateChange(unit=symbol, old_state=state, new_state=new_state)]
 
     return build_transaction(view, moves, state_changes)
 
 
-# ============================================================================
-# TRANSACTION INTERFACE
-# ============================================================================
+# =============================================================================
+# TRADING
+# =============================================================================
 
 def transact(
     view: LedgerView,
     symbol: str,
     seller: str,
     buyer: str,
-    qty: float,
-    price: float,
+    qty: Decimal,
+    clean_price: Decimal,
 ) -> PendingTransaction:
-    """
-    Execute a bond trade between two parties.
+    """Execute a bond trade at dirty price (clean + accrued interest)."""
+    # Ensure parameters are Decimal
+    qty = Decimal(str(qty))
+    clean_price = Decimal(str(clean_price))
 
-    This function implements the unified transact() signature for bond trading.
-    Bonds trade at a "clean price" but settle at a "dirty price" (clean + accrued interest).
-
-    Args:
-        view: Read-only ledger access
-        symbol: Bond symbol to trade
-        seller: Wallet selling the bonds
-        buyer: Wallet buying the bonds
-        qty: Quantity of bonds to transfer (must be positive)
-        price: CLEAN price per bond (must be non-negative and finite)
-
-    Returns:
-        PendingTransaction containing two moves:
-        1. Bond transfer: seller → buyer (qty bonds)
-        2. Cash settlement: buyer → seller (qty × dirty_price in currency)
-
-    Raises:
-        ValueError: If qty <= 0, price < 0, price not finite, seller == buyer,
-                   or bond is already redeemed
-
-    Example:
-        # Trade 10 bonds at clean price of 98.50
-        result = transact(view, "CORP_5Y_2029", "investor_a", "investor_b", 10.0, 98.50)
-        # If accrued interest is 1.25, dirty price = 99.75
-        # Moves: 10 bonds from investor_a → investor_b
-        #        997.50 USD from investor_b → investor_a
-    """
-    # Validation
-    if qty <= 0:
+    if qty <= Decimal("0"):
         raise ValueError(f"qty must be positive, got {qty}")
-
-    if not math.isfinite(price):
-        raise ValueError(f"price must be finite, got {price}")
-
-    if price < 0:
-        raise ValueError(f"price must be non-negative, got {price}")
-
+    if clean_price.is_infinite() or clean_price.is_nan() or clean_price <= Decimal("0"):
+        raise ValueError(f"clean_price must be positive and finite, got {clean_price}")
     if seller == buyer:
-        raise ValueError(f"seller and buyer cannot be the same: {seller}")
+        raise ValueError("seller and buyer must be different")
 
-    # Get bond state
     state = view.get_unit_state(symbol)
+    currency = state['currency']
+    coupon_schedule: List[Coupon] = state.get('coupon_schedule', [])
+    day_count = state.get('day_count_convention', '30/360')
+    issue_date: datetime = state['issue_date']
+    settlement_date = view.current_time.date()
 
-    # Check if bond is redeemed
-    if state.get('redeemed'):
-        raise ValueError(f"Bond {symbol} has already been redeemed and cannot be traded")
+    # Find last and next coupon dates
+    last_coupon_date = issue_date.date()
+    next_coupon_date = None
+    next_coupon_amount = Decimal("0")
 
-    # Get currency from state
-    currency = state.get('currency', 'USD')
+    for coupon in coupon_schedule:
+        cpn_date = coupon.payment_date.date()
+        if cpn_date <= settlement_date:
+            last_coupon_date = cpn_date
+        elif next_coupon_date is None:
+            next_coupon_date = cpn_date
+            next_coupon_amount = Decimal(str(coupon.amount))
 
     # Calculate accrued interest
-    accrued_interest = compute_accrued_interest(view, symbol, view.current_time)
+    if next_coupon_date and next_coupon_amount > Decimal("0"):
+        accrued = compute_accrued_interest(
+            next_coupon_amount, last_coupon_date, next_coupon_date,
+            settlement_date, day_count
+        )
+    else:
+        accrued = Decimal("0")
 
-    # Calculate dirty price
-    dirty_price = price + accrued_interest
+    dirty_price = clean_price + accrued
+    total_payment = qty * dirty_price
 
-    # Calculate total settlement amount
-    total_settlement = qty * dirty_price
+    # Check seller has enough bonds
+    unit = view.get_unit(symbol)
+    seller_balance = view.get_balance(seller, symbol)
+    if seller_balance - qty < unit.min_balance - Decimal(str(QUANTITY_EPSILON)):
+        raise ValueError(f"Insufficient bonds: {seller} has {seller_balance}, needs {qty}")
 
-    # Create moves
     moves = [
-        # Transfer bonds from seller to buyer
-        Move(
-            quantity=qty,
-            unit_symbol=symbol,
-            source=seller,
-            dest=buyer,
-            contract_id=f'bond_trade_{symbol}_bond',
-        ),
-        # Transfer cash from buyer to seller
-        Move(
-            quantity=total_settlement,
-            unit_symbol=currency,
-            source=buyer,
-            dest=seller,
-            contract_id=f'bond_trade_{symbol}_cash',
-        ),
+        Move(qty, symbol, seller, buyer, f'bond_{symbol}_bonds'),
+        Move(total_payment, currency, buyer, seller, f'bond_{symbol}_cash'),
     ]
-
     return build_transaction(view, moves)
 
 
-# ============================================================================
+# =============================================================================
 # SMART CONTRACT
-# ============================================================================
+# =============================================================================
 
 def bond_contract(
     view: LedgerView,
     symbol: str,
     timestamp: datetime,
-    prices: Dict[str, float]
+    prices: Dict[str, Decimal],
 ) -> PendingTransaction:
-    """
-    SmartContract function for automatic bond lifecycle processing.
-
-    This function provides the SmartContract interface required by LifecycleEngine.
-    It automatically processes coupon payments and redemption when due.
-
-    Args:
-        view: Read-only ledger access
-        symbol: Bond symbol to process
-        timestamp: Current time for date checking
-        prices: Price data (unused for bond processing)
-
-    Returns:
-        PendingTransaction with coupon payment or redemption moves if due,
-        or empty result if no events are due.
-    """
+    """SmartContract for LifecycleEngine: process coupons and redemption."""
     state = view.get_unit_state(symbol)
 
-    # Check for redemption first
-    if not state.get('redeemed'):
-        maturity_date = state.get('maturity_date')
-        if maturity_date and timestamp >= maturity_date:
-            # Process redemption at maturity
-            return compute_redemption(view, symbol, timestamp)
+    if state.get('redeemed'):
+        return empty_pending_transaction(view)
 
-    # Check for coupon payment
-    schedule = state.get('coupon_schedule', [])
-    next_idx = state.get('next_coupon_index', 0)
+    # Check maturity first
+    if timestamp >= state['maturity_date']:
+        return compute_redemption(view, symbol, timestamp)
 
-    if next_idx < len(schedule):
-        scheduled_date, _ = schedule[next_idx]
-        if timestamp >= scheduled_date:
-            return compute_coupon_payment(view, symbol, timestamp)
-
-    return empty_pending_transaction(view)
+    # Check coupons
+    return process_coupons(view, symbol, timestamp)

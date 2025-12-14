@@ -16,14 +16,35 @@ No function can mutate ledger state directly.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_EVEN, ROUND_DOWN, ROUND_UP, getcontext, localcontext
 from enum import Enum
 import hashlib
 import json
 import math
 from typing import (
     Dict, List, Set, Optional, Callable, Any, Protocol,
-    Tuple, FrozenSet, runtime_checkable
+    Tuple, FrozenSet, runtime_checkable, Mapping
 )
+
+
+# ============================================================================
+# DECIMAL CONTEXT CONFIGURATION
+# ============================================================================
+#
+# The Ledger system requires deterministic Decimal arithmetic.
+# We configure the global context at module load time to ensure consistency.
+#
+# PRECONDITION: No other code should modify the global Decimal context.
+# If thread-local contexts are needed, use decimal.localcontext().
+#
+# Context parameters:
+#   - prec=50: Precision sufficient for financial calculations
+#   - rounding=ROUND_HALF_EVEN: Banker's rounding (unbiased)
+#   - Emin/Emax: Allow very small/large values for intermediate calculations
+#
+_LEDGER_DECIMAL_CONTEXT = getcontext()
+_LEDGER_DECIMAL_CONTEXT.prec = 50
+_LEDGER_DECIMAL_CONTEXT.rounding = ROUND_HALF_EVEN
 
 
 # ============================================================================
@@ -44,7 +65,7 @@ UNIT_TYPE_DEFERRED_CASH = "DEFERRED_CASH"
 UNIT_TYPE_DELTA_HEDGE_STRATEGY = "DELTA_HEDGE_STRATEGY"
 UNIT_TYPE_BOND = "BOND"
 UNIT_TYPE_FUTURE = "FUTURE"
-# Phase 3 unit types
+# Advanced financial unit types
 UNIT_TYPE_MARGIN_LOAN = "MARGIN_LOAN"
 UNIT_TYPE_STRUCTURED_NOTE = "STRUCTURED_NOTE"
 UNIT_TYPE_PORTFOLIO_SWAP = "PORTFOLIO_SWAP"
@@ -57,18 +78,34 @@ UNIT_TYPE_LOCATE = "LOCATE"
 # QIS (Quantitative Investment Strategy)
 UNIT_TYPE_QIS = "QIS"
 
-# Epsilon for floating point comparisons.
+# Epsilon for Decimal comparisons.
 # Quantities with absolute value below this threshold are treated as zero.
-QUANTITY_EPSILON = 1e-12
+QUANTITY_EPSILON = Decimal("1e-12")
 
 # Default minimum balance for cash units (allows large overdrafts).
-DEFAULT_CASH_MIN_BALANCE = -1_000_000_000.0
+DEFAULT_CASH_MIN_BALANCE = Decimal("-1000000000")
 
 # Default minimum balance for stock units when short selling is enabled.
-DEFAULT_STOCK_SHORT_MIN_BALANCE = -10_000_000.0
+DEFAULT_STOCK_SHORT_MIN_BALANCE = Decimal("-10000000")
 
 # Default decimal precision for stock quantities.
 STOCK_DECIMAL_PLACES = 6
+
+# Per-asset-class precision (Manifesto Principle 7)
+DECIMAL_PRECISION = {
+    'CASH': 2,
+    'STOCK': 6,
+    'CRYPTO': 8,
+    'RATE': 8,
+}
+
+DECIMAL_ROUNDING = {
+    'CASH': ROUND_HALF_EVEN,
+    'STOCK': ROUND_DOWN,
+    'CRYPTO': ROUND_DOWN,
+    'RATE': ROUND_HALF_EVEN,
+    'FEES': ROUND_UP,
+}
 
 
 # ============================================================================
@@ -76,10 +113,10 @@ STOCK_DECIMAL_PLACES = 6
 # ============================================================================
 
 # Mapping from wallet ID to quantity held by that wallet for a specific unit.
-Positions = Dict[str, float]
+Positions = Dict[str, Decimal]
 
 # Mapping from unit symbol to quantity held in a single wallet.
-BalanceMap = Dict[str, float]
+BalanceMap = Dict[str, Decimal]
 
 # Internal state for a unit, containing term sheet data, lifecycle information, etc.
 UnitState = Dict[str, Any]
@@ -109,11 +146,11 @@ class LedgerView(Protocol):
         """Return the current logical time of the ledger."""
         ...
 
-    def get_balance(self, wallet_id: str, unit_symbol: str) -> float:
+    def get_balance(self, wallet_id: str, unit_symbol: str) -> Decimal:
         """
         Return the balance of a specific unit in a wallet.
 
-        Returns 0.0 if the wallet or unit does not exist.
+        Returns Decimal("0") if the wallet or unit does not exist.
         """
         ...
 
@@ -339,7 +376,7 @@ class Move:
     This class is immutable (frozen=True) and memory-optimized (slots=True).
     All fields are validated in __post_init__.
     """
-    quantity: float
+    quantity: Decimal
     unit_symbol: str
     source: str
     dest: str
@@ -355,7 +392,9 @@ class Move:
             raise ValueError("Move unit_symbol cannot be empty")
         if not self.contract_id or not self.contract_id.strip():
             raise ValueError("Move contract_id cannot be empty")
-        if not math.isfinite(self.quantity):
+        if not isinstance(self.quantity, Decimal):
+            raise ValueError(f"Move quantity must be Decimal, got {type(self.quantity)}")
+        if self.quantity.is_infinite() or self.quantity.is_nan():
             raise ValueError(f"Move quantity must be finite, got {self.quantity}")
         if abs(self.quantity) < QUANTITY_EPSILON:
             raise ValueError("Move quantity is effectively zero")
@@ -364,6 +403,63 @@ class Move:
 
     def __repr__(self) -> str:
         return f"Move({self.quantity} {self.unit_symbol}: {self.source}→{self.dest})"
+
+
+def _normalize_decimal(d: Decimal) -> str:
+    """
+    Normalize a Decimal to a canonical string representation.
+
+    Ensures that semantically equal values produce identical strings:
+    - Decimal("1.0") and Decimal("1.00") both become "1"
+    - Trailing zeros are removed
+    - Scientific notation is avoided for reasonable values
+    """
+    # Normalize removes trailing zeros: Decimal("1.00") -> Decimal("1")
+    normalized = d.normalize()
+    # Use fixed-point notation to avoid scientific notation
+    # For very large/small numbers, this produces consistent output
+    if normalized == normalized.to_integral_value():
+        return str(int(normalized))
+    return format(normalized, 'f')
+
+
+def _canonicalize(value: Any) -> str:
+    """
+    Produce a canonical string representation of a value for hashing.
+
+    This function ensures deterministic serialization regardless of:
+    - Dict insertion order
+    - Decimal representation variance
+    - Nested structure depth
+
+    The output is suitable for content-addressable hashing.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, Decimal):
+        return f"D:{_normalize_decimal(value)}"
+    if isinstance(value, (int, float)):
+        return f"N:{value}"
+    if isinstance(value, str):
+        return f"S:{value}"
+    if isinstance(value, datetime):
+        return f"T:{value.isoformat()}"
+    if isinstance(value, dict):
+        # Sort keys for deterministic ordering
+        items = sorted(value.items(), key=lambda kv: str(kv[0]))
+        serialized = ",".join(f"{_canonicalize(k)}:{_canonicalize(v)}" for k, v in items)
+        return f"{{{serialized}}}"
+    if isinstance(value, (list, tuple)):
+        serialized = ",".join(_canonicalize(item) for item in value)
+        return f"[{serialized}]"
+    if isinstance(value, set):
+        # Sort set elements for deterministic ordering
+        serialized = ",".join(_canonicalize(item) for item in sorted(value, key=str))
+        return f"<{serialized}>"
+    # Fallback for other types - use repr but with a warning marker
+    return f"R:{repr(value)}"
 
 
 def _compute_intent_id(
@@ -380,11 +476,17 @@ def _compute_intent_id(
     Same inputs always produce the same intent_id.
 
     Used for idempotency checking: prevents duplicate business transactions.
+
+    IMPORTANT: This function uses canonical serialization to ensure that
+    semantically identical transactions produce identical hashes, regardless of:
+    - Dictionary key ordering
+    - Decimal representation (1.0 vs 1.00)
+    - Object construction history
     """
-    # Canonicalize moves (sort for determinism)
+    # Canonicalize moves (sort for determinism using normalized Decimal)
     sorted_moves = tuple(sorted(
         moves,
-        key=lambda m: (m.quantity, m.unit_symbol, m.source, m.dest, m.contract_id)
+        key=lambda m: (_normalize_decimal(m.quantity), m.unit_symbol, m.source, m.dest, m.contract_id)
     ))
 
     content_parts = []
@@ -400,14 +502,16 @@ def _compute_intent_id(
     for unit in sorted(units_to_create, key=lambda u: u.symbol):
         content_parts.append(f"unit_create:{unit.symbol}|{unit.unit_type}")
 
-    # Add moves
+    # Add moves with normalized Decimal quantities
     for m in sorted_moves:
-        content_parts.append(f"move:{m.quantity}|{m.unit_symbol}|{m.source}|{m.dest}|{m.contract_id}")
+        qty = _normalize_decimal(m.quantity)
+        content_parts.append(f"move:{qty}|{m.unit_symbol}|{m.source}|{m.dest}|{m.contract_id}")
 
-    # Add state changes (sorted by unit)
+    # Add state changes (sorted by unit) with canonical serialization
     for sc in sorted(state_changes, key=lambda s: s.unit):
-        # Use repr for state to get deterministic string representation
-        content_parts.append(f"state_change:{sc.unit}|{repr(sc.old_state)}|{repr(sc.new_state)}")
+        old_canonical = _canonicalize(sc.old_state)
+        new_canonical = _canonicalize(sc.new_state)
+        content_parts.append(f"state_change:{sc.unit}|{old_canonical}|{new_canonical}")
 
     content = "|".join(content_parts)
     return hashlib.sha256(content.encode()).hexdigest()[:16]
@@ -631,7 +735,35 @@ class Transaction:
 TransferRule = Callable[[LedgerView, Move], None]
 
 
-@dataclass
+def _freeze_state(state: Optional[UnitState]) -> Tuple[Tuple[str, Any], ...]:
+    """
+    Convert a mutable state dict to an immutable frozen representation.
+
+    Args:
+        state: State dictionary or None
+
+    Returns:
+        Tuple of (key, value) pairs, sorted by key for determinism
+    """
+    if not state:
+        return ()
+    return tuple(sorted(state.items()))
+
+
+def _thaw_state(frozen_state: Tuple[Tuple[str, Any], ...]) -> UnitState:
+    """
+    Convert a frozen state representation back to a mutable dict.
+
+    Args:
+        frozen_state: Tuple of (key, value) pairs
+
+    Returns:
+        Dictionary
+    """
+    return dict(frozen_state)
+
+
+@dataclass(frozen=True, slots=True)
 class Unit:
     """
     Definition of a tradeable unit (asset type) in the ledger.
@@ -644,26 +776,42 @@ class Unit:
         max_balance: Maximum allowed balance in any wallet.
         decimal_places: Number of decimal places for rounding (None = no rounding).
         transfer_rule: Optional function to validate moves involving this unit.
-        _state: Internal state dictionary for term sheets, lifecycle data, etc.
+        _frozen_state: Internal frozen state representation (tuple of key-value pairs).
     """
     symbol: str
     name: str
     unit_type: str
-    min_balance: float = 0.0
-    max_balance: float = float('inf')
+    min_balance: Decimal = Decimal("0")
+    max_balance: Decimal = Decimal("Infinity")
     decimal_places: Optional[int] = None
     transfer_rule: Optional[TransferRule] = None
-    _state: Optional[UnitState] = None
+    _frozen_state: Tuple[Tuple[str, Any], ...] = field(default_factory=tuple)
 
-    def round(self, value: float) -> float:
+    @property
+    def state(self) -> UnitState:
         """
-        Round a value to this unit's decimal precision.
+        Get the unit's state as a mutable dictionary.
+
+        Returns a new dict each time to prevent accidental mutation.
+        """
+        return _thaw_state(self._frozen_state)
+
+    def round(self, value: Decimal) -> Decimal:
+        """
+        Round a value to this unit's decimal precision using quantize.
 
         Returns the value unchanged if decimal_places is None.
         """
         if self.decimal_places is None:
             return value
-        return round(value, self.decimal_places)
+        # Convert to Decimal if needed
+        if not isinstance(value, Decimal):
+            value = Decimal(str(value))
+        # Create the quantization target (e.g., Decimal("0.01") for 2 decimal places)
+        quantizer = Decimal(10) ** -self.decimal_places
+        # Use ROUND_HALF_EVEN as default, can be overridden based on unit_type
+        rounding_mode = DECIMAL_ROUNDING.get(self.unit_type, ROUND_HALF_EVEN)
+        return value.quantize(quantizer, rounding=rounding_mode)
 
 
 # ============================================================================
@@ -736,7 +884,7 @@ def cash(symbol: str, name: str, decimal_places: int = 2) -> Unit:
         unit_type=UNIT_TYPE_CASH,
         decimal_places=decimal_places,
         min_balance=DEFAULT_CASH_MIN_BALANCE,
-        _state={'issuer': 'central_bank'}
+        _frozen_state=_freeze_state({'issuer': 'central_bank'})
     )
 
 

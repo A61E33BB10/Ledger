@@ -1,5 +1,5 @@
 """
-enhanced_lifecycle.py - Lifecycle Engine
+lifecycle_engine.py - Lifecycle Engine
 
 Combines scheduled events and smart contract polling into a unified lifecycle engine.
 
@@ -14,6 +14,7 @@ The transaction log is the audit trail - no separate event status tracking neede
 
 from __future__ import annotations
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict, List, Optional, Callable
 
 from .core import (
@@ -88,7 +89,7 @@ class LifecycleEngine:
     def step(
         self,
         timestamp: datetime,
-        prices: Dict[str, float],
+        prices: Dict[str, Decimal],
     ) -> List[Transaction]:
         """
         Advance time and execute all pending lifecycle events.
@@ -131,7 +132,7 @@ class LifecycleEngine:
     def _process_scheduled_events(
         self,
         timestamp: datetime,
-        prices: Dict[str, float],
+        prices: Dict[str, Decimal],
     ) -> List[Transaction]:
         """Process all scheduled events due at or before timestamp."""
         executed: List[Transaction] = []
@@ -156,7 +157,7 @@ class LifecycleEngine:
     def _process_smart_contracts(
         self,
         timestamp: datetime,
-        prices: Dict[str, float],
+        prices: Dict[str, Decimal],
     ) -> List[Transaction]:
         """Run smart contract polling for event discovery."""
         executed: List[Transaction] = []
@@ -196,7 +197,7 @@ class LifecycleEngine:
     def run(
         self,
         timestamps: List[datetime],
-        get_prices_at_timestamp: Callable[[datetime], Dict[str, float]],
+        get_prices_at_timestamp: Callable[[datetime], Dict[str, Decimal]],
     ) -> List[Transaction]:
         """
         Run engine through a sequence of timestamps.

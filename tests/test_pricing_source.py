@@ -8,6 +8,7 @@ Tests:
 
 import pytest
 from datetime import datetime, timedelta
+from decimal import Decimal
 from ledger import (
     StaticPricingSource,
     TimeSeriesPricingSource,
@@ -18,52 +19,52 @@ class TestStaticPricingSource:
     """Tests for StaticPricingSource."""
 
     def test_create_static_source(self):
-        source = StaticPricingSource({'AAPL': 175.0, 'TSLA': 250.0})
+        source = StaticPricingSource({'AAPL': Decimal("175.0"), 'TSLA': Decimal("250.0")})
         assert source.base_currency == 'USD'
 
     def test_create_with_custom_base_currency(self):
-        source = StaticPricingSource({'AAPL': 175.0}, base_currency='EUR')
+        source = StaticPricingSource({'AAPL': Decimal("175.0")}, base_currency='EUR')
         assert source.base_currency == 'EUR'
 
     def test_get_price(self):
-        source = StaticPricingSource({'AAPL': 175.0, 'TSLA': 250.0})
-        assert source.get_price('AAPL', datetime.now()) == 175.0
-        assert source.get_price('TSLA', datetime.now()) == 250.0
+        source = StaticPricingSource({'AAPL': Decimal("175.0"), 'TSLA': Decimal("250.0")})
+        assert source.get_price('AAPL', datetime.now()) == Decimal("175.0")
+        assert source.get_price('TSLA', datetime.now()) == Decimal("250.0")
 
     def test_get_price_base_currency(self):
-        source = StaticPricingSource({'AAPL': 175.0})
+        source = StaticPricingSource({'AAPL': Decimal("175.0")})
         # Base currency always prices at 1.0
-        assert source.get_price('USD', datetime.now()) == 1.0
+        assert source.get_price('USD', datetime.now()) == Decimal("1.0")
 
     def test_get_price_unknown_unit(self):
-        source = StaticPricingSource({'AAPL': 175.0})
+        source = StaticPricingSource({'AAPL': Decimal("175.0")})
         assert source.get_price('UNKNOWN', datetime.now()) is None
 
     def test_get_price_ignores_timestamp(self):
-        source = StaticPricingSource({'AAPL': 175.0})
+        source = StaticPricingSource({'AAPL': Decimal("175.0")})
         t1 = datetime(2025, 1, 1)
         t2 = datetime(2025, 12, 31)
         assert source.get_price('AAPL', t1) == source.get_price('AAPL', t2)
 
     def test_get_prices_multiple(self):
-        source = StaticPricingSource({'AAPL': 175.0, 'TSLA': 250.0, 'MSFT': 400.0})
+        source = StaticPricingSource({'AAPL': Decimal("175.0"), 'TSLA': Decimal("250.0"), 'MSFT': Decimal("400.0")})
         prices = source.get_prices({'AAPL', 'TSLA', 'UNKNOWN'}, datetime.now())
-        assert prices == {'AAPL': 175.0, 'TSLA': 250.0}
+        assert prices == {'AAPL': Decimal("175.0"), 'TSLA': Decimal("250.0")}
         assert 'UNKNOWN' not in prices
 
     def test_update_price(self):
-        source = StaticPricingSource({'AAPL': 175.0})
-        source.update_price('AAPL', 180.0)
-        assert source.get_price('AAPL', datetime.now()) == 180.0
+        source = StaticPricingSource({'AAPL': Decimal("175.0")})
+        source.update_price('AAPL', Decimal("180.0"))
+        assert source.get_price('AAPL', datetime.now()) == Decimal("180.0")
 
     def test_update_prices(self):
-        source = StaticPricingSource({'AAPL': 175.0})
-        source.update_prices({'AAPL': 180.0, 'TSLA': 260.0})
-        assert source.get_price('AAPL', datetime.now()) == 180.0
-        assert source.get_price('TSLA', datetime.now()) == 260.0
+        source = StaticPricingSource({'AAPL': Decimal("175.0")})
+        source.update_prices({'AAPL': Decimal("180.0"), 'TSLA': Decimal("260.0")})
+        assert source.get_price('AAPL', datetime.now()) == Decimal("180.0")
+        assert source.get_price('TSLA', datetime.now()) == Decimal("260.0")
 
     def test_repr(self):
-        source = StaticPricingSource({'AAPL': 175.0, 'TSLA': 250.0})
+        source = StaticPricingSource({'AAPL': Decimal("175.0"), 'TSLA': Decimal("250.0")})
         assert 'StaticPricingSource' in repr(source)
 
 
@@ -79,14 +80,14 @@ class TestTimeSeriesPricingSource:
         source = TimeSeriesPricingSource()
         t = datetime(2025, 1, 15)
         source.add_price('AAPL', t, 175.0)
-        assert source.get_price('AAPL', t) == 175.0
+        assert source.get_price('AAPL', t) == Decimal("175.0")
 
     def test_add_prices_multiple(self):
         source = TimeSeriesPricingSource()
         t = datetime(2025, 1, 15)
-        source.add_prices({'AAPL': 175.0, 'TSLA': 250.0}, t)
-        assert source.get_price('AAPL', t) == 175.0
-        assert source.get_price('TSLA', t) == 250.0
+        source.add_prices({'AAPL': Decimal("175.0"), 'TSLA': Decimal("250.0")}, t)
+        assert source.get_price('AAPL', t) == Decimal("175.0")
+        assert source.get_price('TSLA', t) == Decimal("250.0")
 
     def test_get_price_uses_last_known(self):
         source = TimeSeriesPricingSource()
@@ -94,10 +95,10 @@ class TestTimeSeriesPricingSource:
         source.add_price('AAPL', datetime(2025, 1, 17), 180.0)
 
         # Query in between - should get price from 15th
-        assert source.get_price('AAPL', datetime(2025, 1, 16)) == 175.0
+        assert source.get_price('AAPL', datetime(2025, 1, 16)) == Decimal("175.0")
 
         # Query after 17th - should get price from 17th
-        assert source.get_price('AAPL', datetime(2025, 1, 20)) == 180.0
+        assert source.get_price('AAPL', datetime(2025, 1, 20)) == Decimal("180.0")
 
     def test_get_price_before_any_data(self):
         source = TimeSeriesPricingSource()
@@ -108,7 +109,7 @@ class TestTimeSeriesPricingSource:
 
     def test_get_price_base_currency(self):
         source = TimeSeriesPricingSource()
-        assert source.get_price('USD', datetime.now()) == 1.0
+        assert source.get_price('USD', datetime.now()) == Decimal("1.0")
 
     def test_get_price_unknown_unit(self):
         source = TimeSeriesPricingSource()
@@ -130,28 +131,28 @@ class TestTimeSeriesWithPaths:
     def test_create_with_paths(self):
         t0 = datetime(2025, 1, 1)
         aapl_path = [
-            (t0, 100.0),
-            (t0 + timedelta(days=1), 101.0),
-            (t0 + timedelta(days=2), 102.0),
+            (t0, Decimal("100.0")),
+            (t0 + timedelta(days=1), Decimal("101.0")),
+            (t0 + timedelta(days=2), Decimal("102.0")),
         ]
         source = TimeSeriesPricingSource({'AAPL': aapl_path})
-        assert source.get_price('AAPL', t0) == 100.0
-        assert source.get_price('AAPL', t0 + timedelta(days=1)) == 101.0
+        assert source.get_price('AAPL', t0) == Decimal("100.0")
+        assert source.get_price('AAPL', t0 + timedelta(days=1)) == Decimal("101.0")
 
     def test_get_price_uses_last_known(self):
         t0 = datetime(2025, 1, 1)
         aapl_path = [
-            (t0, 100.0),
-            (t0 + timedelta(days=2), 102.0),
+            (t0, Decimal("100.0")),
+            (t0 + timedelta(days=2), Decimal("102.0")),
         ]
         source = TimeSeriesPricingSource({'AAPL': aapl_path})
 
         # Query between points
-        assert source.get_price('AAPL', t0 + timedelta(days=1)) == 100.0
+        assert source.get_price('AAPL', t0 + timedelta(days=1)) == Decimal("100.0")
 
     def test_get_price_before_path_start(self):
         t0 = datetime(2025, 1, 1)
-        aapl_path = [(t0, 100.0)]
+        aapl_path = [(t0, Decimal("100.0"))]
         source = TimeSeriesPricingSource({'AAPL': aapl_path})
 
         # Query before path
@@ -159,7 +160,7 @@ class TestTimeSeriesWithPaths:
 
     def test_get_price_base_currency(self):
         source = TimeSeriesPricingSource({})
-        assert source.get_price('USD', datetime.now()) == 1.0
+        assert source.get_price('USD', datetime.now()) == Decimal("1.0")
 
     def test_get_price_unknown_unit(self):
         source = TimeSeriesPricingSource({})
@@ -168,9 +169,9 @@ class TestTimeSeriesWithPaths:
     def test_get_all_timestamps_single_unit(self):
         t0 = datetime(2025, 1, 1)
         path = [
-            (t0, 100.0),
-            (t0 + timedelta(days=1), 101.0),
-            (t0 + timedelta(days=2), 102.0),
+            (t0, Decimal("100.0")),
+            (t0 + timedelta(days=1), Decimal("101.0")),
+            (t0 + timedelta(days=2), Decimal("102.0")),
         ]
         source = TimeSeriesPricingSource({'AAPL': path})
 
@@ -181,12 +182,12 @@ class TestTimeSeriesWithPaths:
     def test_get_all_timestamps_union(self):
         t0 = datetime(2025, 1, 1)
         aapl_path = [
-            (t0, 100.0),
-            (t0 + timedelta(days=2), 102.0),
+            (t0, Decimal("100.0")),
+            (t0 + timedelta(days=2), Decimal("102.0")),
         ]
         tsla_path = [
-            (t0 + timedelta(days=1), 200.0),
-            (t0 + timedelta(days=2), 205.0),
+            (t0 + timedelta(days=1), Decimal("200.0")),
+            (t0 + timedelta(days=2), Decimal("205.0")),
         ]
         source = TimeSeriesPricingSource({'AAPL': aapl_path, 'TSLA': tsla_path})
 
@@ -205,9 +206,9 @@ class TestTimeSeriesWithPaths:
         t0 = datetime(2025, 1, 1)
         # Provide out-of-order
         path = [
-            (t0 + timedelta(days=2), 102.0),
-            (t0, 100.0),
-            (t0 + timedelta(days=1), 101.0),
+            (t0 + timedelta(days=2), Decimal("102.0")),
+            (t0, Decimal("100.0")),
+            (t0 + timedelta(days=1), Decimal("101.0")),
         ]
         source = TimeSeriesPricingSource({'AAPL': path})
 
@@ -216,7 +217,7 @@ class TestTimeSeriesWithPaths:
 
     def test_repr(self):
         t0 = datetime(2025, 1, 1)
-        path = [(t0, 100.0), (t0 + timedelta(days=1), 101.0)]
+        path = [(t0, Decimal("100.0")), (t0 + timedelta(days=1), Decimal("101.0"))]
         source = TimeSeriesPricingSource({'AAPL': path, 'TSLA': path})
         repr_str = repr(source)
         assert 'TimeSeriesPricingSource' in repr_str
@@ -256,8 +257,8 @@ class TestPricingSourceIntegration:
         for day in range(30):
             t = datetime(2025, 1, 1) + timedelta(days=day)
             source.add_prices({
-                'AAPL': 175.0 + day * 0.5,
-                'TSLA': 250.0 - day * 0.3,
+                'AAPL': Decimal("175.0") + Decimal(day) * Decimal("0.5"),
+                'TSLA': Decimal("250.0") - Decimal(day) * Decimal("0.3"),
             }, t)
 
         # Query at different points in time

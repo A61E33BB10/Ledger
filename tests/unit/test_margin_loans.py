@@ -18,6 +18,7 @@ Tests:
 
 import pytest
 from datetime import datetime, timedelta
+from decimal import Decimal
 from tests.fake_view import FakeView
 from ledger import (
     create_margin_loan,
@@ -53,8 +54,8 @@ class TestCreateMarginLoan:
             name="Margin Loan #1",
             loan_amount=100000.0,
             interest_rate=0.08,
-            collateral={"AAPL": 1000, "MSFT": 500},
-            haircuts={"AAPL": 0.70, "MSFT": 0.75},
+            collateral={"AAPL": Decimal("1000"), "MSFT": Decimal("500")},
+            haircuts={"AAPL": Decimal("0.70"), "MSFT": Decimal("0.75")},
             initial_margin=1.5,
             maintenance_margin=1.25,
             borrower_wallet="alice",
@@ -66,12 +67,12 @@ class TestCreateMarginLoan:
         assert loan.name == "Margin Loan #1"
         assert loan.unit_type == UNIT_TYPE_MARGIN_LOAN
 
-        state = loan._state
+        state = loan.state
         assert state["loan_amount"] == 100000.0
         assert state["interest_rate"] == 0.08
         assert state["accrued_interest"] == 0.0
-        assert state["collateral"] == {"AAPL": 1000, "MSFT": 500}
-        assert state["haircuts"] == {"AAPL": 0.70, "MSFT": 0.75}
+        assert state["collateral"] == {"AAPL": Decimal("1000"), "MSFT": Decimal("500")}
+        assert state["haircuts"] == {"AAPL": Decimal("0.70"), "MSFT": Decimal("0.75")}
         assert state["initial_margin"] == 1.5
         assert state["maintenance_margin"] == 1.25
         assert state["borrower_wallet"] == "alice"
@@ -89,8 +90,8 @@ class TestCreateMarginLoan:
             name="Dated Loan",
             loan_amount=50000.0,
             interest_rate=0.06,
-            collateral={"AAPL": 500},
-            haircuts={"AAPL": 0.80},
+            collateral={"AAPL": Decimal("500")},
+            haircuts={"AAPL": Decimal("0.80")},
             initial_margin=1.5,
             maintenance_margin=1.25,
             borrower_wallet="bob",
@@ -99,8 +100,8 @@ class TestCreateMarginLoan:
             origination_date=orig_date,
         )
 
-        assert loan._state["origination_date"] == orig_date
-        assert loan._state["last_accrual_date"] == orig_date
+        assert loan.state["origination_date"] == orig_date
+        assert loan.state["last_accrual_date"] == orig_date
 
     def test_create_loan_with_treasury_collateral(self):
         """Create margin loan with high-haircut treasury collateral."""
@@ -109,8 +110,8 @@ class TestCreateMarginLoan:
             name="Treasury Backed Loan",
             loan_amount=1000000.0,
             interest_rate=0.04,
-            collateral={"UST_10Y": 100},
-            haircuts={"UST_10Y": 0.95},  # 95% credit for treasuries
+            collateral={"UST_10Y": Decimal("100")},
+            haircuts={"UST_10Y": Decimal("0.95")},  # 95% credit for treasuries
             initial_margin=1.2,
             maintenance_margin=1.1,
             borrower_wallet="fund",
@@ -118,7 +119,7 @@ class TestCreateMarginLoan:
             currency="USD",
         )
 
-        assert loan._state["haircuts"]["UST_10Y"] == 0.95
+        assert loan.state["haircuts"]["UST_10Y"] == Decimal("0.95")
 
     def test_zero_loan_amount_raises(self):
         """Zero loan_amount raises ValueError."""
@@ -128,8 +129,8 @@ class TestCreateMarginLoan:
                 name="Bad Loan",
                 loan_amount=0.0,
                 interest_rate=0.08,
-                collateral={"AAPL": 100},
-                haircuts={"AAPL": 0.70},
+                collateral={"AAPL": Decimal("100")},
+                haircuts={"AAPL": Decimal("0.70")},
                 initial_margin=1.5,
                 maintenance_margin=1.25,
                 borrower_wallet="alice",
@@ -145,8 +146,8 @@ class TestCreateMarginLoan:
                 name="Bad Loan",
                 loan_amount=-10000.0,
                 interest_rate=0.08,
-                collateral={"AAPL": 100},
-                haircuts={"AAPL": 0.70},
+                collateral={"AAPL": Decimal("100")},
+                haircuts={"AAPL": Decimal("0.70")},
                 initial_margin=1.5,
                 maintenance_margin=1.25,
                 borrower_wallet="alice",
@@ -162,8 +163,8 @@ class TestCreateMarginLoan:
                 name="Bad Loan",
                 loan_amount=100000.0,
                 interest_rate=-0.01,
-                collateral={"AAPL": 100},
-                haircuts={"AAPL": 0.70},
+                collateral={"AAPL": Decimal("100")},
+                haircuts={"AAPL": Decimal("0.70")},
                 initial_margin=1.5,
                 maintenance_margin=1.25,
                 borrower_wallet="alice",
@@ -178,15 +179,15 @@ class TestCreateMarginLoan:
             name="Interest-Free Loan",
             loan_amount=100000.0,
             interest_rate=0.0,
-            collateral={"AAPL": 100},
-            haircuts={"AAPL": 0.70},
+            collateral={"AAPL": Decimal("100")},
+            haircuts={"AAPL": Decimal("0.70")},
             initial_margin=1.5,
             maintenance_margin=1.25,
             borrower_wallet="alice",
             lender_wallet="bank",
             currency="USD",
         )
-        assert loan._state["interest_rate"] == 0.0
+        assert loan.state["interest_rate"] == 0.0
 
     def test_negative_initial_margin_raises(self):
         """Negative initial_margin raises ValueError."""
@@ -196,8 +197,8 @@ class TestCreateMarginLoan:
                 name="Bad Loan",
                 loan_amount=100000.0,
                 interest_rate=0.08,
-                collateral={"AAPL": 100},
-                haircuts={"AAPL": 0.70},
+                collateral={"AAPL": Decimal("100")},
+                haircuts={"AAPL": Decimal("0.70")},
                 initial_margin=-1.5,
                 maintenance_margin=1.25,
                 borrower_wallet="alice",
@@ -213,8 +214,8 @@ class TestCreateMarginLoan:
                 name="Bad Loan",
                 loan_amount=100000.0,
                 interest_rate=0.08,
-                collateral={"AAPL": 100},
-                haircuts={"AAPL": 0.70},
+                collateral={"AAPL": Decimal("100")},
+                haircuts={"AAPL": Decimal("0.70")},
                 initial_margin=1.25,
                 maintenance_margin=1.50,  # Higher than initial
                 borrower_wallet="alice",
@@ -230,8 +231,8 @@ class TestCreateMarginLoan:
                 name="Bad Loan",
                 loan_amount=100000.0,
                 interest_rate=0.08,
-                collateral={"AAPL": 100},
-                haircuts={"AAPL": 0.70},
+                collateral={"AAPL": Decimal("100")},
+                haircuts={"AAPL": Decimal("0.70")},
                 initial_margin=1.5,
                 maintenance_margin=1.25,
                 borrower_wallet="",
@@ -247,8 +248,8 @@ class TestCreateMarginLoan:
                 name="Bad Loan",
                 loan_amount=100000.0,
                 interest_rate=0.08,
-                collateral={"AAPL": 100},
-                haircuts={"AAPL": 0.70},
+                collateral={"AAPL": Decimal("100")},
+                haircuts={"AAPL": Decimal("0.70")},
                 initial_margin=1.5,
                 maintenance_margin=1.25,
                 borrower_wallet="alice",
@@ -264,8 +265,8 @@ class TestCreateMarginLoan:
                 name="Bad Loan",
                 loan_amount=100000.0,
                 interest_rate=0.08,
-                collateral={"AAPL": 100},
-                haircuts={"AAPL": 1.5},  # Invalid: > 1
+                collateral={"AAPL": Decimal("100")},
+                haircuts={"AAPL": Decimal("1.5")},  # Invalid: > 1
                 initial_margin=1.5,
                 maintenance_margin=1.25,
                 borrower_wallet="alice",
@@ -281,8 +282,8 @@ class TestCreateMarginLoan:
                 name="Bad Loan",
                 loan_amount=100000.0,
                 interest_rate=0.08,
-                collateral={"AAPL": 100, "MSFT": 50},
-                haircuts={"AAPL": 0.70},  # Missing MSFT haircut
+                collateral={"AAPL": Decimal("100"), "MSFT": Decimal("50")},
+                haircuts={"AAPL": Decimal("0.70")},  # Missing MSFT haircut
                 initial_margin=1.5,
                 maintenance_margin=1.25,
                 borrower_wallet="alice",
@@ -299,7 +300,7 @@ class TestCreateMarginLoan:
                 loan_amount=100000.0,
                 interest_rate=0.08,
                 collateral={"AAPL": -100},
-                haircuts={"AAPL": 0.70},
+                haircuts={"AAPL": Decimal("0.70")},
                 initial_margin=1.5,
                 maintenance_margin=1.25,
                 borrower_wallet="alice",
@@ -318,11 +319,11 @@ class TestComputeCollateralValue:
     def setup_method(self):
         """Setup common test fixtures."""
         self.loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000, 'MSFT': 500},
-            'haircuts': {'AAPL': 0.70, 'MSFT': 0.75},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000"), 'MSFT': Decimal("500")},
+            'haircuts': {'AAPL': Decimal("0.70"), 'MSFT': Decimal("0.75")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -339,7 +340,7 @@ class TestComputeCollateralValue:
             balances={},
             states={'LOAN_001': self.loan_state},
         )
-        prices = {'AAPL': 150.0, 'MSFT': 300.0}
+        prices = {'AAPL': Decimal("150.0"), 'MSFT': Decimal("300.0")}
 
         value = compute_collateral_value(view, 'LOAN_001', prices)
 
@@ -348,29 +349,27 @@ class TestComputeCollateralValue:
         # Total: 217,500
         assert value == pytest.approx(217500.0, abs=0.01)
 
-    def test_collateral_value_missing_price(self):
-        """Missing price treats asset value as zero."""
+    def test_collateral_value_missing_price_raises(self):
+        """Missing price raises ValueError."""
         view = FakeView(
             balances={},
             states={'LOAN_001': self.loan_state},
         )
-        prices = {'AAPL': 150.0}  # Missing MSFT price
+        prices = {'AAPL': Decimal("150.0")}  # Missing MSFT price
 
-        value = compute_collateral_value(view, 'LOAN_001', prices)
-
-        # Only AAPL counted: 1000 * 150 * 0.70 = 105,000
-        assert value == pytest.approx(105000.0, abs=0.01)
+        with pytest.raises(ValueError, match="Missing price for collateral asset 'MSFT'"):
+            compute_collateral_value(view, 'LOAN_001', prices)
 
     def test_collateral_value_zero_haircut(self):
         """Zero haircut means asset not counted."""
         state = dict(self.loan_state)
-        state['haircuts'] = {'AAPL': 0.0, 'MSFT': 0.75}
+        state['haircuts'] = {'AAPL': Decimal("0.0"), 'MSFT': Decimal("0.75")}
 
         view = FakeView(
             balances={},
             states={'LOAN_001': state},
         )
-        prices = {'AAPL': 150.0, 'MSFT': 300.0}
+        prices = {'AAPL': Decimal("150.0"), 'MSFT': Decimal("300.0")}
 
         value = compute_collateral_value(view, 'LOAN_001', prices)
 
@@ -380,14 +379,14 @@ class TestComputeCollateralValue:
     def test_collateral_value_full_haircut(self):
         """Full haircut (1.0) gives full credit."""
         state = dict(self.loan_state)
-        state['collateral'] = {'UST_10Y': 1000}
-        state['haircuts'] = {'UST_10Y': 1.0}
+        state['collateral'] = {'UST_10Y': Decimal("1000")}
+        state['haircuts'] = {'UST_10Y': Decimal("1.0")}
 
         view = FakeView(
             balances={},
             states={'LOAN_001': state},
         )
-        prices = {'UST_10Y': 100.0}
+        prices = {'UST_10Y': Decimal("100.0")}
 
         value = compute_collateral_value(view, 'LOAN_001', prices)
 
@@ -403,10 +402,10 @@ class TestComputeCollateralValue:
             balances={},
             states={'LOAN_001': state},
         )
-        prices = {'AAPL': 150.0}
+        prices = {'AAPL': Decimal("150.0")}
 
         value = compute_collateral_value(view, 'LOAN_001', prices)
-        assert value == 0.0
+        assert value == Decimal("0.0")
 
 
 # ============================================================================
@@ -419,11 +418,11 @@ class TestComputeMarginStatus:
     def setup_method(self):
         """Setup common test fixtures."""
         self.loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -443,14 +442,14 @@ class TestComputeMarginStatus:
         )
         # 1000 * 200 * 0.80 = 160,000 collateral value
         # 160,000 / 100,000 = 1.6 margin ratio >= 1.5 initial
-        prices = {'AAPL': 200.0}
+        prices = {'AAPL': Decimal("200.0")}
 
         status = compute_margin_status(view, 'LOAN_001', prices)
 
         assert status['status'] == MARGIN_STATUS_HEALTHY
-        assert status['collateral_value'] == pytest.approx(160000.0, abs=0.01)
-        assert status['total_debt'] == pytest.approx(100000.0, abs=0.01)
-        assert status['margin_ratio'] == pytest.approx(1.6, abs=0.01)
+        assert float(status['collateral_value']) == pytest.approx(160000.0, abs=0.01)
+        assert float(status['total_debt']) == pytest.approx(100000.0, abs=0.01)
+        assert float(status['margin_ratio']) == pytest.approx(1.6, abs=0.01)
         assert status['shortfall'] == 0.0
         assert status['excess'] > 0
 
@@ -464,12 +463,12 @@ class TestComputeMarginStatus:
         # 1000 * 175 * 0.80 = 140,000 collateral value
         # 140,000 / 100,000 = 1.4 margin ratio
         # 1.25 <= 1.4 < 1.5 -> WARNING
-        prices = {'AAPL': 175.0}
+        prices = {'AAPL': Decimal("175.0")}
 
         status = compute_margin_status(view, 'LOAN_001', prices)
 
         assert status['status'] == MARGIN_STATUS_WARNING
-        assert status['margin_ratio'] == pytest.approx(1.4, abs=0.01)
+        assert float(status['margin_ratio']) == pytest.approx(1.4, abs=0.01)
         assert status['shortfall'] == 0.0
 
     def test_margin_status_breach(self):
@@ -481,14 +480,14 @@ class TestComputeMarginStatus:
         )
         # 1000 * 150 * 0.80 = 120,000 collateral value
         # 120,000 / 100,000 = 1.2 margin ratio < 1.25 maintenance
-        prices = {'AAPL': 150.0}
+        prices = {'AAPL': Decimal("150.0")}
 
         status = compute_margin_status(view, 'LOAN_001', prices)
 
         assert status['status'] == MARGIN_STATUS_BREACH
-        assert status['margin_ratio'] == pytest.approx(1.2, abs=0.01)
+        assert float(status['margin_ratio']) == pytest.approx(1.2, abs=0.01)
         # Shortfall = 1.25 * 100,000 - 120,000 = 5,000
-        assert status['shortfall'] == pytest.approx(5000.0, abs=0.01)
+        assert float(status['shortfall']) == pytest.approx(5000.0, abs=0.01)
 
     def test_margin_status_liquidation(self):
         """Margin status is LIQUIDATION when deadline has passed."""
@@ -500,7 +499,7 @@ class TestComputeMarginStatus:
             states={'LOAN_001': state},
             time=datetime(2024, 1, 2),  # After deadline
         )
-        prices = {'AAPL': 150.0}
+        prices = {'AAPL': Decimal("150.0")}
 
         status = compute_margin_status(view, 'LOAN_001', prices)
 
@@ -519,12 +518,12 @@ class TestComputeMarginStatus:
         # 1000 * 200 * 0.80 = 160,000 collateral value
         # Total debt = 100,000 + 5,000 = 105,000
         # 160,000 / 105,000 = 1.52 margin ratio
-        prices = {'AAPL': 200.0}
+        prices = {'AAPL': Decimal("200.0")}
 
         status = compute_margin_status(view, 'LOAN_001', prices)
 
-        assert status['total_debt'] == pytest.approx(105000.0, abs=0.01)
-        assert status['margin_ratio'] == pytest.approx(160000/105000, abs=0.01)
+        assert float(status['total_debt']) == pytest.approx(105000.0, abs=0.01)
+        assert float(status['margin_ratio']) == pytest.approx(160000/105000, abs=0.01)
 
     def test_margin_status_zero_debt(self):
         """Zero debt gives infinite margin ratio."""
@@ -537,7 +536,7 @@ class TestComputeMarginStatus:
             states={'LOAN_001': state},
             time=datetime(2024, 1, 1),
         )
-        prices = {'AAPL': 200.0}
+        prices = {'AAPL': Decimal("200.0")}
 
         status = compute_margin_status(view, 'LOAN_001', prices)
 
@@ -554,7 +553,7 @@ class TestComputeMarginStatus:
             states={'LOAN_001': state},
             time=datetime(2024, 1, 1),
         )
-        prices = {'AAPL': 200.0}
+        prices = {'AAPL': Decimal("200.0")}
 
         status = compute_margin_status(view, 'LOAN_001', prices)
 
@@ -571,11 +570,11 @@ class TestComputeInterestAccrual:
     def setup_method(self):
         """Setup common test fixtures."""
         self.loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -599,7 +598,7 @@ class TestComputeInterestAccrual:
         # Interest = 100,000 * 0.08 / 365 * 30 = $657.53
         assert len(result.moves) == 0  # No moves, just state update
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
-        assert sc.new_state['accrued_interest'] == pytest.approx(657.53, abs=0.01)
+        assert float(sc.new_state['accrued_interest']) == pytest.approx(657.53, abs=0.01)
 
     def test_interest_accrual_one_year(self):
         """Accrue full year of interest at 8%."""
@@ -613,7 +612,7 @@ class TestComputeInterestAccrual:
 
         # Interest = 100,000 * 0.08 = 8,000
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
-        assert sc.new_state['accrued_interest'] == pytest.approx(8000.0, abs=0.01)
+        assert float(sc.new_state['accrued_interest']) == pytest.approx(8000.0, abs=0.01)
 
     def test_interest_accrual_cumulative(self):
         """Interest accrues cumulatively."""
@@ -631,7 +630,7 @@ class TestComputeInterestAccrual:
         # New interest = 100,000 * 0.08 / 365 * 30 = $657.53
         # Total = 500 + 657.53 = 1157.53
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
-        assert sc.new_state['accrued_interest'] == pytest.approx(1157.53, abs=0.01)
+        assert float(sc.new_state['accrued_interest']) == pytest.approx(1157.53, abs=0.01)
 
     def test_interest_accrual_zero_days(self):
         """Zero days accrues no interest."""
@@ -698,11 +697,11 @@ class TestComputeMarginCall:
     def setup_method(self):
         """Setup common test fixtures."""
         self.loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -722,13 +721,13 @@ class TestComputeMarginCall:
             time=datetime(2024, 1, 15),
         )
         # 1000 * 150 * 0.80 = 120,000 < 1.25 * 100,000 = 125,000
-        prices = {'AAPL': 150.0}
+        prices = {'AAPL': Decimal("150.0")}
 
         result = compute_margin_call(view, 'LOAN_001', prices)
 
         assert len(result.moves) == 0
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
-        assert sc.new_state['margin_call_amount'] == pytest.approx(5000.0, abs=0.01)
+        assert float(sc.new_state['margin_call_amount']) == pytest.approx(5000.0, abs=0.01)
         assert sc.new_state['margin_call_deadline'] == datetime(2024, 1, 18)  # +3 days
 
     def test_no_margin_call_when_healthy(self):
@@ -739,7 +738,7 @@ class TestComputeMarginCall:
             time=datetime(2024, 1, 15),
         )
         # 1000 * 200 * 0.80 = 160,000 >= 1.25 * 100,000
-        prices = {'AAPL': 200.0}
+        prices = {'AAPL': Decimal("200.0")}
 
         result = compute_margin_call(view, 'LOAN_001', prices)
 
@@ -756,7 +755,7 @@ class TestComputeMarginCall:
             states={'LOAN_001': state},
             time=datetime(2024, 1, 16),
         )
-        prices = {'AAPL': 140.0}  # Even worse
+        prices = {'AAPL': Decimal("140.0")}  # Even worse
 
         result = compute_margin_call(view, 'LOAN_001', prices)
 
@@ -772,7 +771,7 @@ class TestComputeMarginCall:
             states={'LOAN_001': state},
             time=datetime(2024, 1, 15),
         )
-        prices = {'AAPL': 100.0}
+        prices = {'AAPL': Decimal("100.0")}
 
         result = compute_margin_call(view, 'LOAN_001', prices)
 
@@ -789,11 +788,11 @@ class TestComputeMarginCure:
     def setup_method(self):
         """Setup common test fixtures."""
         self.loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 1000.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("1000.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -810,8 +809,8 @@ class TestComputeMarginCure:
         """Cure payment applies to interest before principal."""
         view = FakeView(
             balances={
-                'alice': {'USD': 50000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("50000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 1, 16),
@@ -823,13 +822,13 @@ class TestComputeMarginCure:
         move = result.moves[0]
         assert move.source == 'alice'
         assert move.dest == 'bank'
-        assert move.quantity == 1500.0
+        assert move.quantity == Decimal("1500.0")
         assert move.unit_symbol == 'USD'
 
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
         # 1000 interest paid first, then 500 to principal
         assert sc.new_state['accrued_interest'] == 0.0
-        assert sc.new_state['loan_amount'] == pytest.approx(99500.0, abs=0.01)
+        assert float(sc.new_state['loan_amount']) == pytest.approx(99500.0, abs=0.01)
         assert sc.new_state['total_interest_paid'] == 1000.0
         assert sc.new_state['total_principal_paid'] == 500.0
 
@@ -841,8 +840,8 @@ class TestComputeMarginCure:
 
         view = FakeView(
             balances={
-                'alice': {'USD': 50000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("50000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': state},
             time=datetime(2024, 1, 16),
@@ -851,8 +850,8 @@ class TestComputeMarginCure:
         result = compute_margin_cure(view, 'LOAN_001', 1100.0)
 
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
-        assert sc.new_state['loan_amount'] == pytest.approx(0.0, abs=0.01)
-        assert sc.new_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+        assert float(sc.new_state['loan_amount']) == pytest.approx(0.0, abs=0.01)
+        assert float(sc.new_state['accrued_interest']) == pytest.approx(0.0, abs=0.01)
         assert sc.new_state['margin_call_amount'] == 0.0
         assert sc.new_state['margin_call_deadline'] is None
 
@@ -903,11 +902,11 @@ class TestComputeLiquidation:
     def setup_method(self):
         """Setup common test fixtures."""
         self.loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 2000.0,  # Total debt = 102,000
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("2000.0"),  # Total debt = 102,000
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -922,13 +921,13 @@ class TestComputeLiquidation:
         """Liquidation with proceeds covering full debt."""
         view = FakeView(
             balances={
-                'alice': {'USD': 10000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("10000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 1, 16),  # After deadline
         )
-        prices = {'AAPL': 120.0}
+        prices = {'AAPL': Decimal("120.0")}
         # Sale proceeds = $110,000 (sold 1000 shares at $110)
         sale_proceeds = 110000.0
 
@@ -959,13 +958,13 @@ class TestComputeLiquidation:
         """Liquidation with proceeds less than debt (bad debt)."""
         view = FakeView(
             balances={
-                'alice': {'USD': 10000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("10000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 1, 16),
         )
-        prices = {'AAPL': 80.0}
+        prices = {'AAPL': Decimal("80.0")}
         # Sale proceeds = $80,000 (sold at distressed price)
         sale_proceeds = 80000.0
 
@@ -983,7 +982,7 @@ class TestComputeLiquidation:
         # Remaining debt = 102,000 - 80,000 = 22,000 (tracked as deficiency)
         assert sc.new_state['accrued_interest'] == 0.0
         assert sc.new_state['loan_amount'] == 0.0
-        assert sc.new_state['liquidation_deficiency'] == pytest.approx(22000.0, abs=0.01)
+        assert float(sc.new_state['liquidation_deficiency']) == pytest.approx(22000.0, abs=0.01)
 
     def test_liquidation_already_liquidated_raises(self):
         """Cannot liquidate already liquidated loan."""
@@ -995,7 +994,7 @@ class TestComputeLiquidation:
             states={'LOAN_001': state},
             time=datetime(2024, 1, 16),
         )
-        prices = {'AAPL': 100.0}
+        prices = {'AAPL': Decimal("100.0")}
 
         with pytest.raises(ValueError, match="already liquidated"):
             compute_margin_loan_liquidation(view, 'LOAN_001', prices, 80000.0)
@@ -1007,7 +1006,7 @@ class TestComputeLiquidation:
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 1, 16),
         )
-        prices = {'AAPL': 100.0}
+        prices = {'AAPL': Decimal("100.0")}
 
         with pytest.raises(ValueError, match="cannot be negative"):
             compute_margin_loan_liquidation(view, 'LOAN_001', prices, -5000.0)
@@ -1017,11 +1016,11 @@ class TestComputeLiquidation:
         state = dict(self.loan_state)
         state['margin_call_deadline'] = datetime(2024, 1, 20)
         view = FakeView(
-            balances={'alice': {'USD': 10000}, 'bank': {'USD': 100000}},
+            balances={'alice': {'USD': Decimal("10000")}, 'bank': {'USD': Decimal("100000")}},
             states={'LOAN_001': state},
             time=datetime(2024, 1, 16),
         )
-        prices = {'AAPL': 120.0}
+        prices = {'AAPL': Decimal("120.0")}
         status = compute_margin_status(view, 'LOAN_001', prices)
         assert status['status'] == MARGIN_STATUS_BREACH
         with pytest.raises(ValueError, match="Cannot liquidate.*BREACH"):
@@ -1032,11 +1031,11 @@ class TestComputeLiquidation:
         state = dict(self.loan_state)
         state['margin_call_deadline'] = datetime(2024, 1, 15)
         view = FakeView(
-            balances={'alice': {'USD': 10000}, 'bank': {'USD': 100000}},
+            balances={'alice': {'USD': Decimal("10000")}, 'bank': {'USD': Decimal("100000")}},
             states={'LOAN_001': state},
             time=datetime(2024, 1, 16),
         )
-        prices = {'AAPL': 120.0}
+        prices = {'AAPL': Decimal("120.0")}
         status = compute_margin_status(view, 'LOAN_001', prices)
         assert status['status'] == MARGIN_STATUS_LIQUIDATION
         result = compute_margin_loan_liquidation(view, 'LOAN_001', prices, 95000.0)
@@ -1046,11 +1045,11 @@ class TestComputeLiquidation:
     def test_margin_call_3day_deadline_liquidate_after_1day_fails(self):
         """CRITICAL: Issue margin call with 3-day deadline, try to liquidate after 1 day - should fail."""
         loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1062,16 +1061,16 @@ class TestComputeLiquidation:
             'liquidated': False,
         }
         view_day0 = FakeView(
-            balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
+            balances={'alice': {'USD': Decimal("50000")}, 'bank': {'USD': Decimal("0")}},
             states={'LOAN_001': loan_state},
             time=datetime(2024, 1, 15),
         )
-        prices = {'AAPL': 150.0}
+        prices = {'AAPL': Decimal("150.0")}
         result_call = compute_margin_call(view_day0, 'LOAN_001', prices)
         state_after_call = next(d for d in result_call.state_changes if d.unit == 'LOAN_001').new_state
         assert state_after_call['margin_call_deadline'] == datetime(2024, 1, 18)
         view_day1 = FakeView(
-            balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
+            balances={'alice': {'USD': Decimal("50000")}, 'bank': {'USD': Decimal("0")}},
             states={'LOAN_001': state_after_call},
             time=datetime(2024, 1, 16),
         )
@@ -1083,11 +1082,11 @@ class TestComputeLiquidation:
     def test_margin_call_3day_deadline_liquidate_after_4days_succeeds(self):
         """CRITICAL: Issue margin call with 3-day deadline, try to liquidate after 4 days - should succeed."""
         loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1099,16 +1098,16 @@ class TestComputeLiquidation:
             'liquidated': False,
         }
         view_day0 = FakeView(
-            balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
+            balances={'alice': {'USD': Decimal("50000")}, 'bank': {'USD': Decimal("0")}},
             states={'LOAN_001': loan_state},
             time=datetime(2024, 1, 15, 10, 0),
         )
-        prices = {'AAPL': 150.0}
+        prices = {'AAPL': Decimal("150.0")}
         result_call = compute_margin_call(view_day0, 'LOAN_001', prices)
         state_after_call = next(d for d in result_call.state_changes if d.unit == 'LOAN_001').new_state
         assert state_after_call['margin_call_deadline'] == datetime(2024, 1, 18, 10, 0)
         view_day4 = FakeView(
-            balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
+            balances={'alice': {'USD': Decimal("50000")}, 'bank': {'USD': Decimal("0")}},
             states={'LOAN_001': state_after_call},
             time=datetime(2024, 1, 19, 10, 0),
         )
@@ -1131,11 +1130,11 @@ class TestComputeRepayment:
     def setup_method(self):
         """Setup common test fixtures."""
         self.loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 1000.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("1000.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1152,8 +1151,8 @@ class TestComputeRepayment:
         """Full loan repayment clears all debt."""
         view = FakeView(
             balances={
-                'alice': {'USD': 150000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("150000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 6, 1),
@@ -1165,18 +1164,18 @@ class TestComputeRepayment:
         move = result.moves[0]
         assert move.source == 'alice'
         assert move.dest == 'bank'
-        assert move.quantity == 101000.0
+        assert move.quantity == Decimal("101000.0")
 
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
-        assert sc.new_state['loan_amount'] == pytest.approx(0.0, abs=0.01)
-        assert sc.new_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+        assert float(sc.new_state['loan_amount']) == pytest.approx(0.0, abs=0.01)
+        assert float(sc.new_state['accrued_interest']) == pytest.approx(0.0, abs=0.01)
 
     def test_partial_repayment(self):
         """Partial repayment reduces debt."""
         view = FakeView(
             balances={
-                'alice': {'USD': 50000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("50000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 6, 1),
@@ -1185,19 +1184,19 @@ class TestComputeRepayment:
         result = compute_repayment(view, 'LOAN_001', 20000.0)
 
         move = result.moves[0]
-        assert move.quantity == 20000.0
+        assert move.quantity == Decimal("20000.0")
 
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
         # 1000 interest first, then 19000 principal
         assert sc.new_state['accrued_interest'] == 0.0
-        assert sc.new_state['loan_amount'] == pytest.approx(81000.0, abs=0.01)
+        assert float(sc.new_state['loan_amount']) == pytest.approx(81000.0, abs=0.01)
 
     def test_repayment_interest_only(self):
         """Repayment less than accrued interest pays only interest."""
         view = FakeView(
             balances={
-                'alice': {'USD': 50000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("50000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 6, 1),
@@ -1206,7 +1205,7 @@ class TestComputeRepayment:
         result = compute_repayment(view, 'LOAN_001', 500.0)
 
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
-        assert sc.new_state['accrued_interest'] == pytest.approx(500.0, abs=0.01)
+        assert float(sc.new_state['accrued_interest']) == pytest.approx(500.0, abs=0.01)
         assert sc.new_state['loan_amount'] == 100000.0  # Unchanged
 
     def test_repayment_zero_raises(self):
@@ -1256,11 +1255,11 @@ class TestComputeAddCollateral:
     def setup_method(self):
         """Setup common test fixtures."""
         self.loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80, 'MSFT': 0.75},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80"), 'MSFT': Decimal("0.75")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1345,11 +1344,11 @@ class TestTransact:
     def setup_method(self):
         """Setup common test fixtures."""
         self.loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1384,7 +1383,7 @@ class TestTransact:
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 1, 15),
         )
-        prices = {'AAPL': 150.0}  # Below maintenance
+        prices = {'AAPL': Decimal("150.0")}  # Below maintenance
 
         result = margin_loan_transact(view, 'LOAN_001', 'MARGIN_CALL',
                                        datetime(2024, 1, 15), prices=prices)
@@ -1396,8 +1395,8 @@ class TestTransact:
         """transact handles REPAYMENT event."""
         view = FakeView(
             balances={
-                'alice': {'USD': 150000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("150000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 6, 1),
@@ -1418,26 +1417,24 @@ class TestTransact:
         )
 
         result = margin_loan_transact(view, 'LOAN_001', 'ADD_COLLATERAL',
-                                       datetime(2024, 1, 15), asset='AAPL', quantity=500)
+                                       datetime(2024, 1, 15), asset='AAPL', quantity=Decimal("500"))
 
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
         assert sc.new_state['collateral']['AAPL'] == 1500
 
-    def test_transact_unknown_event_returns_empty(self):
-        """transact returns empty for unknown event type."""
+    def test_transact_unknown_event_raises(self):
+        """transact raises ValueError for unknown event type."""
         view = FakeView(
             balances={},
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 1, 15),
         )
 
-        result = margin_loan_transact(view, 'LOAN_001', 'UNKNOWN',
-                                       datetime(2024, 1, 15))
+        with pytest.raises(ValueError, match="Unknown event type 'UNKNOWN'"):
+            margin_loan_transact(view, 'LOAN_001', 'UNKNOWN', datetime(2024, 1, 15))
 
-        assert result.is_empty()
-
-    def test_transact_missing_required_params_returns_empty(self):
-        """transact returns empty when required params missing."""
+    def test_transact_missing_required_params_raises(self):
+        """transact raises ValueError when required params missing."""
         view = FakeView(
             balances={},
             states={'LOAN_001': self.loan_state},
@@ -1445,9 +1442,8 @@ class TestTransact:
         )
 
         # INTEREST_ACCRUAL without days
-        result = margin_loan_transact(view, 'LOAN_001', 'INTEREST_ACCRUAL',
-                                       datetime(2024, 1, 15))
-        assert result.is_empty()
+        with pytest.raises(ValueError, match="Missing 'days' parameter"):
+            margin_loan_transact(view, 'LOAN_001', 'INTEREST_ACCRUAL', datetime(2024, 1, 15))
 
 
 # ============================================================================
@@ -1460,11 +1456,11 @@ class TestMarginLoanFullLifecycle:
     def test_healthy_loan_to_repayment(self):
         """Complete lifecycle: origination -> interest -> repayment."""
         loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1481,27 +1477,27 @@ class TestMarginLoanFullLifecycle:
 
         # Step 1: Check initial status (healthy)
         view1 = FakeView(
-            balances={'alice': {'USD': 200000}, 'bank': {'USD': 0}},
+            balances={'alice': {'USD': Decimal("200000")}, 'bank': {'USD': Decimal("0")}},
             states={'LOAN_001': loan_state},
             time=datetime(2024, 1, 1),
         )
-        prices = {'AAPL': 200.0}  # Value = 1000 * 200 * 0.8 = 160,000
+        prices = {'AAPL': Decimal("200.0")}  # Value = 1000 * 200 * 0.8 = 160,000
 
         status1 = compute_margin_status(view1, 'LOAN_001', prices)
         assert status1['status'] == MARGIN_STATUS_HEALTHY
-        assert status1['margin_ratio'] == pytest.approx(1.6, abs=0.01)
+        assert float(status1['margin_ratio']) == pytest.approx(1.6, abs=0.01)
 
         # Step 2: Accrue 30 days of interest (updates last_accrual_date to Jan 1)
         result2 = compute_interest_accrual(view1, 'LOAN_001', 30)
         state_after_interest = next(d for d in result2.state_changes if d.unit == 'LOAN_001').new_state
         # Interest = 100,000 * 0.08 / 365 * 30 = $657.53
         expected_interest = 100000 * 0.08 / 365 * 30
-        assert state_after_interest['accrued_interest'] == pytest.approx(expected_interest, abs=0.01)
+        assert float(state_after_interest['accrued_interest']) == pytest.approx(expected_interest, abs=0.01)
 
         # Step 3: Full repayment on same day (no pending interest)
         # Use the same time to avoid pending interest accumulation
         view3 = FakeView(
-            balances={'alice': {'USD': 200000}, 'bank': {'USD': 0}},
+            balances={'alice': {'USD': Decimal("200000")}, 'bank': {'USD': Decimal("0")}},
             states={'LOAN_001': state_after_interest},
             time=datetime(2024, 1, 1),  # Same day as accrual
         )
@@ -1510,20 +1506,20 @@ class TestMarginLoanFullLifecycle:
         result3 = compute_repayment(view3, 'LOAN_001', total_due)
 
         assert len(result3.moves) == 1
-        assert result3.moves[0].quantity == pytest.approx(total_due, abs=0.01)
+        assert float(result3.moves[0].quantity) == pytest.approx(total_due, abs=0.01)
 
         final_state = next(d for d in result3.state_changes if d.unit == 'LOAN_001').new_state
-        assert final_state['loan_amount'] == pytest.approx(0.0, abs=0.01)
-        assert final_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+        assert float(final_state['loan_amount']) == pytest.approx(0.0, abs=0.01)
+        assert float(final_state['accrued_interest']) == pytest.approx(0.0, abs=0.01)
 
     def test_margin_call_then_cure(self):
         """Lifecycle: price drop -> margin call -> cure."""
         loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1539,25 +1535,25 @@ class TestMarginLoanFullLifecycle:
 
         # Step 1: Price drops, margin call issued
         view1 = FakeView(
-            balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
+            balances={'alice': {'USD': Decimal("50000")}, 'bank': {'USD': Decimal("0")}},
             states={'LOAN_001': loan_state},
             time=datetime(2024, 1, 15),
         )
-        prices = {'AAPL': 150.0}  # Value = 1000 * 150 * 0.8 = 120,000
+        prices = {'AAPL': Decimal("150.0")}  # Value = 1000 * 150 * 0.8 = 120,000
 
         status1 = compute_margin_status(view1, 'LOAN_001', prices)
         assert status1['status'] == MARGIN_STATUS_BREACH
         # Shortfall = 1.25 * 100,000 - 120,000 = 5,000
-        assert status1['shortfall'] == pytest.approx(5000.0, abs=0.01)
+        assert float(status1['shortfall']) == pytest.approx(5000.0, abs=0.01)
 
         result1 = compute_margin_call(view1, 'LOAN_001', prices)
         state_after_call = next(d for d in result1.state_changes if d.unit == 'LOAN_001').new_state
-        assert state_after_call['margin_call_amount'] == pytest.approx(5000.0, abs=0.01)
+        assert float(state_after_call['margin_call_amount']) == pytest.approx(5000.0, abs=0.01)
         assert state_after_call['margin_call_deadline'] == datetime(2024, 1, 18)
 
         # Step 2: Borrower cures with cash payment
         view2 = FakeView(
-            balances={'alice': {'USD': 50000}, 'bank': {'USD': 0}},
+            balances={'alice': {'USD': Decimal("50000")}, 'bank': {'USD': Decimal("0")}},
             states={'LOAN_001': state_after_call},
             time=datetime(2024, 1, 16),
         )
@@ -1569,30 +1565,30 @@ class TestMarginLoanFullLifecycle:
         assert result2.moves[0].quantity == 10000.0
 
         state_after_cure = next(d for d in result2.state_changes if d.unit == 'LOAN_001').new_state
-        assert state_after_cure['loan_amount'] == pytest.approx(90000.0, abs=0.01)
+        assert float(state_after_cure['loan_amount']) == pytest.approx(90000.0, abs=0.01)
 
         # Verify margin is now healthy
         # New debt = 90,000, collateral value = 120,000
         # Ratio = 120,000 / 90,000 = 1.33 > 1.25
         view3 = FakeView(
-            balances={'alice': {'USD': 40000}, 'bank': {'USD': 10000}},
+            balances={'alice': {'USD': Decimal("40000")}, 'bank': {'USD': Decimal("10000")}},
             states={'LOAN_001': state_after_cure},
             time=datetime(2024, 1, 16),
         )
 
         status3 = compute_margin_status(view3, 'LOAN_001', prices)
-        assert status3['margin_ratio'] == pytest.approx(120000/90000, abs=0.01)
+        assert float(status3['margin_ratio']) == pytest.approx(120000/90000, abs=0.01)
         # Should be above maintenance but below initial
         assert status3['status'] == MARGIN_STATUS_WARNING
 
     def test_margin_call_then_liquidation(self):
         """Lifecycle: margin call -> deadline passes -> liquidation."""
         loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 2000.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("2000.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1604,11 +1600,11 @@ class TestMarginLoanFullLifecycle:
         }
 
         view = FakeView(
-            balances={'alice': {'USD': 10000}, 'bank': {'USD': 0}},
+            balances={'alice': {'USD': Decimal("10000")}, 'bank': {'USD': Decimal("0")}},
             states={'LOAN_001': loan_state},
             time=datetime(2024, 1, 16),  # After deadline
         )
-        prices = {'AAPL': 100.0}  # Low price
+        prices = {'AAPL': Decimal("100.0")}  # Low price
 
         # Verify liquidation status
         status = compute_margin_status(view, 'LOAN_001', prices)
@@ -1631,7 +1627,7 @@ class TestMarginLoanFullLifecycle:
         # Remaining debt = 102,000 - 95,000 = 7,000 (tracked as deficiency)
         assert sc.new_state['loan_amount'] == 0.0
         assert sc.new_state['accrued_interest'] == 0.0
-        assert sc.new_state['liquidation_deficiency'] == pytest.approx(7000.0, abs=0.01)
+        assert float(sc.new_state['liquidation_deficiency']) == pytest.approx(7000.0, abs=0.01)
 
 
 # ============================================================================
@@ -1644,11 +1640,11 @@ class TestConservationLaws:
     def test_repayment_conserves_cash(self):
         """Repayment is a pure transfer (conserves total cash)."""
         loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 1000.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("1000.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1662,7 +1658,7 @@ class TestConservationLaws:
         }
 
         view = FakeView(
-            balances={'alice': {'USD': 200000}, 'bank': {'USD': 0}},
+            balances={'alice': {'USD': Decimal("200000")}, 'bank': {'USD': Decimal("0")}},
             states={'LOAN_001': loan_state},
             time=datetime(2024, 6, 1),
         )
@@ -1678,11 +1674,11 @@ class TestConservationLaws:
     def test_liquidation_full_recovery_conserves(self):
         """Full recovery liquidation conserves cash (surplus returned)."""
         loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 2000.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("2000.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1694,11 +1690,11 @@ class TestConservationLaws:
         }
 
         view = FakeView(
-            balances={'alice': {'USD': 10000}, 'bank': {'USD': 200000}},
+            balances={'alice': {'USD': Decimal("10000")}, 'bank': {'USD': Decimal("200000")}},
             states={'LOAN_001': loan_state},
             time=datetime(2024, 1, 16),
         )
-        prices = {'AAPL': 100.0}
+        prices = {'AAPL': Decimal("100.0")}
 
         # Proceeds = 120,000, debt = 102,000, surplus = 18,000
         result = compute_margin_loan_liquidation(view, 'LOAN_001', prices, 120000.0)
@@ -1735,15 +1731,15 @@ class TestEdgeCases:
             name="Tiny Loan",
             loan_amount=0.01,
             interest_rate=0.08,
-            collateral={"AAPL": 1},
-            haircuts={"AAPL": 0.80},
+            collateral={"AAPL": Decimal("1")},
+            haircuts={"AAPL": Decimal("0.80")},
             initial_margin=1.5,
             maintenance_margin=1.25,
             borrower_wallet="alice",
             lender_wallet="bank",
             currency="USD",
         )
-        assert loan._state["loan_amount"] == 0.01
+        assert loan.state["loan_amount"] == 0.01
 
     def test_very_high_interest_rate(self):
         """High interest rate (payday loan style) works correctly."""
@@ -1752,15 +1748,15 @@ class TestEdgeCases:
             name="High Interest Loan",
             loan_amount=1000.0,
             interest_rate=3.0,  # 300% APR
-            collateral={"AAPL": 100},
-            haircuts={"AAPL": 0.80},
+            collateral={"AAPL": Decimal("100")},
+            haircuts={"AAPL": Decimal("0.80")},
             initial_margin=1.5,
             maintenance_margin=1.25,
             borrower_wallet="alice",
             lender_wallet="bank",
             currency="USD",
         )
-        assert loan._state["interest_rate"] == 3.0
+        assert loan.state["interest_rate"] == 3.0
 
     def test_many_collateral_assets(self):
         """Loan with many different collateral assets."""
@@ -1781,16 +1777,16 @@ class TestEdgeCases:
             currency="USD",
         )
 
-        assert len(loan._state["collateral"]) == 10
+        assert len(loan.state["collateral"]) == 10
 
     def test_zero_collateral_value(self):
         """Handle zero collateral value gracefully."""
         loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 0},  # Zero quantity
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("0")},  # Zero quantity
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1806,22 +1802,22 @@ class TestEdgeCases:
             states={'LOAN_001': loan_state},
             time=datetime(2024, 1, 1),
         )
-        prices = {'AAPL': 200.0}
+        prices = {'AAPL': Decimal("200.0")}
 
         status = compute_margin_status(view, 'LOAN_001', prices)
 
         assert status['collateral_value'] == 0.0
-        assert status['margin_ratio'] == pytest.approx(0.0, abs=0.01)
+        assert float(status['margin_ratio']) == pytest.approx(0.0, abs=0.01)
         assert status['status'] == MARGIN_STATUS_BREACH
 
     def test_fractional_quantities(self):
         """Handle fractional collateral quantities."""
         loan_state = {
-            'loan_amount': 1000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'BTC': 0.5},  # Half a bitcoin
-            'haircuts': {'BTC': 0.60},
+            'loan_amount': Decimal("1000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'BTC': Decimal("0.5")},  # Half a bitcoin
+            'haircuts': {'BTC': Decimal("0.60")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1837,7 +1833,7 @@ class TestEdgeCases:
             states={'LOAN_001': loan_state},
             time=datetime(2024, 1, 1),
         )
-        prices = {'BTC': 50000.0}
+        prices = {'BTC': Decimal("50000.0")}
 
         value = compute_collateral_value(view, 'LOAN_001', prices)
 
@@ -1855,11 +1851,11 @@ class TestPendingInterest:
     def setup_method(self):
         """Setup common test fixtures."""
         self.loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -1885,13 +1881,13 @@ class TestPendingInterest:
 
         view = FakeView(
             balances={
-                'alice': {'USD': 10000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("10000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': state},
             time=datetime(2024, 1, 6),  # 5 days after last accrual
         )
-        prices = {'AAPL': 100.0}
+        prices = {'AAPL': Decimal("100.0")}
 
         # Expected pending interest
         expected_pending = 100000 * 0.08 / 365 * 5  # ~109.59
@@ -1903,20 +1899,20 @@ class TestPendingInterest:
 
         # Debt payment should include pending interest
         debt_move = result.moves[0]
-        assert debt_move.quantity == pytest.approx(expected_total_debt, abs=0.01)
+        assert float(debt_move.quantity) == pytest.approx(expected_total_debt, abs=0.01)
 
         # Surplus should be proceeds minus total debt (including pending)
         surplus_move = result.moves[1]
         expected_surplus = sale_proceeds - expected_total_debt
-        assert surplus_move.quantity == pytest.approx(expected_surplus, abs=0.01)
+        assert float(surplus_move.quantity) == pytest.approx(expected_surplus, abs=0.01)
 
     def test_cure_includes_pending_interest(self):
         """Cure amount validation includes pending interest in total debt."""
         # 5 days pass without accrual
         view = FakeView(
             balances={
-                'alice': {'USD': 50000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("50000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 1, 6),  # 5 days after last accrual
@@ -1931,12 +1927,12 @@ class TestPendingInterest:
 
         # Should generate one move for the cure amount
         assert len(result.moves) == 1
-        assert result.moves[0].quantity == pytest.approx(expected_total_debt, abs=0.01)
+        assert float(result.moves[0].quantity) == pytest.approx(expected_total_debt, abs=0.01)
 
         # Final state should have zero debt
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
-        assert sc.new_state['loan_amount'] == pytest.approx(0.0, abs=0.01)
-        assert sc.new_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+        assert float(sc.new_state['loan_amount']) == pytest.approx(0.0, abs=0.01)
+        assert float(sc.new_state['accrued_interest']) == pytest.approx(0.0, abs=0.01)
 
     def test_cure_exceeding_debt_with_pending_interest_raises(self):
         """Cure amount exceeding total debt (including pending) raises error."""
@@ -1958,8 +1954,8 @@ class TestPendingInterest:
         # 5 days pass without accrual
         view = FakeView(
             balances={
-                'alice': {'USD': 150000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("150000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 1, 6),  # 5 days after last accrual
@@ -1974,16 +1970,16 @@ class TestPendingInterest:
 
         # Should generate one move for the repayment
         assert len(result.moves) == 1
-        assert result.moves[0].quantity == pytest.approx(expected_total_debt, abs=0.01)
+        assert float(result.moves[0].quantity) == pytest.approx(expected_total_debt, abs=0.01)
 
         # Final state should have zero debt
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
-        assert sc.new_state['loan_amount'] == pytest.approx(0.0, abs=0.01)
-        assert sc.new_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
+        assert float(sc.new_state['loan_amount']) == pytest.approx(0.0, abs=0.01)
+        assert float(sc.new_state['accrued_interest']) == pytest.approx(0.0, abs=0.01)
 
         # Total interest paid should equal the pending interest (no accrued)
-        assert sc.new_state['total_interest_paid'] == pytest.approx(expected_pending, abs=0.01)
-        assert sc.new_state['total_principal_paid'] == pytest.approx(100000.0, abs=0.01)
+        assert float(sc.new_state['total_interest_paid']) == pytest.approx(expected_pending, abs=0.01)
+        assert float(sc.new_state['total_principal_paid']) == pytest.approx(100000.0, abs=0.01)
 
     def test_repayment_exceeding_debt_with_pending_interest_raises(self):
         """Repayment exceeding total debt (including pending) raises error."""
@@ -2018,13 +2014,13 @@ class TestPendingInterest:
 
         view = FakeView(
             balances={
-                'alice': {'USD': 10000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("10000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': state},
             time=datetime(2024, 1, 6),  # 5 days after origination/last_accrual
         )
-        prices = {'AAPL': 100.0}
+        prices = {'AAPL': Decimal("100.0")}
 
         # Calculate expected pending interest for 5 days
         expected_pending_interest = 100000 * 0.08 / 365 * 5  # ~109.59
@@ -2040,14 +2036,14 @@ class TestPendingInterest:
         debt_move = result.moves[0]
         assert debt_move.source == 'alice'
         assert debt_move.dest == 'bank'
-        assert debt_move.quantity == pytest.approx(expected_total_debt, abs=0.01)
+        assert float(debt_move.quantity) == pytest.approx(expected_total_debt, abs=0.01)
 
         # Verify surplus is correct (proceeds - full debt including pending)
         surplus_move = result.moves[1]
         assert surplus_move.source == 'bank'
         assert surplus_move.dest == 'alice'
         expected_surplus = sale_proceeds - expected_total_debt  # ~4,890.41
-        assert surplus_move.quantity == pytest.approx(expected_surplus, abs=0.01)
+        assert float(surplus_move.quantity) == pytest.approx(expected_surplus, abs=0.01)
 
         # Verify liquidation state
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
@@ -2066,8 +2062,8 @@ class TestPendingInterest:
 
         view = FakeView(
             balances={
-                'alice': {'USD': 50000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("50000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': state},
             time=datetime(2024, 1, 6),  # 5 days after last accrual
@@ -2084,20 +2080,20 @@ class TestPendingInterest:
         sc = next(d for d in result.state_changes if d.unit == "LOAN_001")
 
         # All interest should be paid first (accrued + pending)
-        assert sc.new_state['accrued_interest'] == pytest.approx(0.0, abs=0.01)
-        assert sc.new_state['total_interest_paid'] == pytest.approx(total_interest, abs=0.01)
+        assert float(sc.new_state['accrued_interest']) == pytest.approx(0.0, abs=0.01)
+        assert float(sc.new_state['total_interest_paid']) == pytest.approx(total_interest, abs=0.01)
 
         # Remaining goes to principal
         principal_payment = repayment - total_interest  # ~390.41
-        assert sc.new_state['loan_amount'] == pytest.approx(100000 - principal_payment, abs=0.01)
-        assert sc.new_state['total_principal_paid'] == pytest.approx(principal_payment, abs=0.01)
+        assert float(sc.new_state['loan_amount']) == pytest.approx(100000 - principal_payment, abs=0.01)
+        assert float(sc.new_state['total_principal_paid']) == pytest.approx(principal_payment, abs=0.01)
 
     def test_pending_interest_updates_last_accrual_date(self):
         """Verify that operations with pending interest update last_accrual_date."""
         view = FakeView(
             balances={
-                'alice': {'USD': 50000},
-                'bank': {'USD': 100000},
+                'alice': {'USD': Decimal("50000")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'LOAN_001': self.loan_state},
             time=datetime(2024, 1, 6),  # 5 days after last accrual
@@ -2123,12 +2119,12 @@ class TestPendingInterest:
         """
         # Setup: loan with margin call and pending interest
         state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
             'last_accrual_date': datetime(2024, 1, 1),
-            'collateral': {'AAPL': 1000},  # 1000 shares
-            'haircuts': {'AAPL': 0.80},
+            'collateral': {'AAPL': Decimal("1000")},  # 1000 shares
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -2143,7 +2139,7 @@ class TestPendingInterest:
         # 30 days after last accrual = significant pending interest
         # Pending interest = 100000 * 0.08 / 365 * 30 = ~$657.53
         view = FakeView(
-            balances={'alice': {'AAPL': 100}},
+            balances={'alice': {'AAPL': Decimal("100")}},
             states={'LOAN_001': state},
             time=datetime(2024, 1, 31),  # 30 days elapsed
         )
@@ -2165,8 +2161,8 @@ class TestPendingInterest:
         # So: 125000 <= collateral_value < 125821.91
         # With 1050 * 0.80 = 840 effective shares: 148.81 <= price < 149.79
         # Use price = 149.00
-        prices = {'AAPL': 149.00}
-        haircuts = {'AAPL': 0.80}
+        prices = {'AAPL': Decimal("149.00")}
+        haircuts = {'AAPL': Decimal("0.80")}
 
         # Verify our math:
         # After adding 50 shares: 1050 total
@@ -2197,12 +2193,12 @@ class TestPendingInterest:
         maintenance (including pending interest in the calculation).
         """
         state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
             'last_accrual_date': datetime(2024, 1, 1),
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -2216,7 +2212,7 @@ class TestPendingInterest:
 
         # 30 days pending interest = ~$657.53
         view = FakeView(
-            balances={'alice': {'AAPL': 200}},
+            balances={'alice': {'AAPL': Decimal("200")}},
             states={'LOAN_001': state},
             time=datetime(2024, 1, 31),
         )
@@ -2227,8 +2223,8 @@ class TestPendingInterest:
         # With 1100 shares (after adding 100) and 0.80 haircut:
         # 1100 * price * 0.80 >= 125821.91
         # price >= 143.00
-        prices = {'AAPL': 160.00}  # Plenty above threshold
-        haircuts = {'AAPL': 0.80}
+        prices = {'AAPL': Decimal("160.00")}  # Plenty above threshold
+        haircuts = {'AAPL': Decimal("0.80")}
 
         # Verify: 1100 * 160 * 0.80 = 140,800
         # Ratio = 140800 / 100657.53 = 1.399 > 1.25 (clears margin call)
@@ -2268,13 +2264,13 @@ class TestPendingInterestAfterPartialRepayment:
         # loan_amount should now be 50k (it gets reduced in compute_repayment)
         # total_principal_paid tracks the cumulative amount for record-keeping
         state = {
-            'loan_amount': 50000.0,  # Current outstanding (already reduced)
-            'total_principal_paid': 50000.0,  # For record-keeping
-            'interest_rate': 0.10,  # 10% annual
-            'accrued_interest': 0.0,
+            'loan_amount': Decimal("50000.0"),  # Current outstanding (already reduced)
+            'total_principal_paid': Decimal("50000.0"),  # For record-keeping
+            'interest_rate': Decimal("0.10"),  # 10% annual
+            'accrued_interest': Decimal("0.0"),
             'last_accrual_date': datetime(2024, 1, 1),
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -2288,24 +2284,24 @@ class TestPendingInterestAfterPartialRepayment:
 
         # 10 days after last accrual
         view = FakeView(
-            balances={'alice': {'USD': 100000}},
+            balances={'alice': {'USD': Decimal("100000")}},
             states={'LOAN_001': state},
             time=datetime(2024, 1, 11),  # 10 days later
         )
 
         # Calculate margin status (which uses pending interest internally)
-        prices = {'AAPL': 100.0}
+        prices = {'AAPL': Decimal("100.0")}
         status = compute_margin_status(view, 'LOAN_001', prices)
 
         # Expected pending interest = 50000 * 0.10 / 365 * 10 = ~$136.99
         expected_pending = 50000 * 0.10 / 365 * 10
 
-        assert status['pending_interest'] == pytest.approx(expected_pending, abs=0.01), \
+        assert float(status['pending_interest']) == pytest.approx(expected_pending, abs=0.01), \
             f"Pending interest should be {expected_pending}, got {status['pending_interest']}"
 
         # Total debt should be loan_amount + accrued + pending
         expected_debt = 50000.0 + 0.0 + expected_pending
-        assert status['total_debt'] == pytest.approx(expected_debt, abs=0.01)
+        assert float(status['total_debt']) == pytest.approx(expected_debt, abs=0.01)
 
     def test_liquidation_after_partial_repayment_includes_correct_interest(self):
         """
@@ -2314,13 +2310,13 @@ class TestPendingInterestAfterPartialRepayment:
         """
         # After partial repayment: loan_amount reduced to 50k
         state = {
-            'loan_amount': 50000.0,
-            'total_principal_paid': 50000.0,
-            'interest_rate': 0.10,
-            'accrued_interest': 0.0,
+            'loan_amount': Decimal("50000.0"),
+            'total_principal_paid': Decimal("50000.0"),
+            'interest_rate': Decimal("0.10"),
+            'accrued_interest': Decimal("0.0"),
             'last_accrual_date': datetime(2024, 1, 1),
-            'collateral': {'AAPL': 500},
-            'haircuts': {'AAPL': 0.80},
+            'collateral': {'AAPL': Decimal("500")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -2340,7 +2336,7 @@ class TestPendingInterestAfterPartialRepayment:
         )
 
         # Price crash triggers liquidation eligibility
-        prices = {'AAPL': 50.0}  # Collateral value = 500 * 50 * 0.80 = 20,000
+        prices = {'AAPL': Decimal("50.0")}  # Collateral value = 500 * 50 * 0.80 = 20,000
 
         # Sale proceeds cover the debt
         # Expected debt = 50000 + 0 + (50000 * 0.10 / 365 * 10) = 50136.99
@@ -2352,7 +2348,7 @@ class TestPendingInterestAfterPartialRepayment:
 
         # Should have move for debt payment (no surplus, no deficiency)
         assert len(result.moves) == 1
-        assert result.moves[0].quantity == pytest.approx(expected_debt, abs=0.01)
+        assert float(result.moves[0].quantity) == pytest.approx(expected_debt, abs=0.01)
 
 
 class TestMarginLoanContract:
@@ -2361,11 +2357,11 @@ class TestMarginLoanContract:
     def test_contract_issues_margin_call(self):
         """Smart contract issues margin call when below maintenance."""
         loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -2382,7 +2378,7 @@ class TestMarginLoanContract:
             states={'LOAN_001': loan_state},
             time=datetime(2024, 1, 15),
         )
-        prices = {'AAPL': 150.0}  # Below maintenance
+        prices = {'AAPL': Decimal("150.0")}  # Below maintenance
 
         result = margin_loan_contract(view, 'LOAN_001', datetime(2024, 1, 15), prices)
 
@@ -2393,11 +2389,11 @@ class TestMarginLoanContract:
     def test_contract_no_action_when_healthy(self):
         """Smart contract takes no action when loan is healthy."""
         loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -2413,7 +2409,7 @@ class TestMarginLoanContract:
             states={'LOAN_001': loan_state},
             time=datetime(2024, 1, 15),
         )
-        prices = {'AAPL': 200.0}  # Healthy
+        prices = {'AAPL': Decimal("200.0")}  # Healthy
 
         result = margin_loan_contract(view, 'LOAN_001', datetime(2024, 1, 15), prices)
 
@@ -2422,11 +2418,11 @@ class TestMarginLoanContract:
     def test_contract_no_action_when_liquidated(self):
         """Smart contract takes no action on liquidated loan."""
         loan_state = {
-            'loan_amount': 0.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 0.0,
+            'loan_amount': Decimal("0.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("0.0"),
             'collateral': {},
-            'haircuts': {'AAPL': 0.80},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -2442,7 +2438,7 @@ class TestMarginLoanContract:
             states={'LOAN_001': loan_state},
             time=datetime(2024, 1, 15),
         )
-        prices = {'AAPL': 100.0}
+        prices = {'AAPL': Decimal("100.0")}
 
         result = margin_loan_contract(view, 'LOAN_001', datetime(2024, 1, 15), prices)
 
@@ -2477,9 +2473,9 @@ class TestPureFunctionPattern:
 
     def test_calculate_collateral_value_pure(self):
         """Pure function: calculate collateral value without LedgerView."""
-        collateral = {'AAPL': 1000, 'MSFT': 500}
-        prices = {'AAPL': 150.0, 'MSFT': 300.0}
-        haircuts = {'AAPL': 0.70, 'MSFT': 0.75}
+        collateral = {'AAPL': Decimal("1000"), 'MSFT': Decimal("500")}
+        prices = {'AAPL': Decimal("150.0"), 'MSFT': Decimal("300.0")}
+        haircuts = {'AAPL': Decimal("0.70"), 'MSFT': Decimal("0.75")}
 
         # Direct call - no view, no state lookup
         value = calculate_collateral_value(collateral, prices, haircuts)
@@ -2490,33 +2486,33 @@ class TestPureFunctionPattern:
 
     def test_stress_test_haircuts(self):
         """Stress test: more conservative haircuts without mutating state."""
-        collateral = {'AAPL': 1000, 'MSFT': 500}
-        prices = {'AAPL': 150.0, 'MSFT': 300.0}
-        base_haircuts = {'AAPL': 0.70, 'MSFT': 0.75}
+        collateral = {'AAPL': Decimal("1000"), 'MSFT': Decimal("500")}
+        prices = {'AAPL': Decimal("150.0"), 'MSFT': Decimal("300.0")}
+        base_haircuts = {'AAPL': Decimal("0.70"), 'MSFT': Decimal("0.75")}
 
         # Base case
         base_value = calculate_collateral_value(collateral, prices, base_haircuts)
 
         # Stressed case: 10% more conservative haircuts
-        stressed_haircuts = {k: v * 0.9 for k, v in base_haircuts.items()}
+        stressed_haircuts = {k: v * Decimal("0.9") for k, v in base_haircuts.items()}
         stressed_value = calculate_collateral_value(collateral, prices, stressed_haircuts)
 
         # Stressed value should be 10% lower
-        assert stressed_value == pytest.approx(base_value * 0.9, abs=0.01)
+        assert float(stressed_value) == pytest.approx(float(base_value) * 0.9, abs=0.01)
 
     def test_stress_test_prices(self):
         """Stress test: price shock scenarios without mutating state."""
-        collateral = {'AAPL': 1000}
-        haircuts = {'AAPL': 0.80}
+        collateral = {'AAPL': Decimal("1000")}
+        haircuts = {'AAPL': Decimal("0.80")}
 
-        base_prices = {'AAPL': 200.0}
+        base_prices = {'AAPL': Decimal("200.0")}
         base_value = calculate_collateral_value(collateral, base_prices, haircuts)
-        assert base_value == pytest.approx(160000.0, abs=0.01)
+        assert float(base_value) == pytest.approx(160000.0, abs=0.01)
 
         # 20% price crash
-        shocked_prices = {'AAPL': 160.0}  # 20% drop
+        shocked_prices = {'AAPL': Decimal("160.0")}  # 20% drop
         shocked_value = calculate_collateral_value(collateral, shocked_prices, haircuts)
-        assert shocked_value == pytest.approx(128000.0, abs=0.01)
+        assert float(shocked_value) == pytest.approx(128000.0, abs=0.01)
 
     def test_calculate_margin_status_pure(self):
         """Pure function: margin status without LedgerView."""
@@ -2524,7 +2520,7 @@ class TestPureFunctionPattern:
             interest_rate=0.08,
             initial_margin=1.5,
             maintenance_margin=1.25,
-            haircuts={'AAPL': 0.80},
+            haircuts={'AAPL': Decimal("0.80")},
             margin_call_deadline_days=3,
             currency='USD',
             borrower_wallet='alice',
@@ -2533,7 +2529,7 @@ class TestPureFunctionPattern:
 
         state = MarginLoanState(
             loan_amount=100000.0,
-            collateral={'AAPL': 1000},
+            collateral={'AAPL': Decimal("1000")},
             accrued_interest=0.0,
             last_accrual_date=None,
             margin_call_amount=0.0,
@@ -2544,14 +2540,14 @@ class TestPureFunctionPattern:
             total_principal_paid=0.0,
         )
 
-        prices = {'AAPL': 200.0}  # Value = 160,000, ratio = 1.6
+        prices = {'AAPL': Decimal("200.0")}  # Value = 160,000, ratio = 1.6
 
         result = calculate_margin_status(terms, state, prices, datetime(2024, 1, 15))
 
         assert isinstance(result, MarginStatusResult)
         assert result.status == MARGIN_STATUS_HEALTHY
-        assert result.collateral_value == pytest.approx(160000.0, abs=0.01)
-        assert result.margin_ratio == pytest.approx(1.6, abs=0.01)
+        assert float(result.collateral_value) == pytest.approx(160000.0, abs=0.01)
+        assert float(result.margin_ratio) == pytest.approx(1.6, abs=0.01)
 
     def test_what_if_analysis(self):
         """What-if analysis: test different scenarios without any ledger."""
@@ -2559,7 +2555,7 @@ class TestPureFunctionPattern:
             interest_rate=0.08,
             initial_margin=1.5,
             maintenance_margin=1.25,
-            haircuts={'AAPL': 0.80},
+            haircuts={'AAPL': Decimal("0.80")},
             margin_call_deadline_days=3,
             currency='USD',
             borrower_wallet='alice',
@@ -2568,7 +2564,7 @@ class TestPureFunctionPattern:
 
         state = MarginLoanState(
             loan_amount=100000.0,
-            collateral={'AAPL': 1000},
+            collateral={'AAPL': Decimal("1000")},
             accrued_interest=0.0,
             last_accrual_date=None,
             margin_call_amount=0.0,
@@ -2582,25 +2578,25 @@ class TestPureFunctionPattern:
         now = datetime(2024, 1, 15)
 
         # Scenario 1: Current price
-        result_base = calculate_margin_status(terms, state, {'AAPL': 200.0}, now)
+        result_base = calculate_margin_status(terms, state, {'AAPL': Decimal("200.0")}, now)
         assert result_base.status == MARGIN_STATUS_HEALTHY
 
         # Scenario 2: 10% price drop
-        result_drop10 = calculate_margin_status(terms, state, {'AAPL': 180.0}, now)
+        result_drop10 = calculate_margin_status(terms, state, {'AAPL': Decimal("180.0")}, now)
         assert result_drop10.status == MARGIN_STATUS_WARNING  # ratio = 1.44
 
         # Scenario 3: 25% price drop
-        result_drop25 = calculate_margin_status(terms, state, {'AAPL': 150.0}, now)
+        result_drop25 = calculate_margin_status(terms, state, {'AAPL': Decimal("150.0")}, now)
         assert result_drop25.status == MARGIN_STATUS_BREACH  # ratio = 1.2
 
     def test_load_margin_loan_returns_frozen_dataclasses(self):
         """load_margin_loan returns frozen dataclasses that can't be mutated."""
         loan_state = {
-            'loan_amount': 100000.0,
-            'interest_rate': 0.08,
-            'accrued_interest': 500.0,
-            'collateral': {'AAPL': 1000},
-            'haircuts': {'AAPL': 0.80},
+            'loan_amount': Decimal("100000.0"),
+            'interest_rate': Decimal("0.08"),
+            'accrued_interest': Decimal("500.0"),
+            'collateral': {'AAPL': Decimal("1000")},
+            'haircuts': {'AAPL': Decimal("0.80")},
             'initial_margin': 1.5,
             'maintenance_margin': 1.25,
             'borrower_wallet': 'alice',
@@ -2645,7 +2641,7 @@ class TestPureFunctionPattern:
         )
 
         # Expected: 100000 * 0.08 / 365 * 30 = 657.53
-        assert pending == pytest.approx(657.53, abs=0.01)
+        assert float(pending) == pytest.approx(657.53, abs=0.01)
 
     def test_calculate_interest_accrual_pure(self):
         """Pure function: interest accrual calculation."""
@@ -2653,7 +2649,7 @@ class TestPureFunctionPattern:
             interest_rate=0.08,
             initial_margin=1.5,
             maintenance_margin=1.25,
-            haircuts={'AAPL': 0.80},
+            haircuts={'AAPL': Decimal("0.80")},
             margin_call_deadline_days=3,
             currency='USD',
             borrower_wallet='alice',
@@ -2662,7 +2658,7 @@ class TestPureFunctionPattern:
 
         state = MarginLoanState(
             loan_amount=100000.0,
-            collateral={'AAPL': 1000},
+            collateral={'AAPL': Decimal("1000")},
             accrued_interest=100.0,  # Already have some accrued
             last_accrual_date=datetime(2024, 1, 1),
             margin_call_amount=0.0,
@@ -2676,9 +2672,9 @@ class TestPureFunctionPattern:
         new_interest, total_accrued = calculate_interest_accrual(terms, state, days=30)
 
         # Expected new: 100000 * 0.08 / 365 * 30 = 657.53
-        assert new_interest == pytest.approx(657.53, abs=0.01)
+        assert float(new_interest) == pytest.approx(657.53, abs=0.01)
         # Total = existing 100 + new 657.53
-        assert total_accrued == pytest.approx(757.53, abs=0.01)
+        assert float(total_accrued) == pytest.approx(757.53, abs=0.01)
 
     def test_margin_status_result_is_typed(self):
         """MarginStatusResult provides typed access to all fields."""
@@ -2686,7 +2682,7 @@ class TestPureFunctionPattern:
             interest_rate=0.08,
             initial_margin=1.5,
             maintenance_margin=1.25,
-            haircuts={'AAPL': 0.80},
+            haircuts={'AAPL': Decimal("0.80")},
             margin_call_deadline_days=3,
             currency='USD',
             borrower_wallet='alice',
@@ -2695,7 +2691,7 @@ class TestPureFunctionPattern:
 
         state = MarginLoanState(
             loan_amount=100000.0,
-            collateral={'AAPL': 1000},
+            collateral={'AAPL': Decimal("1000")},
             accrued_interest=0.0,
             last_accrual_date=None,
             margin_call_amount=0.0,
@@ -2706,16 +2702,16 @@ class TestPureFunctionPattern:
             total_principal_paid=0.0,
         )
 
-        result = calculate_margin_status(terms, state, {'AAPL': 200.0}, datetime(2024, 1, 15))
+        result = calculate_margin_status(terms, state, {'AAPL': Decimal("200.0")}, datetime(2024, 1, 15))
 
         # All fields are typed - IDE autocomplete works
-        assert isinstance(result.collateral_value, float)
-        assert isinstance(result.total_debt, float)
-        assert isinstance(result.margin_ratio, float)
+        assert isinstance(result.collateral_value, Decimal)
+        assert isinstance(result.total_debt, Decimal)
+        assert isinstance(result.margin_ratio, Decimal)
         assert isinstance(result.status, str)
-        assert isinstance(result.shortfall, float)
-        assert isinstance(result.excess, float)
-        assert isinstance(result.pending_interest, float)
+        assert isinstance(result.shortfall, Decimal)
+        assert isinstance(result.excess, Decimal)
+        assert isinstance(result.pending_interest, Decimal)
 
     def test_parallel_scenario_analysis(self):
         """Multiple scenarios can run in parallel - dataclasses are thread-safe."""
@@ -2723,7 +2719,7 @@ class TestPureFunctionPattern:
             interest_rate=0.08,
             initial_margin=1.5,
             maintenance_margin=1.25,
-            haircuts={'AAPL': 0.80},
+            haircuts={'AAPL': Decimal("0.80")},
             margin_call_deadline_days=3,
             currency='USD',
             borrower_wallet='alice',
@@ -2732,7 +2728,7 @@ class TestPureFunctionPattern:
 
         state = MarginLoanState(
             loan_amount=100000.0,
-            collateral={'AAPL': 1000},
+            collateral={'AAPL': Decimal("1000")},
             accrued_interest=0.0,
             last_accrual_date=None,
             margin_call_amount=0.0,
@@ -2747,11 +2743,11 @@ class TestPureFunctionPattern:
 
         # Run many scenarios - all share the same frozen terms/state
         price_scenarios = [
-            {'AAPL': 250.0},  # Bull case
-            {'AAPL': 200.0},  # Base case
-            {'AAPL': 180.0},  # Mild drop
-            {'AAPL': 150.0},  # Significant drop
-            {'AAPL': 100.0},  # Crash
+            {'AAPL': Decimal("250.0")},  # Bull case
+            {'AAPL': Decimal("200.0")},  # Base case
+            {'AAPL': Decimal("180.0")},  # Mild drop
+            {'AAPL': Decimal("150.0")},  # Significant drop
+            {'AAPL': Decimal("100.0")},  # Crash
         ]
 
         results = [

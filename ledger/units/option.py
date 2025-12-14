@@ -8,6 +8,7 @@ immutable results.
 
 from __future__ import annotations
 from datetime import datetime
+from decimal import Decimal
 import math
 from typing import Dict, Any, List
 
@@ -17,6 +18,7 @@ from ..core import (
     TransferRuleViolation,
     UNIT_TYPE_BILATERAL_OPTION,
     build_transaction, empty_pending_transaction,
+    _freeze_state,
 )
 
 
@@ -24,10 +26,10 @@ def create_option_unit(
     symbol: str,
     name: str,
     underlying: str,
-    strike: float,
+    strike: Decimal,
     maturity: datetime,
     option_type: str,
-    quantity: float,
+    quantity: Decimal,
     currency: str,
     long_wallet: str,
     short_wallet: str,
@@ -50,22 +52,26 @@ def create_option_unit(
     Returns:
         Unit configured with bilateral transfer rule.
     """
+    # Convert numeric parameters to Decimal to handle float inputs
+    strike = Decimal(str(strike)) if not isinstance(strike, Decimal) else strike
+    quantity = Decimal(str(quantity)) if not isinstance(quantity, Decimal) else quantity
+
     if option_type not in ("call", "put"):
         raise ValueError(f"option_type must be 'call' or 'put', got {option_type}")
-    if strike <= 0:
+    if strike <= Decimal("0"):
         raise ValueError(f"strike must be positive, got {strike}")
-    if quantity <= 0:
+    if quantity <= Decimal("0"):
         raise ValueError(f"quantity must be positive, got {quantity}")
 
     return Unit(
         symbol=symbol,
         name=name,
         unit_type=UNIT_TYPE_BILATERAL_OPTION,
-        min_balance=-10_000.0,
-        max_balance=10_000.0,
+        min_balance=Decimal("-10000"),
+        max_balance=Decimal("10000"),
         decimal_places=2,
         transfer_rule=bilateral_transfer_rule,
-        _state={
+        _frozen_state=_freeze_state({
             'underlying': underlying,
             'strike': strike,
             'maturity': maturity,
@@ -77,14 +83,14 @@ def create_option_unit(
             'settled': False,
             'settlement_price': None,
             'exercised': False,
-        }
+        })
     )
 
 
 def compute_option_settlement(
     view: LedgerView,
     option_symbol: str,
-    settlement_price: float,
+    settlement_price: Decimal,
     force_settlement: bool = False,
 ) -> PendingTransaction:
     """
@@ -113,7 +119,10 @@ def compute_option_settlement(
     The function only settles if the option has reached maturity (or force_settlement
     is True) and has not already been settled.
     """
-    if not (settlement_price > 0 and math.isfinite(settlement_price)):
+    # Convert settlement_price to Decimal to handle float inputs
+    settlement_price = Decimal(str(settlement_price)) if not isinstance(settlement_price, Decimal) else settlement_price
+
+    if not (settlement_price > Decimal("0") and settlement_price.is_finite()):
         raise ValueError(f"settlement_price must be positive and finite, got {settlement_price}")
 
     state = view.get_unit_state(option_symbol)
@@ -129,7 +138,7 @@ def compute_option_settlement(
     short_wallet = state['short_wallet']
     long_position = view.get_balance(long_wallet, option_symbol)
 
-    if long_position <= 0:
+    if long_position <= Decimal("0"):
         return empty_pending_transaction(view)
 
     strike = state['strike']
@@ -201,8 +210,8 @@ def compute_option_settlement(
 def get_option_intrinsic_value(
     view: LedgerView,
     option_symbol: str,
-    spot_price: float,
-) -> float:
+    spot_price: Decimal,
+) -> Decimal:
     """
     Calculate intrinsic value of an option per contract.
 
@@ -216,15 +225,18 @@ def get_option_intrinsic_value(
         For calls: max(0, spot_price - strike) × quantity
         For puts: max(0, strike - spot_price) × quantity
     """
+    # Convert spot_price to Decimal to handle float inputs
+    spot_price = Decimal(str(spot_price)) if not isinstance(spot_price, Decimal) else spot_price
+
     state = view.get_unit_state(option_symbol)
     strike = state['strike']
     quantity = state['quantity']
     option_type = state['option_type']
 
     if option_type == 'call':
-        intrinsic = max(0, spot_price - strike)
+        intrinsic = max(Decimal("0"), spot_price - strike)
     else:
-        intrinsic = max(0, strike - spot_price)
+        intrinsic = max(Decimal("0"), strike - spot_price)
 
     return intrinsic * quantity
 
@@ -232,7 +244,7 @@ def get_option_intrinsic_value(
 def get_option_moneyness(
     view: LedgerView,
     option_symbol: str,
-    spot_price: float,
+    spot_price: Decimal,
 ) -> str:
     """
     Get moneyness status of an option.
@@ -247,12 +259,15 @@ def get_option_moneyness(
 
     ATM is determined using a tolerance of 1% of the strike price.
     """
+    # Convert spot_price to Decimal to handle float inputs
+    spot_price = Decimal(str(spot_price)) if not isinstance(spot_price, Decimal) else spot_price
+
     state = view.get_unit_state(option_symbol)
     strike = state['strike']
     option_type = state['option_type']
 
     # ATM tolerance: within 1% of strike
-    atm_tolerance = strike * 0.01
+    atm_tolerance = strike * Decimal("0.01")
 
     if abs(spot_price - strike) <= atm_tolerance:
         return 'ATM'
@@ -266,7 +281,7 @@ def get_option_moneyness(
 def compute_option_exercise(
     view: LedgerView,
     option_symbol: str,
-    settlement_price: float,
+    settlement_price: Decimal,
 ) -> PendingTransaction:
     """
     Compute early exercise of an option (before maturity).
@@ -279,6 +294,9 @@ def compute_option_exercise(
     Returns:
         PendingTransaction with exercise settlement moves and state updates.
     """
+    # Convert settlement_price to Decimal to handle float inputs
+    settlement_price = Decimal(str(settlement_price)) if not isinstance(settlement_price, Decimal) else settlement_price
+
     return compute_option_settlement(view, option_symbol, settlement_price, force_settlement=True)
 
 
@@ -287,8 +305,8 @@ def transact(
     symbol: str,
     seller: str,
     buyer: str,
-    qty: float,
-    price: float,
+    qty: Decimal,
+    price: Decimal,
 ) -> PendingTransaction:
     """
     Transfer option contracts from seller to buyer with premium payment.
@@ -317,12 +335,16 @@ def transact(
         # Trade 5 option contracts at $2.50 premium per contract
         result = transact(view, "AAPL_CALL_150", "alice", "bob", 5.0, 2.50)
     """
+    # Convert numeric parameters to Decimal to handle float inputs
+    qty = Decimal(str(qty)) if not isinstance(qty, Decimal) else qty
+    price = Decimal(str(price)) if not isinstance(price, Decimal) else price
+
     # Validate inputs
-    if qty <= 0:
+    if qty <= Decimal("0"):
         raise ValueError(f"qty must be positive, got {qty}")
-    if price < 0:
+    if price < Decimal("0"):
         raise ValueError(f"price must be non-negative, got {price}")
-    if not math.isfinite(price):
+    if not price.is_finite():
         raise ValueError(f"price must be finite, got {price}")
     if seller == buyer:
         raise ValueError(f"seller and buyer must be different, got {seller}")
@@ -376,7 +398,7 @@ def transact(
 
     # Move 2: Premium payment from buyer to seller (if price > 0)
     # Skip premium payment if price is effectively zero
-    if price > 0:
+    if price > Decimal("0"):
         total_premium = qty * price
         moves.append(Move(
             quantity=total_premium,
@@ -393,7 +415,7 @@ def option_contract(
     view: LedgerView,
     symbol: str,
     timestamp: datetime,
-    prices: Dict[str, float]
+    prices: Dict[str, Decimal]
 ) -> PendingTransaction:
     """
     SmartContract function for bilateral options.
@@ -421,8 +443,13 @@ def option_contract(
         return empty_pending_transaction(view)
 
     underlying = state.get('underlying')
-    settlement_price = prices.get(underlying)
-    if settlement_price is None:
-        return empty_pending_transaction(view)
+    if not underlying:
+        raise ValueError(f"Option {symbol} has no underlying defined")
+    if underlying not in prices:
+        raise ValueError(f"Missing price for option underlying '{underlying}' in {symbol}")
+    settlement_price = prices[underlying]
+
+    # Convert settlement_price to Decimal to handle float inputs from prices dict
+    settlement_price = Decimal(str(settlement_price)) if not isinstance(settlement_price, Decimal) else settlement_price
 
     return compute_option_settlement(view, symbol, settlement_price)

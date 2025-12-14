@@ -12,6 +12,7 @@ All prices are returned in a base currency (typically USD).
 """
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict, Set, Optional, List, Tuple, Protocol, runtime_checkable
 from bisect import bisect_right
 
@@ -28,11 +29,11 @@ class PricingSource(Protocol):
     """
     base_currency: str
 
-    def get_price(self, unit_symbol: str, timestamp: datetime) -> Optional[float]:
+    def get_price(self, unit_symbol: str, timestamp: datetime) -> Optional[Decimal]:
         """Get the price of a single unit at a specific timestamp."""
         ...
 
-    def get_prices(self, units: Set[str], timestamp: datetime) -> Dict[str, float]:
+    def get_prices(self, units: Set[str], timestamp: datetime) -> Dict[str, Decimal]:
         """Get prices for multiple units at a specific timestamp."""
         ...
 
@@ -45,7 +46,7 @@ class StaticPricingSource:
     The base currency always has a price of 1.0.
     """
 
-    def __init__(self, prices: Dict[str, float], base_currency: str = "USD"):
+    def __init__(self, prices: Dict[str, Decimal], base_currency: str = "USD"):
         """
         Initialize with a static price map.
 
@@ -56,21 +57,21 @@ class StaticPricingSource:
         self.base_currency = base_currency
         self.prices = prices.copy()
         # Base currency always prices at 1.0
-        self.prices[base_currency] = 1.0
+        self.prices[base_currency] = Decimal("1.0")
 
-    def get_price(self, unit_symbol: str, timestamp: datetime) -> Optional[float]:
+    def get_price(self, unit_symbol: str, timestamp: datetime) -> Optional[Decimal]:
         """Get static price (timestamp is ignored)."""
         return self.prices.get(unit_symbol)
 
-    def get_prices(self, units: Set[str], timestamp: datetime) -> Dict[str, float]:
+    def get_prices(self, units: Set[str], timestamp: datetime) -> Dict[str, Decimal]:
         """Get prices for multiple units at a specific timestamp."""
         return {unit: self.prices[unit] for unit in units if unit in self.prices}
 
-    def update_price(self, unit_symbol: str, price: float):
+    def update_price(self, unit_symbol: str, price: Decimal):
         """Update the price of a unit."""
         self.prices[unit_symbol] = price
 
-    def update_prices(self, prices: Dict[str, float]):
+    def update_prices(self, prices: Dict[str, Decimal]):
         """Update multiple prices at once."""
         self.prices.update(prices)
 
@@ -92,7 +93,7 @@ class TimeSeriesPricingSource:
 
     def __init__(
         self,
-        price_paths: Optional[Dict[str, List[Tuple[datetime, float]]]] = None,
+        price_paths: Optional[Dict[str, List[Tuple[datetime, Decimal]]]] = None,
         base_currency: str = "USD"
     ):
         """
@@ -115,7 +116,7 @@ class TimeSeriesPricingSource:
             })
         """
         self.base_currency = base_currency
-        self.price_history: Dict[str, List[Tuple[datetime, float]]] = {}
+        self.price_history: Dict[str, List[Tuple[datetime, Decimal]]] = {}
 
         if price_paths:
             for unit, path in price_paths.items():
@@ -124,7 +125,7 @@ class TimeSeriesPricingSource:
                 # Sort by timestamp to ensure chronological order
                 self.price_history[unit] = sorted(path, key=lambda x: x[0])
 
-    def add_price(self, unit_symbol: str, timestamp: datetime, price: float):
+    def add_price(self, unit_symbol: str, timestamp: datetime, price: Decimal):
         """
         Add a price observation for a unit at a specific time.
 
@@ -140,7 +141,7 @@ class TimeSeriesPricingSource:
         self.price_history[unit_symbol].append((timestamp, price))
         self.price_history[unit_symbol].sort(key=lambda x: x[0])
 
-    def add_prices(self, prices: Dict[str, float], timestamp: datetime):
+    def add_prices(self, prices: Dict[str, Decimal], timestamp: datetime):
         """
         Add multiple price observations at the same timestamp.
 
@@ -151,7 +152,7 @@ class TimeSeriesPricingSource:
         for unit, price in prices.items():
             self.add_price(unit, timestamp, price)
 
-    def get_price(self, unit_symbol: str, timestamp: datetime) -> Optional[float]:
+    def get_price(self, unit_symbol: str, timestamp: datetime) -> Optional[Decimal]:
         """
         Get price at or before the specified timestamp.
 
@@ -162,7 +163,7 @@ class TimeSeriesPricingSource:
         """
         # Base currency always prices at 1.0
         if unit_symbol == self.base_currency:
-            return 1.0
+            return Decimal("1.0")
 
         if unit_symbol not in self.price_history:
             return None
@@ -183,7 +184,7 @@ class TimeSeriesPricingSource:
         # Return the price at index idx-1 (last entry <= timestamp)
         return history[idx - 1][1]
 
-    def get_prices(self, units: Set[str], timestamp: datetime) -> Dict[str, float]:
+    def get_prices(self, units: Set[str], timestamp: datetime) -> Dict[str, Decimal]:
         """Get prices for multiple units at a specific timestamp."""
         prices = {}
         for unit in units:

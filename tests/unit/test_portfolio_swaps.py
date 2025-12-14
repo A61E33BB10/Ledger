@@ -17,6 +17,7 @@ Target: 25+ comprehensive tests
 
 import pytest
 from datetime import datetime, timedelta
+from decimal import Decimal
 from tests.fake_view import FakeView
 from ledger.units.portfolio_swap import (
     create_portfolio_swap,
@@ -42,7 +43,7 @@ class TestCreatePortfolioSwap:
         swap = create_portfolio_swap(
             symbol="TRS_TECH_2025",
             name="Tech Portfolio TRS Q1 2025",
-            reference_portfolio={"AAPL": 0.4, "GOOG": 0.35, "MSFT": 0.25},
+            reference_portfolio={"AAPL": Decimal("0.4"), "GOOG": Decimal("0.35"), "MSFT": Decimal("0.25")},
             notional=1_000_000.0,
             funding_spread=0.0050,  # 50 bps
             reset_schedule=[datetime(2025, 1, 15), datetime(2025, 4, 15)],
@@ -55,10 +56,10 @@ class TestCreatePortfolioSwap:
         assert swap.name == "Tech Portfolio TRS Q1 2025"
         assert swap.unit_type == UNIT_TYPE_PORTFOLIO_SWAP
 
-        state = swap._state
-        assert state["reference_portfolio"] == {"AAPL": 0.4, "GOOG": 0.35, "MSFT": 0.25}
-        assert state["notional"] == 1_000_000.0
-        assert state["funding_spread"] == 0.0050
+        state = swap.state
+        assert state["reference_portfolio"] == {"AAPL": Decimal("0.4"), "GOOG": Decimal("0.35"), "MSFT": Decimal("0.25")}
+        assert state["notional"] == Decimal("1000000.0")
+        assert state["funding_spread"] == Decimal("0.0050")
         assert state["payer_wallet"] == "dealer"
         assert state["receiver_wallet"] == "hedge_fund"
         assert state["currency"] == "USD"
@@ -70,7 +71,7 @@ class TestCreatePortfolioSwap:
         swap = create_portfolio_swap(
             symbol="TRS_SPY",
             name="S&P 500 TRS",
-            reference_portfolio={"SPY": 1.0},
+            reference_portfolio={"SPY": Decimal("1.0")},
             notional=5_000_000.0,
             funding_spread=0.0025,
             reset_schedule=[datetime(2025, 3, 31)],
@@ -80,7 +81,7 @@ class TestCreatePortfolioSwap:
             initial_nav=5_000_000.0,
         )
 
-        assert swap._state["last_nav"] == 5_000_000.0
+        assert swap.state["last_nav"] == 5_000_000.0
 
     def test_create_swap_with_issue_date(self):
         """Create swap with explicit issue date."""
@@ -88,7 +89,7 @@ class TestCreatePortfolioSwap:
         swap = create_portfolio_swap(
             symbol="TRS_BONDS",
             name="Bond Portfolio TRS",
-            reference_portfolio={"TLT": 0.6, "IEF": 0.4},
+            reference_portfolio={"TLT": Decimal("0.6"), "IEF": Decimal("0.4")},
             notional=10_000_000.0,
             funding_spread=0.0030,
             reset_schedule=[datetime(2025, 6, 30)],
@@ -98,15 +99,15 @@ class TestCreatePortfolioSwap:
             issue_date=issue,
         )
 
-        assert swap._state["issue_date"] == issue
-        assert swap._state["last_reset_date"] == issue
+        assert swap.state["issue_date"] == issue
+        assert swap.state["last_reset_date"] == issue
 
     def test_create_euro_denominated_swap(self):
         """Create a Euro-denominated portfolio swap."""
         swap = create_portfolio_swap(
             symbol="TRS_EU",
             name="Euro Equities TRS",
-            reference_portfolio={"SAP": 0.5, "ASML": 0.5},
+            reference_portfolio={"SAP": Decimal("0.5"), "ASML": Decimal("0.5")},
             notional=2_000_000.0,
             funding_spread=0.0040,
             reset_schedule=[datetime(2025, 6, 30)],
@@ -115,7 +116,7 @@ class TestCreatePortfolioSwap:
             currency="EUR",
         )
 
-        assert swap._state["currency"] == "EUR"
+        assert swap.state["currency"] == "EUR"
 
     def test_weights_not_summing_to_one_raises(self):
         """Portfolio weights not summing to 1.0 raises ValueError."""
@@ -123,7 +124,7 @@ class TestCreatePortfolioSwap:
             create_portfolio_swap(
                 symbol="BAD",
                 name="Bad Swap",
-                reference_portfolio={"AAPL": 0.5, "GOOG": 0.3},  # Sum = 0.8
+                reference_portfolio={"AAPL": Decimal("0.5"), "GOOG": Decimal("0.3")},  # Sum = 0.8
                 notional=1_000_000.0,
                 funding_spread=0.005,
                 reset_schedule=[datetime(2025, 3, 31)],
@@ -138,7 +139,7 @@ class TestCreatePortfolioSwap:
             create_portfolio_swap(
                 symbol="BAD",
                 name="Bad Swap",
-                reference_portfolio={"AAPL": 0.6, "GOOG": 0.6},  # Sum = 1.2
+                reference_portfolio={"AAPL": Decimal("0.6"), "GOOG": Decimal("0.6")},  # Sum = 1.2
                 notional=1_000_000.0,
                 funding_spread=0.005,
                 reset_schedule=[datetime(2025, 3, 31)],
@@ -168,7 +169,7 @@ class TestCreatePortfolioSwap:
             create_portfolio_swap(
                 symbol="BAD",
                 name="Bad Swap",
-                reference_portfolio={"AAPL": 1.2, "GOOG": -0.2},  # Negative weight
+                reference_portfolio={"AAPL": Decimal("1.2"), "GOOG": -0.2},  # Negative weight
                 notional=1_000_000.0,
                 funding_spread=0.005,
                 reset_schedule=[datetime(2025, 3, 31)],
@@ -183,7 +184,7 @@ class TestCreatePortfolioSwap:
             create_portfolio_swap(
                 symbol="BAD",
                 name="Bad Swap",
-                reference_portfolio={"AAPL": 1.0},
+                reference_portfolio={"AAPL": Decimal("1.0")},
                 notional=0.0,
                 funding_spread=0.005,
                 reset_schedule=[datetime(2025, 3, 31)],
@@ -196,7 +197,7 @@ class TestCreatePortfolioSwap:
             create_portfolio_swap(
                 symbol="BAD",
                 name="Bad Swap",
-                reference_portfolio={"AAPL": 1.0},
+                reference_portfolio={"AAPL": Decimal("1.0")},
                 notional=-1_000_000.0,
                 funding_spread=0.005,
                 reset_schedule=[datetime(2025, 3, 31)],
@@ -211,7 +212,7 @@ class TestCreatePortfolioSwap:
             create_portfolio_swap(
                 symbol="BAD",
                 name="Bad Swap",
-                reference_portfolio={"AAPL": 1.0},
+                reference_portfolio={"AAPL": Decimal("1.0")},
                 notional=1_000_000.0,
                 funding_spread=-0.005,
                 reset_schedule=[datetime(2025, 3, 31)],
@@ -226,7 +227,7 @@ class TestCreatePortfolioSwap:
             create_portfolio_swap(
                 symbol="BAD",
                 name="Bad Swap",
-                reference_portfolio={"AAPL": 1.0},
+                reference_portfolio={"AAPL": Decimal("1.0")},
                 notional=1_000_000.0,
                 funding_spread=0.005,
                 reset_schedule=[],
@@ -241,7 +242,7 @@ class TestCreatePortfolioSwap:
             create_portfolio_swap(
                 symbol="BAD",
                 name="Bad Swap",
-                reference_portfolio={"AAPL": 1.0},
+                reference_portfolio={"AAPL": Decimal("1.0")},
                 notional=1_000_000.0,
                 funding_spread=0.005,
                 reset_schedule=[datetime(2025, 3, 31)],
@@ -256,7 +257,7 @@ class TestCreatePortfolioSwap:
             create_portfolio_swap(
                 symbol="BAD",
                 name="Bad Swap",
-                reference_portfolio={"AAPL": 1.0},
+                reference_portfolio={"AAPL": Decimal("1.0")},
                 notional=1_000_000.0,
                 funding_spread=0.005,
                 reset_schedule=[datetime(2025, 3, 31)],
@@ -271,7 +272,7 @@ class TestCreatePortfolioSwap:
             create_portfolio_swap(
                 symbol="BAD",
                 name="Bad Swap",
-                reference_portfolio={"AAPL": 1.0},
+                reference_portfolio={"AAPL": Decimal("1.0")},
                 notional=1_000_000.0,
                 funding_spread=0.005,
                 reset_schedule=[datetime(2025, 3, 31)],
@@ -290,43 +291,43 @@ class TestComputePortfolioNav:
 
     def test_single_asset_nav(self):
         """NAV calculation with single asset."""
-        weights = {"AAPL": 1.0}
-        prices = {"AAPL": 150.0}
+        weights = {"AAPL": Decimal("1.0")}
+        prices = {"AAPL": Decimal("150.0")}
         notional = 1_000_000.0
 
         nav = compute_portfolio_nav(weights, prices, notional)
 
         # NAV = 1.0 * 150 * 1_000_000 / 100 = 1,500,000
-        assert nav == pytest.approx(1_500_000.0, rel=1e-6)
+        assert float(nav) == pytest.approx(1_500_000.0, rel=1e-6)
 
     def test_multi_asset_nav(self):
         """NAV calculation with multiple assets."""
-        weights = {"AAPL": 0.5, "GOOG": 0.3, "MSFT": 0.2}
-        prices = {"AAPL": 150.0, "GOOG": 100.0, "MSFT": 200.0}
+        weights = {"AAPL": Decimal("0.5"), "GOOG": Decimal("0.3"), "MSFT": Decimal("0.2")}
+        prices = {"AAPL": Decimal("150.0"), "GOOG": Decimal("100.0"), "MSFT": Decimal("200.0")}
         notional = 1_000_000.0
 
         nav = compute_portfolio_nav(weights, prices, notional)
 
         # weighted_price = 0.5*150 + 0.3*100 + 0.2*200 = 75 + 30 + 40 = 145
         # NAV = 145 * 1_000_000 / 100 = 1,450,000
-        assert nav == pytest.approx(1_450_000.0, rel=1e-6)
+        assert float(nav) == pytest.approx(1_450_000.0, rel=1e-6)
 
     def test_nav_with_equal_weights(self):
         """NAV calculation with equal weights."""
-        weights = {"A": 0.25, "B": 0.25, "C": 0.25, "D": 0.25}
-        prices = {"A": 100.0, "B": 100.0, "C": 100.0, "D": 100.0}
+        weights = {"A": Decimal("0.25"), "B": Decimal("0.25"), "C": Decimal("0.25"), "D": Decimal("0.25")}
+        prices = {"A": Decimal("100.0"), "B": Decimal("100.0"), "C": Decimal("100.0"), "D": Decimal("100.0")}
         notional = 1_000_000.0
 
         nav = compute_portfolio_nav(weights, prices, notional)
 
         # weighted_price = 0.25*100 * 4 = 100
         # NAV = 100 * 1_000_000 / 100 = 1,000,000
-        assert nav == pytest.approx(1_000_000.0, rel=1e-6)
+        assert float(nav) == pytest.approx(1_000_000.0, rel=1e-6)
 
     def test_missing_price_raises(self):
         """Missing price for portfolio asset raises ValueError."""
-        weights = {"AAPL": 0.5, "GOOG": 0.5}
-        prices = {"AAPL": 150.0}  # Missing GOOG
+        weights = {"AAPL": Decimal("0.5"), "GOOG": Decimal("0.5")}
+        prices = {"AAPL": Decimal("150.0")}  # Missing GOOG
 
         with pytest.raises(ValueError, match="Missing price for portfolio asset"):
             compute_portfolio_nav(weights, prices, 1_000_000.0)
@@ -349,7 +350,7 @@ class TestComputeFundingAmount:
 
         # funding = 1_000_000 * 0.005 * (91/365) = 1,246.58
         expected = 1_000_000.0 * 0.005 * (91 / 365)
-        assert funding == pytest.approx(expected, rel=1e-6)
+        assert float(funding) == pytest.approx(expected, rel=1e-6)
 
     def test_annual_funding(self):
         """Funding amount for a full year."""
@@ -360,17 +361,17 @@ class TestComputeFundingAmount:
         funding = compute_funding_amount(notional, spread, days)
 
         # funding = 1_000_000 * 0.01 * (365/365) = 10,000
-        assert funding == pytest.approx(10_000.0, rel=1e-6)
+        assert float(funding) == pytest.approx(10_000.0, rel=1e-6)
 
     def test_zero_days_funding(self):
         """Funding amount for zero days is zero."""
         funding = compute_funding_amount(1_000_000.0, 0.005, 0)
-        assert funding == 0.0
+        assert funding == Decimal("0.0")
 
     def test_zero_spread_funding(self):
         """Funding amount with zero spread is zero."""
         funding = compute_funding_amount(1_000_000.0, 0.0, 90)
-        assert funding == 0.0
+        assert funding == Decimal("0.0")
 
     def test_negative_days_raises(self):
         """Negative days raises ValueError."""
@@ -388,7 +389,7 @@ class TestComputeSwapReset:
     def setup_method(self):
         """Setup common test fixtures."""
         self.swap_state = {
-            'reference_portfolio': {'AAPL': 0.5, 'GOOG': 0.5},
+            'reference_portfolio': {'AAPL': Decimal("0.5"), 'GOOG': Decimal("0.5")},
             'notional': 1_000_000.0,
             'last_nav': 1_000_000.0,
             'funding_spread': 0.005,  # 50 bps
@@ -406,8 +407,8 @@ class TestComputeSwapReset:
         """Positive portfolio return - payer pays receiver."""
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': self.swap_state},
             time=datetime(2025, 3, 31),
@@ -427,15 +428,15 @@ class TestComputeSwapReset:
 
         assert move.source == 'dealer'
         assert move.dest == 'hedge_fund'
-        assert move.quantity == pytest.approx(expected_net, rel=1e-6)
+        assert float(move.quantity) == pytest.approx(expected_net, rel=1e-6)
         assert move.unit_symbol == 'USD'
 
     def test_negative_return_settlement(self):
         """Negative portfolio return - receiver pays payer."""
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': self.swap_state},
             time=datetime(2025, 3, 31),
@@ -456,14 +457,14 @@ class TestComputeSwapReset:
         # Receiver pays payer (net is negative)
         assert move.source == 'hedge_fund'
         assert move.dest == 'dealer'
-        assert move.quantity == pytest.approx(-expected_net, rel=1e-6)
+        assert float(move.quantity) == pytest.approx(-expected_net, rel=1e-6)
 
     def test_funding_exceeds_return(self):
         """Funding cost exceeds positive return - receiver pays net."""
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': self.swap_state},
             time=datetime(2025, 3, 31),
@@ -480,14 +481,14 @@ class TestComputeSwapReset:
 
         assert move.source == 'hedge_fund'
         assert move.dest == 'dealer'
-        assert move.quantity == pytest.approx(4_000.0, rel=1e-6)
+        assert float(move.quantity) == pytest.approx(4_000.0, rel=1e-6)
 
     def test_reset_updates_state(self):
         """Reset updates last_nav, next_reset_index, and history."""
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': self.swap_state},
             time=datetime(2025, 3, 31),
@@ -505,7 +506,7 @@ class TestComputeSwapReset:
         assert history['reset_number'] == 0
         assert history['last_nav'] == 1_000_000.0
         assert history['current_nav'] == 1_050_000.0
-        assert history['portfolio_return'] == pytest.approx(0.05, rel=1e-6)
+        assert float(history['portfolio_return']) == pytest.approx(0.05, rel=1e-6)
 
     def test_reset_on_terminated_swap_returns_empty(self):
         """Reset on terminated swap returns empty result."""
@@ -538,8 +539,8 @@ class TestComputeSwapReset:
         """Zero NAV change still settles funding amount."""
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': self.swap_state},
             time=datetime(2025, 3, 31),
@@ -558,7 +559,7 @@ class TestComputeSwapReset:
 
         assert move.source == 'hedge_fund'
         assert move.dest == 'dealer'
-        assert move.quantity == pytest.approx(expected_funding, rel=1e-6)
+        assert float(move.quantity) == pytest.approx(expected_funding, rel=1e-6)
 
     def test_zero_funding_spread(self):
         """Zero funding spread - only portfolio return settles."""
@@ -567,8 +568,8 @@ class TestComputeSwapReset:
 
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': state},
             time=datetime(2025, 3, 31),
@@ -582,7 +583,7 @@ class TestComputeSwapReset:
         # net = 50,000 - 0 = 50,000
         assert move.source == 'dealer'
         assert move.dest == 'hedge_fund'
-        assert move.quantity == pytest.approx(50_000.0, rel=1e-6)
+        assert float(move.quantity) == pytest.approx(50_000.0, rel=1e-6)
 
 
 # ============================================================================
@@ -595,7 +596,7 @@ class TestComputeTermination:
     def setup_method(self):
         """Setup common test fixtures."""
         self.swap_state = {
-            'reference_portfolio': {'AAPL': 0.5, 'GOOG': 0.5},
+            'reference_portfolio': {'AAPL': Decimal("0.5"), 'GOOG': Decimal("0.5")},
             'notional': 1_000_000.0,
             'last_nav': 1_000_000.0,
             'funding_spread': 0.005,
@@ -613,8 +614,8 @@ class TestComputeTermination:
         """Termination with positive return."""
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': self.swap_state},
             time=datetime(2025, 2, 15),
@@ -635,14 +636,14 @@ class TestComputeTermination:
 
         assert move.source == 'dealer'
         assert move.dest == 'hedge_fund'
-        assert move.quantity == pytest.approx(expected_net, rel=1e-6)
+        assert float(move.quantity) == pytest.approx(expected_net, rel=1e-6)
 
     def test_termination_with_loss(self):
         """Termination with negative return."""
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': self.swap_state},
             time=datetime(2025, 2, 15),
@@ -665,8 +666,8 @@ class TestComputeTermination:
         """Termination sets terminated flag and records termination details."""
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': self.swap_state},
             time=datetime(2025, 2, 15),
@@ -704,7 +705,7 @@ class TestTransact:
     def setup_method(self):
         """Setup common test fixtures."""
         self.swap_state = {
-            'reference_portfolio': {'AAPL': 0.5, 'GOOG': 0.5},
+            'reference_portfolio': {'AAPL': Decimal("0.5"), 'GOOG': Decimal("0.5")},
             'notional': 1_000_000.0,
             'last_nav': None,  # Not initialized
             'funding_spread': 0.005,
@@ -739,8 +740,8 @@ class TestTransact:
 
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': state},
             time=datetime(2025, 3, 31),
@@ -760,8 +761,8 @@ class TestTransact:
 
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': state},
             time=datetime(2025, 2, 15),
@@ -816,7 +817,7 @@ class TestPortfolioSwapContract:
     def setup_method(self):
         """Setup common test fixtures."""
         self.swap_state = {
-            'reference_portfolio': {'AAPL': 0.5, 'GOOG': 0.5},
+            'reference_portfolio': {'AAPL': Decimal("0.5"), 'GOOG': Decimal("0.5")},
             'notional': 1_000_000.0,
             'last_nav': 1_000_000.0,
             'funding_spread': 0.005,
@@ -835,14 +836,14 @@ class TestPortfolioSwapContract:
         """Contract processes reset when date is reached."""
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'hedge_fund': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'hedge_fund': {'USD': Decimal("1000000")},
             },
             states={'TRS_TECH': self.swap_state},
             time=datetime(2025, 3, 31),
         )
 
-        prices = {'AAPL': 110.0, 'GOOG': 90.0}  # weighted = 100, NAV = 1M
+        prices = {'AAPL': Decimal("110.0"), 'GOOG': Decimal("90.0")}  # weighted = 100, NAV = 1M
         result = portfolio_swap_contract(view, 'TRS_TECH', datetime(2025, 3, 31), prices)
 
         # Should process the reset
@@ -856,7 +857,7 @@ class TestPortfolioSwapContract:
             time=datetime(2025, 3, 15),
         )
 
-        prices = {'AAPL': 110.0, 'GOOG': 90.0}
+        prices = {'AAPL': Decimal("110.0"), 'GOOG': Decimal("90.0")}
         result = portfolio_swap_contract(view, 'TRS_TECH', datetime(2025, 3, 15), prices)
 
         assert len(result.moves) == 0
@@ -871,7 +872,7 @@ class TestPortfolioSwapContract:
             states={'TRS_TECH': state},
         )
 
-        prices = {'AAPL': 110.0, 'GOOG': 90.0}
+        prices = {'AAPL': Decimal("110.0"), 'GOOG': Decimal("90.0")}
         result = portfolio_swap_contract(view, 'TRS_TECH', datetime(2025, 3, 31), prices)
 
         assert len(result.moves) == 0
@@ -887,7 +888,7 @@ class TestMultiPeriodScenarios:
     def test_two_reset_cycle(self):
         """Complete cycle with two resets."""
         initial_state = {
-            'reference_portfolio': {'SPY': 1.0},
+            'reference_portfolio': {'SPY': Decimal("1.0")},
             'notional': 1_000_000.0,
             'last_nav': 1_000_000.0,
             'funding_spread': 0.004,  # 40 bps
@@ -904,8 +905,8 @@ class TestMultiPeriodScenarios:
         # First reset: +5% return
         view1 = FakeView(
             balances={
-                'bank': {'USD': 100_000_000},
-                'fund': {'USD': 10_000_000},
+                'bank': {'USD': Decimal("100000000")},
+                'fund': {'USD': Decimal("10000000")},
             },
             states={'TRS_SPY': initial_state},
             time=datetime(2025, 3, 31),
@@ -920,8 +921,8 @@ class TestMultiPeriodScenarios:
         # Second reset: -3% return from new baseline
         view2 = FakeView(
             balances={
-                'bank': {'USD': 100_000_000},
-                'fund': {'USD': 10_000_000},
+                'bank': {'USD': Decimal("100000000")},
+                'fund': {'USD': Decimal("10000000")},
             },
             states={'TRS_SPY': state_after_reset1},
             time=datetime(2025, 6, 30),
@@ -932,7 +933,7 @@ class TestMultiPeriodScenarios:
         result2 = compute_swap_reset(view2, 'TRS_SPY', new_nav, 0.004, 91)
         state_after_reset2 = next(d for d in result2.state_changes if d.unit == 'TRS_SPY').new_state
 
-        assert state_after_reset2['last_nav'] == pytest.approx(new_nav, rel=1e-6)
+        assert float(state_after_reset2['last_nav']) == pytest.approx(new_nav, rel=1e-6)
         assert state_after_reset2['next_reset_index'] == 2
         assert len(state_after_reset2['reset_history']) == 2
 
@@ -947,7 +948,7 @@ class TestConservationLaws:
     def test_reset_conserves_cash(self):
         """Reset settlement is a pure transfer (conserves total cash)."""
         swap_state = {
-            'reference_portfolio': {'AAPL': 1.0},
+            'reference_portfolio': {'AAPL': Decimal("1.0")},
             'notional': 1_000_000.0,
             'last_nav': 1_000_000.0,
             'funding_spread': 0.005,
@@ -963,8 +964,8 @@ class TestConservationLaws:
 
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'client': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'client': {'USD': Decimal("1000000")},
             },
             states={'TRS': swap_state},
             time=datetime(2025, 3, 31),
@@ -981,7 +982,7 @@ class TestConservationLaws:
     def test_termination_conserves_cash(self):
         """Termination settlement is a pure transfer."""
         swap_state = {
-            'reference_portfolio': {'AAPL': 1.0},
+            'reference_portfolio': {'AAPL': Decimal("1.0")},
             'notional': 1_000_000.0,
             'last_nav': 1_000_000.0,
             'funding_spread': 0.005,
@@ -997,8 +998,8 @@ class TestConservationLaws:
 
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'client': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'client': {'USD': Decimal("1000000")},
             },
             states={'TRS': swap_state},
             time=datetime(2025, 2, 15),
@@ -1023,7 +1024,7 @@ class TestEdgeCases:
     def test_very_small_nav_change(self):
         """Very small NAV change near epsilon threshold."""
         swap_state = {
-            'reference_portfolio': {'AAPL': 1.0},
+            'reference_portfolio': {'AAPL': Decimal("1.0")},
             'notional': 1_000_000.0,
             'last_nav': 1_000_000.0,
             'funding_spread': 0.0,  # Zero funding to isolate nav effect
@@ -1039,8 +1040,8 @@ class TestEdgeCases:
 
         view = FakeView(
             balances={
-                'dealer': {'USD': 10_000_000},
-                'client': {'USD': 1_000_000},
+                'dealer': {'USD': Decimal("10000000")},
+                'client': {'USD': Decimal("1000000")},
             },
             states={'TRS': swap_state},
             time=datetime(2025, 3, 31),
@@ -1050,12 +1051,12 @@ class TestEdgeCases:
         result = compute_swap_reset(view, 'TRS', 1_000_001.0, 0.0, 90)
 
         assert len(result.moves) == 1
-        assert result.moves[0].quantity == pytest.approx(1.0, rel=1e-6)
+        assert float(result.moves[0].quantity) == pytest.approx(1.0, rel=1e-6)
 
     def test_large_notional_precision(self):
         """Large notional amounts maintain precision."""
         swap_state = {
-            'reference_portfolio': {'AAPL': 1.0},
+            'reference_portfolio': {'AAPL': Decimal("1.0")},
             'notional': 1_000_000_000.0,  # $1B notional
             'last_nav': 1_000_000_000.0,
             'funding_spread': 0.0001,  # 1 bp
@@ -1071,8 +1072,8 @@ class TestEdgeCases:
 
         view = FakeView(
             balances={
-                'dealer': {'USD': 100_000_000_000},
-                'client': {'USD': 10_000_000_000},
+                'dealer': {'USD': Decimal("100000000000")},
+                'client': {'USD': Decimal("10000000000")},
             },
             states={'TRS': swap_state},
             time=datetime(2025, 3, 31),
@@ -1087,19 +1088,19 @@ class TestEdgeCases:
         expected_funding = 1_000_000_000.0 * 0.0001 * (90 / 365)
         expected_net = 100_000.0 - expected_funding
 
-        assert result.moves[0].quantity == pytest.approx(expected_net, rel=1e-6)
+        assert float(result.moves[0].quantity) == pytest.approx(expected_net, rel=1e-6)
 
     def test_single_day_period(self):
         """Single day period for funding calculation."""
         funding = compute_funding_amount(1_000_000.0, 0.05, 1)
         # 1M * 0.05 * (1/365) = 136.99
         expected = 1_000_000.0 * 0.05 / 365
-        assert funding == pytest.approx(expected, rel=1e-6)
+        assert float(funding) == pytest.approx(expected, rel=1e-6)
 
     def test_invalid_current_nav_raises(self):
         """Non-positive current_nav raises ValueError."""
         swap_state = {
-            'reference_portfolio': {'AAPL': 1.0},
+            'reference_portfolio': {'AAPL': Decimal("1.0")},
             'notional': 1_000_000.0,
             'last_nav': 1_000_000.0,
             'funding_spread': 0.005,
@@ -1126,7 +1127,7 @@ class TestEdgeCases:
     def test_negative_days_elapsed_raises(self):
         """Negative days_elapsed raises ValueError."""
         swap_state = {
-            'reference_portfolio': {'AAPL': 1.0},
+            'reference_portfolio': {'AAPL': Decimal("1.0")},
             'notional': 1_000_000.0,
             'last_nav': 1_000_000.0,
             'funding_spread': 0.005,

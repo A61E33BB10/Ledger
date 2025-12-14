@@ -133,13 +133,15 @@ from .units.deferred_cash import (
 
 # Bonds
 from .units.bond import (
+    Coupon,
+    CouponEntitlement,
     create_bond_unit,
     compute_accrued_interest,
-    compute_coupon_payment,
+    compute_coupon_entitlements,
+    process_coupons,
     compute_redemption,
     transact as bond_transact,
     bond_contract,
-    generate_coupon_schedule,
     year_fraction,
 )
 
@@ -164,7 +166,7 @@ from .units.autocallable import (
 
 # Margin Loans
 from .units.margin_loan import (
-    # Frozen dataclasses (new pure function architecture)
+    # Frozen dataclasses (pure function architecture)
     MarginLoanTerms,
     MarginLoanState,
     MarginStatusResult,
@@ -236,7 +238,7 @@ from .units.borrow_record import (
 )
 
 # Lifecycle
-from .enhanced_lifecycle import LifecycleEngine
+from .lifecycle_engine import LifecycleEngine
 
 # Scheduled Events (simplified API)
 from .scheduled_events import (
@@ -323,9 +325,10 @@ __all__ = [
     'create_deferred_cash_unit', 'compute_deferred_cash_settlement',
     'deferred_cash_transact', 'deferred_cash_contract',
     # Bonds
-    'create_bond_unit', 'compute_accrued_interest', 'compute_coupon_payment',
-    'compute_redemption', 'bond_transact', 'bond_contract',
-    'generate_coupon_schedule', 'year_fraction',
+    'Coupon', 'CouponEntitlement',
+    'create_bond_unit', 'compute_accrued_interest', 'compute_coupon_entitlements',
+    'process_coupons', 'compute_redemption', 'bond_transact', 'bond_contract',
+    'year_fraction',
     # Futures
     'create_future', 'future_mark_to_market', 'future_contract', 'future_transact',
     # Autocallables
@@ -376,4 +379,4 @@ __all__ = [
     'get_qis_nav', 'get_qis_return', 'get_qis_leverage', 'QISStrategy',
 ]
 
-__version__ = '1.0.0'
+__version__ = '4.0.0'

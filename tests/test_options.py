@@ -10,6 +10,7 @@ Tests:
 
 import pytest
 from datetime import datetime
+from decimal import Decimal
 from ledger import (
     Move, Unit, PendingTransaction,
     create_option_unit,
@@ -28,10 +29,10 @@ class TestCreateOptionUnit:
             symbol="AAPL_C150_DEC25",
             name="AAPL Call 150 Dec25",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=datetime(2025, 12, 19),
             option_type="call",
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob"
@@ -40,27 +41,27 @@ class TestCreateOptionUnit:
         assert unit.symbol == "AAPL_C150_DEC25"
         assert unit.name == "AAPL Call 150 Dec25"
         assert unit.unit_type == "BILATERAL_OPTION"
-        assert unit._state['underlying'] == "AAPL"
-        assert unit._state['strike'] == 150.0
-        assert unit._state['option_type'] == "call"
-        assert unit._state['settled'] is False
+        assert unit.state['underlying'] == "AAPL"
+        assert unit.state['strike'] == 150.0
+        assert unit.state['option_type'] == "call"
+        assert unit.state['settled'] is False
 
     def test_create_put_option_unit(self):
         unit = create_option_unit(
             symbol="AAPL_P140_DEC25",
             name="AAPL Put 140 Dec25",
             underlying="AAPL",
-            strike=140.0,
+            strike=Decimal("140.0"),
             maturity=datetime(2025, 12, 19),
             option_type="put",
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob"
         )
 
-        assert unit._state['option_type'] == "put"
-        assert unit._state['strike'] == 140.0
+        assert unit.state['option_type'] == "put"
+        assert unit.state['strike'] == 140.0
 
     def test_create_option_unit_validates_type(self):
         """Invalid option type should raise."""
@@ -69,10 +70,10 @@ class TestCreateOptionUnit:
                 symbol="TEST",
                 name="Test Option",
                 underlying="AAPL",
-                strike=150.0,
+                strike=Decimal("150.0"),
                 maturity=datetime(2025, 12, 19),
                 option_type="invalid",
-                quantity=100,
+                quantity=Decimal("100"),
                 currency="USD",
                 long_wallet="alice",
                 short_wallet="bob"
@@ -85,10 +86,10 @@ class TestCreateOptionUnit:
                 symbol="TEST",
                 name="Test Option",
                 underlying="AAPL",
-                strike=0.0,
+                strike=Decimal("0.0"),
                 maturity=datetime(2025, 12, 19),
                 option_type="call",
-                quantity=100,
+                quantity=Decimal("100"),
                 currency="USD",
                 long_wallet="alice",
                 short_wallet="bob"
@@ -101,7 +102,7 @@ class TestCreateOptionUnit:
                 symbol="TEST",
                 name="Test Option",
                 underlying="AAPL",
-                strike=150.0,
+                strike=Decimal("150.0"),
                 maturity=datetime(2025, 12, 19),
                 option_type="call",
                 quantity=-10,
@@ -118,16 +119,16 @@ class TestComputeOptionSettlement:
         """Call ITM: long pays strike, receives underlying."""
         view = FakeView(
             balances={
-                'alice': {'OPT': 5, 'USD': 100000},
-                'bob': {'OPT': -5, 'AAPL': 1000},
+                'alice': {'OPT': Decimal("5"), 'USD': Decimal("100000")},
+                'bob': {'OPT': -5, 'AAPL': Decimal("1000")},
             },
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 6, 1),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -146,13 +147,13 @@ class TestComputeOptionSettlement:
         cash_move = next(m for m in result.moves if m.unit_symbol == 'USD')
         assert cash_move.source == 'alice'
         assert cash_move.dest == 'bob'
-        assert cash_move.quantity == 5 * 100 * 100.0  # 5 contracts * 100 shares * $100
+        assert cash_move.quantity == Decimal("5") * Decimal("100") * Decimal("100.0")  # 5 contracts * 100 shares * $100
 
         # Check delivery move
         delivery_move = next(m for m in result.moves if m.unit_symbol == 'AAPL')
         assert delivery_move.source == 'bob'
         assert delivery_move.dest == 'alice'
-        assert delivery_move.quantity == 5 * 100  # 5 contracts * 100 shares
+        assert delivery_move.quantity == Decimal("5") * 100  # 5 contracts * 100 shares
 
         # Check state updates
         sc = next(d for d in result.state_changes if d.unit == "OPT")
@@ -163,16 +164,16 @@ class TestComputeOptionSettlement:
         """Call OTM: just close positions, no physical delivery."""
         view = FakeView(
             balances={
-                'alice': {'OPT': 5},
+                'alice': {'OPT': Decimal("5")},
                 'bob': {'OPT': -5},
             },
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 150.0,
+                    'strike': Decimal("150.0"),
                     'maturity': datetime(2025, 6, 1),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -195,16 +196,16 @@ class TestComputeOptionSettlement:
         """Put ITM: long delivers underlying, receives cash."""
         view = FakeView(
             balances={
-                'alice': {'OPT': 3, 'AAPL': 500},
-                'bob': {'OPT': -3, 'USD': 100000},
+                'alice': {'OPT': Decimal("3"), 'AAPL': Decimal("500")},
+                'bob': {'OPT': -3, 'USD': Decimal("100000")},
             },
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 6, 1),
                     'option_type': 'put',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -230,14 +231,14 @@ class TestComputeOptionSettlement:
 
     def test_settlement_before_maturity_returns_empty(self):
         view = FakeView(
-            balances={'alice': {'OPT': 5}, 'bob': {'OPT': -5}},
+            balances={'alice': {'OPT': Decimal("5")}, 'bob': {'OPT': -5}},
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 12, 31),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -251,14 +252,14 @@ class TestComputeOptionSettlement:
 
     def test_force_settlement_before_maturity(self):
         view = FakeView(
-            balances={'alice': {'OPT': 5, 'USD': 100000}, 'bob': {'OPT': -5, 'AAPL': 1000}},
+            balances={'alice': {'OPT': Decimal("5"), 'USD': Decimal("100000")}, 'bob': {'OPT': -5, 'AAPL': Decimal("1000")}},
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 12, 31),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -272,14 +273,14 @@ class TestComputeOptionSettlement:
 
     def test_already_settled_returns_empty(self):
         view = FakeView(
-            balances={'alice': {'OPT': 0}, 'bob': {'OPT': 0}},
+            balances={'alice': {'OPT': Decimal("0")}, 'bob': {'OPT': Decimal("0")}},
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 6, 1),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -301,10 +302,10 @@ class TestOptionConvenienceFunctions:
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 12, 31),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -312,7 +313,7 @@ class TestOptionConvenienceFunctions:
             }
         )
         value = get_option_intrinsic_value(view, 'OPT', spot_price=120.0)
-        assert value == 20.0 * 100  # (120 - 100) * 100 shares
+        assert value == Decimal("20.0") * 100  # (120 - 100) * 100 shares
 
     def test_get_option_intrinsic_value_call_otm(self):
         view = FakeView(
@@ -320,10 +321,10 @@ class TestOptionConvenienceFunctions:
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 12, 31),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -331,7 +332,7 @@ class TestOptionConvenienceFunctions:
             }
         )
         value = get_option_intrinsic_value(view, 'OPT', spot_price=80.0)
-        assert value == 0.0
+        assert value == Decimal("0.0")
 
     def test_get_option_intrinsic_value_put_itm(self):
         view = FakeView(
@@ -339,10 +340,10 @@ class TestOptionConvenienceFunctions:
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 12, 31),
                     'option_type': 'put',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -350,7 +351,7 @@ class TestOptionConvenienceFunctions:
             }
         )
         value = get_option_intrinsic_value(view, 'OPT', spot_price=80.0)
-        assert value == 20.0 * 100  # (100 - 80) * 100 shares
+        assert value == Decimal("20.0") * 100  # (100 - 80) * 100 shares
 
     def test_get_option_moneyness_itm_call(self):
         view = FakeView(
@@ -358,10 +359,10 @@ class TestOptionConvenienceFunctions:
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 12, 31),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -376,10 +377,10 @@ class TestOptionConvenienceFunctions:
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 12, 31),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -394,10 +395,10 @@ class TestOptionConvenienceFunctions:
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 12, 31),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -411,14 +412,14 @@ class TestOptionContract:
 
     def test_check_lifecycle_not_matured(self):
         view = FakeView(
-            balances={'alice': {'OPT': 5}, 'bob': {'OPT': -5}},
+            balances={'alice': {'OPT': Decimal("5")}, 'bob': {'OPT': -5}},
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 12, 31),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -427,22 +428,22 @@ class TestOptionContract:
             },
             time=datetime(2025, 6, 1)
         )
-        result = option_contract(view, 'OPT', datetime(2025, 6, 1), {'AAPL': 150.0})
+        result = option_contract(view, 'OPT', datetime(2025, 6, 1), {'AAPL': Decimal("150.0")})
         assert result.is_empty()
 
     def test_check_lifecycle_at_maturity(self):
         view = FakeView(
             balances={
-                'alice': {'OPT': 5, 'USD': 100000},
-                'bob': {'OPT': -5, 'AAPL': 1000},
+                'alice': {'OPT': Decimal("5"), 'USD': Decimal("100000")},
+                'bob': {'OPT': -5, 'AAPL': Decimal("1000")},
             },
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 6, 1),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -451,7 +452,7 @@ class TestOptionContract:
             },
             time=datetime(2025, 6, 1)
         )
-        result = option_contract(view, 'OPT', datetime(2025, 6, 1), {'AAPL': 150.0})
+        result = option_contract(view, 'OPT', datetime(2025, 6, 1), {'AAPL': Decimal("150.0")})
         assert not result.is_empty()
 
     def test_check_lifecycle_already_settled(self):
@@ -460,10 +461,10 @@ class TestOptionContract:
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 6, 1),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -472,19 +473,19 @@ class TestOptionContract:
             },
             time=datetime(2025, 6, 1)
         )
-        result = option_contract(view, 'OPT', datetime(2025, 6, 1), {'AAPL': 150.0})
+        result = option_contract(view, 'OPT', datetime(2025, 6, 1), {'AAPL': Decimal("150.0")})
         assert result.is_empty()
 
-    def test_check_lifecycle_missing_price(self):
+    def test_check_lifecycle_missing_price_raises(self):
         view = FakeView(
-            balances={'alice': {'OPT': 5}, 'bob': {'OPT': -5}},
+            balances={'alice': {'OPT': Decimal("5")}, 'bob': {'OPT': -5}},
             states={
                 'OPT': {
                     'underlying': 'AAPL',
-                    'strike': 100.0,
+                    'strike': Decimal("100.0"),
                     'maturity': datetime(2025, 6, 1),
                     'option_type': 'call',
-                    'quantity': 100,
+                    'quantity': Decimal("100"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -493,6 +494,6 @@ class TestOptionContract:
             },
             time=datetime(2025, 6, 1)
         )
-        # No AAPL price provided
-        result = option_contract(view, 'OPT', datetime(2025, 6, 1), {'TSLA': 200.0})
-        assert result.is_empty()
+        # No AAPL price provided - should raise
+        with pytest.raises(ValueError, match="Missing price for option underlying 'AAPL'"):
+            option_contract(view, 'OPT', datetime(2025, 6, 1), {'TSLA': Decimal("200.0")})

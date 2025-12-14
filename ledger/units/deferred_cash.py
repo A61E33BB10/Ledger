@@ -28,6 +28,7 @@ All functions take LedgerView (read-only) and return immutable results.
 from __future__ import annotations
 from datetime import datetime
 from typing import Dict, Any
+from decimal import Decimal
 
 import math
 
@@ -35,12 +36,13 @@ from ..core import (
     LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     SYSTEM_WALLET, UNIT_TYPE_DEFERRED_CASH, QUANTITY_EPSILON,
     build_transaction, empty_pending_transaction,
+    _freeze_state,
 )
 
 
 def create_deferred_cash_unit(
     symbol: str,
-    amount: float,
+    amount: Decimal | float,
     currency: str,
     payment_date: datetime,
     payer_wallet: str,
@@ -52,7 +54,7 @@ def create_deferred_cash_unit(
 
     Args:
         symbol: Unique identifier (e.g., "DC_trade_123", "DIV_AAPL_2024-03-15_alice")
-        amount: Payment amount in the specified currency
+        amount: Payment amount in the specified currency (Decimal or float)
         currency: Currency symbol for the payment (e.g., "USD")
         payment_date: When the payment should execute
         payer_wallet: Wallet that will make the payment
@@ -85,7 +87,11 @@ def create_deferred_cash_unit(
         # Create the obligation
         ledger.move("system", "buyer", "DC_trade_123", 1, "trade_settlement_obligation")
     """
-    if amount <= 0:
+    # Convert amount to Decimal if it's a float
+    if not isinstance(amount, Decimal):
+        amount = Decimal(str(amount))
+
+    if amount <= Decimal('0'):
         raise ValueError(f"amount must be positive, got {amount}")
     if not currency or not currency.strip():
         raise ValueError("currency cannot be empty")
@@ -100,11 +106,11 @@ def create_deferred_cash_unit(
         symbol=symbol,
         name=f"Deferred Cash Payment: {amount} {currency}",
         unit_type=UNIT_TYPE_DEFERRED_CASH,
-        min_balance=-1.0,  # Allow slight negative for system extinguishment
-        max_balance=1.0,   # Quantity is always 1
+        min_balance=Decimal('-1'),  # Allow slight negative for system extinguishment
+        max_balance=Decimal('1'),   # Quantity is always 1
         decimal_places=0,  # No fractional DeferredCash units
         transfer_rule=None,
-        _state={
+        _frozen_state=_freeze_state({
             'amount': amount,
             'currency': currency,
             'payment_date': payment_date,
@@ -112,7 +118,7 @@ def create_deferred_cash_unit(
             'payee_wallet': payee_wallet,
             'settled': False,
             'reference': reference,
-        }
+        })
     )
 
 
@@ -174,6 +180,10 @@ def compute_deferred_cash_settlement(
     payer_wallet = state['payer_wallet']
     payee_wallet = state['payee_wallet']
 
+    # Ensure amount is Decimal (defensive type conversion)
+    if not isinstance(amount, Decimal):
+        amount = Decimal(str(amount))
+
     # Check who holds the DeferredCash unit
     # It could be either the payer (trade settlement) or payee (dividend entitlement)
     payer_balance = view.get_balance(payer_wallet, dc_symbol)
@@ -227,8 +237,8 @@ def transact(
     symbol: str,
     seller: str,
     buyer: str,
-    qty: float,
-    price: float,
+    qty: Decimal,
+    price: Decimal,
 ) -> PendingTransaction:
     """
     Execute a DeferredCash unit trade (assignment of the payment obligation).
@@ -265,11 +275,11 @@ def transact(
         ledger.execute(result)
     """
     # Validate quantity
-    if qty <= 0:
+    if qty <= Decimal('0'):
         raise ValueError(f"qty must be positive, got {qty}")
 
     # Validate price
-    if not math.isfinite(price) or price < 0:
+    if not price.is_finite() or price < Decimal('0'):
         raise ValueError(f"price must be non-negative and finite, got {price}")
 
     # Validate wallets
@@ -322,7 +332,7 @@ def deferred_cash_contract(
     view: LedgerView,
     symbol: str,
     timestamp: datetime,
-    prices: Dict[str, float]
+    prices: Dict[str, Decimal]
 ) -> PendingTransaction:
     """
     SmartContract interface for DeferredCash with LifecycleEngine.

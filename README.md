@@ -1,188 +1,163 @@
 # Ledger
 
-A Python double-entry accounting system for financial simulations, portfolio management, and backtesting.
+**Version 4.0.0**
 
-## What is the Ledger?
+A formally-structured financial ledger system with compositional correctness guarantees.
 
-The Ledger is a high-performance financial simulation system that serves as the golden source of truth for ownership records. It separates quantities from values: the ledger tracks who owns what, while external systems handle pricing and valuation. Built on immutable data structures and pure functions, it provides complete audit trails, deterministic execution, and time-travel capabilities for reconstructing any past state.
+---
 
-**Key Features:**
-- **Immutable transactions** - Double-entry bookkeeping with atomic moves between wallets
-- **Pure functions** - All business logic reads state via LedgerView and returns ContractResult
-- **Conservation laws** - Total supply of any unit remains constant across all wallets
-- **Time travel** - Reconstruct ledger state at any point in history via `clone_at()`
-- **Dual-mode execution** - Full audit trail for production, high-throughput for Monte Carlo (150k+ tx/sec)
+## Problem Statement
 
-**Target Use Cases:**
-- Monte Carlo simulations for derivatives and portfolio strategies
-- Backtesting trading strategies with complete audit trails
-- Educational tool for understanding financial instruments
-- Simulation environment for complex structured products
+Financial systems require:
 
-## Quick Start
+1. **Correctness**: Every balance must be explainable by a finite sequence of atomic transactions.
+2. **Auditability**: Any historical state must be reconstructible from the transaction log.
+3. **Determinism**: Given identical inputs, execution must produce identical outputs.
 
-### Installation
+Traditional approaches conflate these requirements with implementation complexity. This system separates them by construction.
+
+---
+
+## Core Guarantees
+
+The system provides these guarantees through structural enforcement, not runtime assertion:
+
+| Guarantee | Mechanism |
+|-----------|-----------|
+| **Double-entry invariant** | `sum(all_balances[unit]) == 0` for all units at all times |
+| **Atomicity** | Transactions fully apply or fully reject; no partial states |
+| **Referential transparency** | Contract functions are pure: `f(v, x) = f(v, x)` always |
+| **Replay determinism** | `replay(log) == original_state` by construction |
+| **Decimal precision** | All quantities use `Decimal`; no floating-point accumulation errors |
+
+See [MANIFESTO.md](MANIFESTO.md) for the governing principles.
+
+---
+
+## Architecture Overview
+
+```
+                    ┌─────────────────────────────────────────────────┐
+                    │                   Ledger                        │
+                    │  - balances: Dict[wallet, Dict[unit, Decimal]]  │
+                    │  - units: Dict[symbol, Unit]                    │
+                    │  - transaction_log: List[Transaction]           │
+                    └─────────────────────────────────────────────────┘
+                                         │
+                         ┌───────────────┼───────────────┐
+                         │               │               │
+                         ▼               ▼               ▼
+              ┌──────────────────┐ ┌──────────┐ ┌─────────────────┐
+              │   LedgerView     │ │ execute()│ │ LifecycleEngine │
+              │   (read-only)    │ │ (mutate) │ │ (orchestration) │
+              └──────────────────┘ └──────────┘ └─────────────────┘
+                         │                               │
+                         ▼                               ▼
+              ┌──────────────────┐            ┌─────────────────────┐
+              │  Pure Functions  │            │  Event Scheduler    │
+              │  (contracts)     │            │  + Smart Contracts  │
+              └──────────────────┘            └─────────────────────┘
+```
+
+### Data Flow
+
+1. **Pure functions** receive a `LedgerView` (read-only access) and produce a `PendingTransaction`
+2. **`execute()`** validates and atomically applies the transaction, appending to the log
+3. **LifecycleEngine** orchestrates scheduled events and contract polling
+
+This separation ensures that all state-reading logic is pure, and all mutation is channeled through a single controlled point.
+
+---
+
+## Intended Users
+
+- **Quantitative developers** building trading systems, risk engines, or portfolio simulations
+- **Financial engineers** requiring auditable position tracking with exact arithmetic
+- **Researchers** needing deterministic replay for backtesting or Monte Carlo analysis
+
+---
+
+## Usage
+
+```python
+from decimal import Decimal
+from ledger import Ledger, Move, build_transaction, cash, SYSTEM_WALLET
+
+# Create ledger (test_mode enables set_balance for testing)
+ledger = Ledger("demo", test_mode=True)
+
+# Register units and wallets
+ledger.register_unit(cash("USD", "US Dollar"))
+ledger.register_wallet("alice")
+ledger.register_wallet("bob")
+
+# Issue currency from system wallet
+tx = build_transaction(ledger, [
+    Move(Decimal("1000"), "USD", SYSTEM_WALLET, "alice", "issuance")
+])
+ledger.execute(tx)
+
+# Transfer between wallets
+tx = build_transaction(ledger, [
+    Move(Decimal("250"), "USD", "alice", "bob", "payment_001")
+])
+ledger.execute(tx)
+
+# Verify balances
+assert ledger.get_balance("alice", "USD") == Decimal("750")
+assert ledger.get_balance("bob", "USD") == Decimal("250")
+assert ledger.get_balance(SYSTEM_WALLET, "USD") == Decimal("-1000")
+
+# Double-entry holds: sum of all positions = 0
+assert ledger.total_supply("USD") == Decimal("0")
+```
+
+---
+
+## Key Types
+
+| Type | Description |
+|------|-------------|
+| `Move` | Immutable transfer specification: `(quantity, unit, source, dest, contract_id)` |
+| `Unit` | Immutable asset definition with balance constraints and optional transfer rules |
+| `PendingTransaction` | Intent before execution: moves, state changes, origin metadata |
+| `Transaction` | Executed record with ledger-assigned ID and execution timestamp |
+| `LedgerView` | Protocol for read-only ledger access (enables pure contract functions) |
+
+All core types are frozen dataclasses (`@dataclass(frozen=True, slots=True)`), ensuring immutability and enabling safe sharing across threads.
+
+---
+
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [MANIFESTO.md](MANIFESTO.md) | Governing principles and invariants |
+| [design.md](design.md) | Formal system design, correctness argument, and preconditions |
+| [QIS.md](QIS.md) | Methodology for creating new strategies |
+| [lifecycle.md](lifecycle.md) | Event scheduling and temporal behavior |
+| [AGENTS.md](AGENTS.md) | Expert agent specifications for code review |
+| [TESTING.md](TESTING.md) | Testing committee charter and methodology |
+| [EXPERT_REVIEW.md](EXPERT_REVIEW.md) | Formal committee review and remediation status |
+
+---
+
+## Installation
 
 ```bash
 pip install -e .
 ```
 
-### Basic Usage
-
-```python
-from ledger import Ledger, cash, Move
-from datetime import datetime
-
-# Create ledger and register units
-ledger = Ledger("simulation")
-ledger.register_unit(cash("USD", "US Dollar"))
-
-# Register wallets
-ledger.register_wallet("alice")
-ledger.register_wallet("bob")
-
-# Set initial balances
-ledger.set_balance("alice", "USD", 10000.0)
-ledger.set_balance("bob", "USD", 5000.0)
-
-# Transfer funds
-moves = [Move("alice", "bob", "USD", 100.0, "payment_1")]
-tx = ledger.create_transaction(moves)
-ledger.execute(tx)
-
-# Check balances
-print(f"Alice: ${ledger.get_balance('alice', 'USD')}")  # 9900.0
-print(f"Bob: ${ledger.get_balance('bob', 'USD')}")      # 5100.0
-```
-
-### Working with Financial Instruments
-
-```python
-from ledger import create_stock_unit, create_option_unit, LifecycleEngine
-from datetime import datetime
-
-# Create a stock with dividends
-stock = create_stock_unit(
-    symbol="AAPL",
-    name="Apple Inc.",
-    issuer="treasury",
-    currency="USD",
-    dividend_schedule=[
-        (datetime(2025, 3, 15), 0.25),
-        (datetime(2025, 6, 15), 0.25),
-    ]
-)
-ledger.register_unit(stock)
-
-# Create an option
-option = create_option_unit(
-    symbol="AAPL_C150",
-    name="AAPL Call 150",
-    underlying="AAPL",
-    strike=150.0,
-    maturity=datetime(2025, 12, 19),
-    option_type="call",
-    quantity=100,
-    currency="USD",
-    long_wallet="alice",
-    short_wallet="bob"
-)
-ledger.register_unit(option)
-
-# Use lifecycle engine to process automated events
-engine = LifecycleEngine(ledger)
-engine.register("STOCK", stock_contract)
-engine.register("BILATERAL_OPTION", option_contract)
-
-# Step through time with market prices
-prices = {"AAPL": 155.0}
-engine.step(datetime(2025, 12, 19), prices)
-```
-
-## Supported Instruments
-
-The Ledger provides implementations for a comprehensive set of financial instruments:
-
-- **Cash & Stock** - Simple currency units and equities with dividend scheduling
-- **Options** - Bilateral call/put options with physical delivery at maturity
-- **Forwards** - Forward contracts with delivery obligations
-- **Futures** - Exchange-traded futures using virtual ledger pattern for daily settlement
-- **Bonds** - Fixed income with coupon payments, accrued interest, and day count conventions
-- **Deferred Cash** - T+n settlement obligations for realistic trade settlement
-- **Margin Loans** - Collateralized lending with margin calls and liquidation
-- **Structured Notes** - Principal-protected notes with participation in underlying performance
-- **Portfolio Swaps** - Total return swaps with NAV-based settlement
-- **Autocallables** - Barrier-based notes with early redemption features
-
-Each instrument is isolated in its own module following the "one unit = one file" principle.
-
-## Documentation
-
-- **[DESIGN.md](DESIGN.md)** - Architecture overview, core patterns, and the UNWIND algorithm
-- **[PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)** - Current status, completed phases, and roadmap
-- **[AGENTS.md](AGENTS.md)** - Specialized reviewers and their philosophies
-- **[CHANGELOG.md](CHANGELOG.md)** - Version history and design decisions
-
-### Key Architectural Patterns
-
-**The `transact()` Protocol** - Each instrument implements a `transact()` method that reads ledger state via LedgerView and returns ContractResult with moves and state updates. This keeps all business logic pure and testable.
-
-**DeferredCash for Settlement** - Securities markets use T+n settlement. The ledger models this explicitly: stocks transfer on trade date, but cash obligations settle later via DeferredCash units.
-
-**Virtual Ledger for Futures** - Futures track multiple intraday trades in virtual ledger state, then generate a single real margin move at EOD settlement.
-
-**Conservation Laws** - For every unit at all times: sum of balances across all wallets equals constant. Every Move debits source and credits destination atomically.
-
-## Running Tests
-
-The project includes comprehensive test coverage with 876 tests:
+## Testing
 
 ```bash
-pytest
+pytest tests/ -q
 ```
 
-Tests cover:
-- Core ledger operations and double-entry accounting
-- Time-travel state reconstruction via UNWIND algorithm
-- Option, forward, and stock settlement mechanics
-- Delta hedging strategies
-- Bond coupon payments and accrued interest
-- Futures daily settlement and margin calls
-- Autocallable barrier observations
-- Margin loan collateral management
-- Portfolio swap resets and termination
-- Structured note payoff calculations
+975 tests verify correctness across all unit types and lifecycle scenarios.
 
-## Current Limitations
-
-The Ledger is designed for **simulation and backtesting**, not production trading systems. Current limitations include:
-
-- Float arithmetic (not Decimal) for simulation performance
-- No external settlement system integration
-- No regulatory reporting hooks (EMIR, MiFID II)
-- No fail tracking or buy-in processes
-- No multi-custodian reconciliation
-- Holiday calendar support is basic
-
-For a complete list of production hardening requirements, see the Phase 4 section in [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md).
-
-## Performance
-
-The Ledger supports dual-mode execution:
-
-| Mode                                     | Throughput    | Use Case                       |
-|------------------------------------------|---------------|--------------------------------|
-| Standard                                 | ~50k tx/sec   | Full validation and audit trail|
-| Fast mode (`fast_mode=True`)             | ~100k tx/sec  | Skip validation checks         |
-| No-log mode (`no_log=True`)              | ~75k tx/sec   | Skip transaction logging       |
-| Maximum (`fast_mode=True, no_log=True`)  | ~150k tx/sec  | Monte Carlo simulations        |
-
-Both modes produce identical results for valid inputs - the difference is only in performance characteristics.
+---
 
 ## License
 
-[Add license information]
-
-## Contributing
-
-[Add contributing guidelines]
+Proprietary. All rights reserved.

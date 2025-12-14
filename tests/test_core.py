@@ -11,6 +11,7 @@ Tests:
 
 import pytest
 from datetime import datetime
+from decimal import Decimal
 from ledger import (
     Move, Transaction, PendingTransaction, Unit, UnitStateChange,
     TransactionOrigin, OriginType,
@@ -33,38 +34,38 @@ class TestMove:
     """Tests for Move dataclass."""
 
     def test_create_valid_move(self):
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         assert move.source == "alice"
         assert move.dest == "bob"
         assert move.unit_symbol == "USD"
-        assert move.quantity == 100.0
+        assert move.quantity == Decimal("100.0")
         assert move.contract_id == "tx_001"
         assert move.metadata is None
 
     def test_move_with_metadata(self):
-        move = Move(100.0, "USD", "alice", "bob", "tx_001", {"note": "payment"})
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001", {"note": "payment"})
         assert move.metadata == {"note": "payment"}
 
     def test_move_zero_quantity_raises(self):
         with pytest.raises(ValueError, match="quantity is effectively zero"):
-            Move(0.0, "USD", "alice", "bob", "tx_001")
+            Move(Decimal("0.0"), "USD", "alice", "bob", "tx_001")
 
     def test_move_same_source_dest_raises(self):
         with pytest.raises(ValueError, match="Source and dest must be different"):
-            Move(100.0, "USD", "alice", "alice", "tx_001")
+            Move(Decimal("100.0"), "USD", "alice", "alice", "tx_001")
 
     def test_move_is_frozen(self):
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         with pytest.raises(AttributeError):
             move.quantity = 200.0
 
     def test_move_negative_quantity_allowed(self):
         # Negative quantities are allowed (for reversals, etc.)
-        move = Move(-100.0, "USD", "alice", "bob", "tx_001")
-        assert move.quantity == -100.0
+        move = Move(Decimal("-100.0"), "USD", "alice", "bob", "tx_001")
+        assert move.quantity == Decimal("-100.0")
 
     def test_move_repr(self):
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         assert "alice" in repr(move)
         assert "bob" in repr(move)
         assert "100" in repr(move)
@@ -75,7 +76,7 @@ class TestTransaction:
     """Tests for Transaction dataclass."""
 
     def test_create_valid_transaction(self):
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         tx = Transaction(
             moves=(move,),
             state_changes=(),
@@ -94,8 +95,8 @@ class TestTransaction:
 
     def test_transaction_multiple_moves(self):
         moves = (
-            Move(100.0, "USD", "alice", "bob", "trade_001"),
-            Move(10.0, "AAPL", "bob", "alice", "trade_001"),
+            Move(Decimal("100.0"), "USD", "alice", "bob", "trade_001"),
+            Move(Decimal("10.0"), "AAPL", "bob", "alice", "trade_001"),
         )
         tx = Transaction(
             moves=moves,
@@ -112,8 +113,8 @@ class TestTransaction:
         assert tx.contract_ids == frozenset({"trade_001"})
 
     def test_transaction_with_state_changes(self):
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
-        delta = UnitStateChange("AAPL", {"price": 100}, {"price": 105})
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
+        delta = UnitStateChange("AAPL", {"price": Decimal("100")}, {"price": Decimal("105")})
         tx = Transaction(
             moves=(move,),
             state_changes=(delta,),
@@ -159,7 +160,7 @@ class TestTransaction:
             )
 
     def test_transaction_is_frozen(self):
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         tx = Transaction(
             moves=(move,),
             state_changes=(),
@@ -179,7 +180,7 @@ class TestPendingTransaction:
     """Tests for PendingTransaction dataclass."""
 
     def test_create_valid_pending_transaction(self):
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         pending = PendingTransaction(
             moves=(move,),
             state_changes=(),
@@ -192,7 +193,7 @@ class TestPendingTransaction:
 
     def test_pending_transaction_auto_intent_id(self):
         """Same content produces same intent_id."""
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         p1 = PendingTransaction(
             moves=(move,),
             state_changes=(),
@@ -221,8 +222,8 @@ class TestTransactionRepr:
     """Tests for Transaction representation."""
 
     def test_transaction_repr_includes_state_changes(self):
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
-        delta = UnitStateChange("AAPL", {"old": 1}, {"new": 2})
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
+        delta = UnitStateChange("AAPL", {"old": Decimal("1")}, {"new": Decimal("2")})
         tx = Transaction(
             moves=(move,),
             state_changes=(delta,),
@@ -266,32 +267,32 @@ class TestUnitFactories:
         assert usd.symbol == "USD"
         assert usd.name == "US Dollar"
         assert usd.unit_type == "CASH"
-        assert usd.decimal_places == 2
+        assert usd.decimal_places == Decimal("2")
         assert usd.min_balance == -1_000_000_000.0
 
     def test_cash_rounding(self):
         usd = cash("USD", "US Dollar", decimal_places=2)
-        assert usd.round(100.456) == 100.46
-        assert usd.round(100.444) == 100.44
+        assert usd.round(100.456) == Decimal("100.46")
+        assert usd.round(100.444) == Decimal("100.44")
 
 class TestTransferRules:
     """Tests for transfer rules."""
 
     def test_bilateral_rule_allows_counterparties(self):
         view = FakeView(
-            balances={"alice": {"OPT": 1}, "bob": {"OPT": -1}},
+            balances={"alice": {"OPT": Decimal("1")}, "bob": {"OPT": -1}},
             states={"OPT": {"long_wallet": "alice", "short_wallet": "bob"}}
         )
-        move = Move(1.0, "OPT", "alice", "bob", "close")
+        move = Move(Decimal("1.0"), "OPT", "alice", "bob", "close")
         # Should not raise
         bilateral_transfer_rule(view, move)
 
     def test_bilateral_rule_rejects_third_party(self):
         view = FakeView(
-            balances={"alice": {"OPT": 1}, "bob": {"OPT": -1}},
+            balances={"alice": {"OPT": Decimal("1")}, "bob": {"OPT": -1}},
             states={"OPT": {"long_wallet": "alice", "short_wallet": "bob"}}
         )
-        move = Move(1.0, "OPT", "alice", "charlie", "illegal")
+        move = Move(Decimal("1.0"), "OPT", "alice", "charlie", "illegal")
         with pytest.raises(TransferRuleViolation):
             bilateral_transfer_rule(view, move)
 

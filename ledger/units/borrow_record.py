@@ -39,6 +39,7 @@ All trivially testable with FakeView.
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
+from decimal import Decimal
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
@@ -46,6 +47,7 @@ from ..core import (
     LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     build_transaction, empty_pending_transaction,
     SYSTEM_WALLET, QUANTITY_EPSILON, UNIT_TYPE_BORROW_RECORD,
+    _freeze_state,
 )
 from .deferred_cash import create_deferred_cash_unit
 
@@ -55,10 +57,10 @@ from .deferred_cash import create_deferred_cash_unit
 # =============================================================================
 
 # Default collateral margin (102% = shares worth $100 require $102 collateral)
-DEFAULT_COLLATERAL_MARGIN = 1.02
+DEFAULT_COLLATERAL_MARGIN = Decimal("1.02")
 
 # Default borrow rate in basis points (50 bps = 0.5% annualized)
-DEFAULT_BORROW_RATE_BPS = 50
+DEFAULT_BORROW_RATE_BPS = Decimal("50")
 
 
 # =============================================================================
@@ -88,7 +90,7 @@ def compute_available_position(
     view: LedgerView,
     wallet: str,
     stock_symbol: str,
-) -> float:
+) -> Decimal:
     """
     Compute shares available for sale or delivery.
 
@@ -114,7 +116,7 @@ def compute_available_position(
 
     # Sum all active borrow obligations for this stock
     # BorrowRecords are named: BORROW_{stock}_{borrower}_{lender}_{id}
-    borrow_obligations = 0.0
+    borrow_obligations = Decimal("0")
 
     # Find BorrowRecord units by checking all units that match the pattern
     # and seeing if this wallet holds them
@@ -146,17 +148,17 @@ def compute_available_position(
                 continue  # Already closed
 
             # Add the obligation quantity
-            borrow_obligations += state.get('quantity', 0.0)
+            borrow_obligations += state.get('quantity', Decimal("0"))
 
     return owned - borrow_obligations
 
 
 def compute_borrow_fee(
-    quantity: float,
-    rate_bps: float,
+    quantity: Decimal,
+    rate_bps: Decimal,
     days: int,
-    price: float,
-) -> float:
+    price: Decimal,
+) -> Decimal:
     """
     Compute borrow fee for a period.
 
@@ -175,17 +177,22 @@ def compute_borrow_fee(
         1000 shares at $100, 50 bps rate, 30 days
         Fee = 1000 * 100 * (50/10000) * (30/365) = $41.10
     """
+    # Ensure numeric values are Decimal
+    quantity = Decimal(str(quantity))
+    rate_bps = Decimal(str(rate_bps))
+    price = Decimal(str(price))
+
     if quantity <= 0 or days <= 0 or price <= 0:
-        return 0.0
-    annual_rate = rate_bps / 10000.0
-    return quantity * price * annual_rate * (days / 365.0)
+        return Decimal("0")
+    annual_rate = rate_bps / Decimal("10000")
+    return quantity * price * annual_rate * (Decimal(days) / Decimal("365"))
 
 
 def compute_required_collateral(
-    quantity: float,
-    price: float,
-    margin: float = DEFAULT_COLLATERAL_MARGIN,
-) -> float:
+    quantity: Decimal,
+    price: Decimal,
+    margin: Decimal = DEFAULT_COLLATERAL_MARGIN,
+) -> Decimal:
     """
     Compute required collateral for a borrow.
 
@@ -203,8 +210,13 @@ def compute_required_collateral(
         1000 shares at $100 with 102% margin
         Collateral = 1000 * 100 * 1.02 = $102,000
     """
+    # Ensure numeric values are Decimal
+    quantity = Decimal(str(quantity))
+    price = Decimal(str(price))
+    margin = Decimal(str(margin))
+
     if quantity <= 0 or price <= 0:
-        return 0.0
+        return Decimal("0")
     return quantity * price * margin
 
 
@@ -212,7 +224,7 @@ def validate_short_sale(
     view: LedgerView,
     seller: str,
     stock_symbol: str,
-    quantity: float,
+    quantity: Decimal,
 ) -> Tuple[bool, str]:
     """
     Validate if a short sale is permitted.
@@ -235,6 +247,9 @@ def validate_short_sale(
         Alice has 50 available AAPL, tries to sell 100
         -> (False, "Insufficient available position: 50 < 100")
     """
+    # Ensure quantity is Decimal
+    quantity = Decimal(str(quantity))
+
     if quantity <= 0:
         return False, "Quantity must be positive"
 
@@ -243,7 +258,7 @@ def validate_short_sale(
     if available >= quantity - QUANTITY_EPSILON:
         return True, "Sufficient available position"
 
-    shortfall = quantity - max(0.0, available)
+    shortfall = quantity - max(Decimal("0"), available)
     return False, f"Insufficient available position: {available:.2f} available, need {quantity:.2f} (shortfall: {shortfall:.2f})"
 
 
@@ -255,12 +270,12 @@ def create_borrow_record_unit(
     stock_symbol: str,
     borrower: str,
     lender: str,
-    quantity: float,
+    quantity: Decimal,
     borrow_date: datetime,
-    rate_bps: float = DEFAULT_BORROW_RATE_BPS,
+    rate_bps: Decimal = DEFAULT_BORROW_RATE_BPS,
     contract_type: ContractType = ContractType.OPEN,
     collateral_currency: str = "USD",
-    collateral_amount: float = 0.0,
+    collateral_amount: Decimal = Decimal("0"),
     term_end_date: Optional[datetime] = None,
     borrow_id: Optional[str] = None,
 ) -> Unit:
@@ -306,6 +321,11 @@ def create_borrow_record_unit(
             Move(1, borrow.symbol, "system", "alice", "borrow_initiate")
         ]))
     """
+    # Ensure numeric values are Decimal
+    quantity = Decimal(str(quantity))
+    rate_bps = Decimal(str(rate_bps))
+    collateral_amount = Decimal(str(collateral_amount))
+
     if quantity <= 0:
         raise ValueError(f"quantity must be positive, got {quantity}")
     if borrower == lender:
@@ -327,7 +347,7 @@ def create_borrow_record_unit(
         max_balance=1.0,   # Quantity is always 1 (like DeferredCash)
         decimal_places=0,
         transfer_rule=None,
-        _state={
+        _frozen_state=_freeze_state({
             'stock_symbol': stock_symbol,
             'borrower': borrower,
             'lender': lender,
@@ -342,9 +362,9 @@ def create_borrow_record_unit(
             'recall_notice_date': None,
             'recall_due_date': None,
             'return_date': None,
-            'accrued_fees': 0.0,
+            'accrued_fees': Decimal("0"),
             'last_fee_date': borrow_date,
-        }
+        })
     )
 
 
@@ -357,8 +377,8 @@ def initiate_borrow(
     stock_symbol: str,
     borrower: str,
     lender: str,
-    quantity: float,
-    rate_bps: float = DEFAULT_BORROW_RATE_BPS,
+    quantity: Decimal,
+    rate_bps: Decimal = DEFAULT_BORROW_RATE_BPS,
     contract_type: ContractType = ContractType.OPEN,
     borrow_id: Optional[str] = None,
 ) -> PendingTransaction:
@@ -387,6 +407,10 @@ def initiate_borrow(
         ledger.execute(result)
         # Alice now has 1000 AAPL and owes them back to Bob
     """
+    # Ensure quantity is Decimal
+    quantity = Decimal(str(quantity))
+    rate_bps = Decimal(str(rate_bps))
+
     if quantity <= 0:
         raise ValueError(f"quantity must be positive, got {quantity}")
 
@@ -424,7 +448,7 @@ def initiate_borrow(
             contract_id=f"borrow_{borrow_unit.symbol}_shares",
         ),
         Move(
-            quantity=1.0,
+            quantity=Decimal("1"),
             unit_symbol=borrow_unit.symbol,
             source=SYSTEM_WALLET,
             dest=borrower,
@@ -443,7 +467,7 @@ def compute_borrow_return(
     view: LedgerView,
     borrow_symbol: str,
     return_time: datetime,
-    final_price: float = 0.0,
+    final_price: Decimal = Decimal("0"),
 ) -> PendingTransaction:
     """
     Return borrowed shares and close the borrow.
@@ -468,6 +492,9 @@ def compute_borrow_return(
         ledger.execute(result)
         # Alice returns shares to Bob, borrow is closed
     """
+    # Ensure final_price is Decimal
+    final_price = Decimal(str(final_price))
+
     state = view.get_unit_state(borrow_symbol)
 
     # Check if already returned
@@ -497,8 +524,8 @@ def compute_borrow_return(
     last_fee_date = state.get('last_fee_date', borrow_date)
     rate_bps = state['rate_bps']
     days_since_last = (return_time - last_fee_date).days
-    final_fee = compute_borrow_fee(quantity, rate_bps, days_since_last, final_price) if final_price > 0 else 0.0
-    total_fees = state.get('accrued_fees', 0.0) + final_fee
+    final_fee = compute_borrow_fee(quantity, rate_bps, days_since_last, final_price) if final_price > 0 else Decimal("0")
+    total_fees = state.get('accrued_fees', Decimal("0")) + final_fee
 
     moves = [
         # Return shares to lender
@@ -511,7 +538,7 @@ def compute_borrow_return(
         ),
         # Extinguish the BorrowRecord
         Move(
-            quantity=1.0,
+            quantity=Decimal("1"),
             unit_symbol=borrow_symbol,
             source=borrower,
             dest=SYSTEM_WALLET,
@@ -534,7 +561,7 @@ def compute_borrow_return(
         )
         units_to_create.append(fee_dc)
         moves.append(Move(
-            quantity=1.0,
+            quantity=Decimal("1"),
             unit_symbol=fee_dc.symbol,
             source=SYSTEM_WALLET,
             dest=borrower,
@@ -620,16 +647,16 @@ def borrow_record_contract(
     view: LedgerView,
     symbol: str,
     timestamp: datetime,
-    prices: Dict[str, float],
+    prices: Dict[str, Decimal],
 ) -> PendingTransaction:
     """
     SmartContract interface for BorrowRecord with LifecycleEngine.
 
     This handles:
     - Daily fee accrual (creates DeferredCash for periodic fees)
-    - Recall deadline enforcement (future: auto buy-in)
+    - Recall deadline enforcement
 
-    Currently this is a stub - fee accrual will be added in Phase 3.
+    Note: Fee accrual is currently a placeholder for future enhancement.
 
     Args:
         view: Read-only ledger access
@@ -706,7 +733,7 @@ def get_total_borrowed(
     view: LedgerView,
     wallet: str,
     stock_symbol: str,
-) -> float:
+) -> Decimal:
     """
     Get total shares borrowed by a wallet for a stock.
 
@@ -718,8 +745,8 @@ def get_total_borrowed(
     Returns:
         Total borrowed quantity
     """
-    total = 0.0
+    total = Decimal("0")
     for borrow_symbol in get_active_borrows(view, wallet, stock_symbol):
         state = view.get_unit_state(borrow_symbol)
-        total += state.get('quantity', 0.0)
+        total += state.get('quantity', Decimal("0"))
     return total

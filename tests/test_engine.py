@@ -8,6 +8,7 @@ Tests:
 
 import pytest
 from datetime import datetime, timedelta
+from decimal import Decimal
 from ledger import (
     Ledger, Move, PendingTransaction,
     TransactionOrigin, OriginType,
@@ -62,19 +63,19 @@ class TestLifecycleEngineBasic:
     """Basic tests for LifecycleEngine."""
 
     def test_create_engine(self):
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         engine = LifecycleEngine(ledger)
         assert engine.ledger is ledger
         assert engine.contracts == {}
 
     def test_create_engine_with_contracts(self):
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         mock_contract = MockContract()
         engine = LifecycleEngine(ledger, contracts={'MOCK': mock_contract})
         assert 'MOCK' in engine.contracts
 
     def test_register_contract(self):
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         engine = LifecycleEngine(ledger)
         mock_contract = MockContract()
         engine.register('MOCK_TYPE', mock_contract)
@@ -86,7 +87,7 @@ class TestLifecycleEngineStep:
     """Tests for LifecycleEngine.step()."""
 
     def test_step_advances_time(self):
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         engine = LifecycleEngine(ledger)
 
         t1 = datetime(2025, 1, 15, 10, 0)
@@ -94,14 +95,14 @@ class TestLifecycleEngineStep:
         assert ledger.current_time == t1
 
     def test_step_no_contracts_returns_empty(self):
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         engine = LifecycleEngine(ledger)
 
         txs = engine.step(datetime(2025, 1, 15), {})
         assert txs == []
 
     def test_step_contract_not_matched(self):
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         engine = LifecycleEngine(ledger)
         engine.register('OTHER_TYPE', MockContract(should_fire=True))
@@ -111,27 +112,27 @@ class TestLifecycleEngineStep:
         assert txs == []
 
     def test_step_contract_fires(self):
-        ledger = Ledger("test", verbose=False)
+        ledger = Ledger("test", verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.balances["alice"]["USD"] = 1000
+        ledger.balances["alice"]["USD"] = Decimal("1000")
 
         # Create mock contract that fires
         mock_contract = MockContract(
             should_fire=True,
-            moves=[Move(100.0, "USD", "alice", "bob", "mock_tx")]
+            moves=[Move(Decimal("100.0"), "USD", "alice", "bob", "mock_tx")]
         )
         engine = LifecycleEngine(ledger)
         engine.register('CASH', mock_contract)
 
         txs = engine.step(datetime(2025, 1, 15), {})
         assert len(txs) == 1
-        assert ledger.get_balance("alice", "USD") == 900
-        assert ledger.get_balance("bob", "USD") == 100
+        assert ledger.get_balance("alice", "USD") == Decimal("900")
+        assert ledger.get_balance("bob", "USD") == Decimal("100")
 
     def test_step_contract_not_firing(self):
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         mock_contract = MockContract(should_fire=False)
@@ -140,14 +141,14 @@ class TestLifecycleEngineStep:
 
         txs = engine.step(datetime(2025, 1, 15), {})
         assert txs == []
-        assert mock_contract.call_count == 1
+        assert mock_contract.call_count == Decimal("1")
 
 
 class TestLifecycleEngineRun:
     """Tests for LifecycleEngine.run()."""
 
     def test_run_processes_all_timestamps(self):
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         mock_contract = MockContract(should_fire=False)
@@ -161,24 +162,24 @@ class TestLifecycleEngineRun:
         ]
 
         def price_fn(t):
-            return {'USD': 1.0}
+            return {'USD': Decimal("1.0")}
 
         engine.run(timestamps, price_fn)
         # Called once per timestamp
-        assert mock_contract.call_count == 3
+        assert mock_contract.call_count == Decimal("3")
         assert ledger.current_time == timestamps[-1]
 
     def test_run_returns_all_transactions(self):
-        ledger = Ledger("test", verbose=False)
+        ledger = Ledger("test", verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.balances["alice"]["USD"] = 10000
+        ledger.balances["alice"]["USD"] = Decimal("10000")
 
         # Contract that always fires
         mock_contract = MockContract(
             should_fire=True,
-            moves=[Move(100.0, "USD", "alice", "bob", "mock_tx")]
+            moves=[Move(Decimal("100.0"), "USD", "alice", "bob", "mock_tx")]
         )
         engine = LifecycleEngine(ledger)
         engine.register('CASH', mock_contract)
@@ -194,14 +195,14 @@ class TestLifecycleEngineRun:
 
         txs = engine.run(timestamps, price_fn)
         assert len(txs) == 3
-        assert ledger.get_balance("alice", "USD") == 10000 - 300
+        assert ledger.get_balance("alice", "USD") == Decimal("10000") - 300
 
 
 class TestLifecycleEngineWithOptions:
     """Integration tests with OptionContract."""
 
     def test_option_auto_settlement(self):
-        ledger = Ledger("test", verbose=False)
+        ledger = Ledger("test", verbose=False, test_mode=True)
 
         # Setup units and wallets
         ledger.register_unit(cash("USD", "US Dollar"))
@@ -215,10 +216,10 @@ class TestLifecycleEngineWithOptions:
             symbol="AAPL_C150",
             name="AAPL Call 150",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=datetime(2025, 6, 1),
             option_type="call",
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob"
@@ -226,10 +227,10 @@ class TestLifecycleEngineWithOptions:
         ledger.register_unit(option_unit)
 
         # Setup positions
-        ledger.balances["alice"]["AAPL_C150"] = 5
+        ledger.balances["alice"]["AAPL_C150"] = Decimal("5")
         ledger.balances["bob"]["AAPL_C150"] = -5
-        ledger.balances["alice"]["USD"] = 100000
-        ledger.balances["bob"]["AAPL"] = 1000
+        ledger.balances["alice"]["USD"] = Decimal("100000")
+        ledger.balances["bob"]["AAPL"] = Decimal("1000")
 
         # Setup engine
         engine = LifecycleEngine(ledger)
@@ -243,7 +244,7 @@ class TestLifecycleEngineWithOptions:
         ]
 
         def price_fn(t):
-            return {'AAPL': 170.0}  # ITM
+            return {'AAPL': Decimal("170.0")}  # ITM
 
         txs = engine.run(timestamps, price_fn)
 
@@ -256,7 +257,7 @@ class TestLifecycleEngineWithForwards:
     """Integration tests with ForwardContract."""
 
     def test_forward_auto_settlement(self):
-        ledger = Ledger("test", verbose=False)
+        ledger = Ledger("test", verbose=False, test_mode=True)
 
         # Setup units and wallets
         ledger.register_unit(cash("USD", "US Dollar"))
@@ -270,9 +271,9 @@ class TestLifecycleEngineWithForwards:
             symbol="OIL_FWD",
             name="Oil Forward",
             underlying="OIL",
-            forward_price=75.0,
+            forward_price=Decimal("75.0"),
             delivery_date=datetime(2025, 6, 1),
-            quantity=1000,
+            quantity=Decimal("1000"),
             currency="USD",
             long_wallet="buyer",
             short_wallet="seller"
@@ -280,10 +281,10 @@ class TestLifecycleEngineWithForwards:
         ledger.register_unit(forward_unit)
 
         # Setup positions
-        ledger.balances["buyer"]["OIL_FWD"] = 2
+        ledger.balances["buyer"]["OIL_FWD"] = Decimal("2")
         ledger.balances["seller"]["OIL_FWD"] = -2
-        ledger.balances["buyer"]["USD"] = 200000
-        ledger.balances["seller"]["OIL"] = 5000
+        ledger.balances["buyer"]["USD"] = Decimal("200000")
+        ledger.balances["seller"]["OIL"] = Decimal("5000")
 
         # Setup engine
         engine = LifecycleEngine(ledger)
@@ -297,7 +298,7 @@ class TestLifecycleEngineWithForwards:
         ]
 
         def price_fn(t):
-            return {'OIL': 80.0}
+            return {'OIL': Decimal("80.0")}
 
         txs = engine.run(timestamps, price_fn)
 
@@ -310,7 +311,7 @@ class TestLifecycleEngineWithDeltaHedge:
     """Integration tests with DeltaHedgeContract."""
 
     def test_delta_hedge_rebalancing(self):
-        ledger = Ledger("test", verbose=False)
+        ledger = Ledger("test", verbose=False, test_mode=True)
 
         # Setup units and wallets
         ledger.register_unit(cash("USD", "US Dollar"))
@@ -325,22 +326,22 @@ class TestLifecycleEngineWithDeltaHedge:
             symbol="HEDGE",
             name="AAPL Hedge",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=maturity,
-            volatility=0.20,
-            num_options=10,
-            option_multiplier=100,
+            volatility=Decimal("0.20"),
+            num_options=Decimal("10"),
+            option_multiplier=Decimal("100"),
             currency="USD",
             strategy_wallet="hedge_fund",
             market_wallet="market",
-            risk_free_rate=0.0,
+            risk_free_rate=Decimal("0.0"),
         )
         ledger.register_unit(hedge_unit)
 
         # Setup balances
-        ledger.balances["hedge_fund"]["USD"] = 1000000
-        ledger.balances["market"]["AAPL"] = 100000
-        ledger.balances["market"]["USD"] = 1000000
+        ledger.balances["hedge_fund"]["USD"] = Decimal("1000000")
+        ledger.balances["market"]["AAPL"] = Decimal("100000")
+        ledger.balances["market"]["USD"] = Decimal("1000000")
 
         # Setup engine
         engine = LifecycleEngine(ledger)
@@ -354,7 +355,7 @@ class TestLifecycleEngineWithDeltaHedge:
         ]
 
         def price_fn(t):
-            return {'AAPL': 155.0}
+            return {'AAPL': Decimal("155.0")}
 
         txs = engine.run(timestamps, price_fn)
 
@@ -362,7 +363,7 @@ class TestLifecycleEngineWithDeltaHedge:
         assert ledger.get_balance("hedge_fund", "AAPL") > 0
 
     def test_delta_hedge_liquidation_at_maturity(self):
-        ledger = Ledger("test", verbose=False)
+        ledger = Ledger("test", verbose=False, test_mode=True)
 
         # Setup
         ledger.register_unit(cash("USD", "US Dollar"))
@@ -376,27 +377,26 @@ class TestLifecycleEngineWithDeltaHedge:
             symbol="HEDGE",
             name="AAPL Hedge",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=maturity,
-            volatility=0.20,
-            num_options=10,
-            option_multiplier=100,
+            volatility=Decimal("0.20"),
+            num_options=Decimal("10"),
+            option_multiplier=Decimal("100"),
             currency="USD",
             strategy_wallet="hedge_fund",
             market_wallet="market",
-            risk_free_rate=0.0,
+            risk_free_rate=Decimal("0.0"),
         )
         ledger.register_unit(hedge_unit)
 
         # Setup with existing position - set both wallet balance and strategy's current_shares
-        ledger.set_balance("hedge_fund", "AAPL", 800)
-        ledger.set_balance("hedge_fund", "USD", 50000)
-        ledger.set_balance("market", "AAPL", 100000)  # Market needs AAPL to buy from hedge
-        ledger.set_balance("market", "USD", 1000000)
+        ledger.set_balance("hedge_fund", "AAPL", Decimal("800"))
+        ledger.set_balance("hedge_fund", "USD", Decimal("50000"))
+        ledger.set_balance("market", "AAPL", Decimal("100000"))  # Market needs AAPL to buy from hedge
+        ledger.set_balance("market", "USD", Decimal("1000000"))
 
-        # Each strategy tracks its own shares in state
-        # Access unit._state directly since get_unit_state() returns a deep copy
-        ledger.units["HEDGE"]._state['current_shares'] = 800.0
+        # Each strategy tracks its own shares in state (use update_unit_state for frozen Unit)
+        ledger.update_unit_state("HEDGE", {'current_shares': Decimal("800.0")})
 
         engine = LifecycleEngine(ledger)
         engine.register("DELTA_HEDGE_STRATEGY", delta_hedge_contract())
@@ -408,24 +408,24 @@ class TestLifecycleEngineWithDeltaHedge:
         ]
 
         def price_fn(t):
-            return {'AAPL': 160.0}
+            return {'AAPL': Decimal("160.0")}
 
         engine.run(timestamps, price_fn)
 
         # Should be liquidated
         state = ledger.get_unit_state("HEDGE")
         assert state.get('liquidated') is True
-        assert state.get('current_shares') == 0.0  # Strategy's tracked shares should be 0
+        assert state.get('current_shares') == Decimal("0")  # Strategy's tracked shares should be 0
         # Wallet should have 0 AAPL from this strategy (but test setup is a bit artificial)
         # The 800 shares were sold during liquidation
-        assert ledger.get_balance("hedge_fund", "AAPL") == 0
+        assert ledger.get_balance("hedge_fund", "AAPL") == Decimal("0")
 
 
 class TestLifecycleEngineMultipleContracts:
     """Tests with multiple contract types."""
 
     def test_multiple_contract_types(self):
-        ledger = Ledger("test", verbose=False)
+        ledger = Ledger("test", verbose=False, test_mode=True)
 
         # Setup
         ledger.register_unit(cash("USD", "US Dollar"))
@@ -442,10 +442,10 @@ class TestLifecycleEngineMultipleContracts:
             symbol="AAPL_C150",
             name="AAPL Call 150",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=datetime(2025, 6, 1),
             option_type="call",
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob"
@@ -457,9 +457,9 @@ class TestLifecycleEngineMultipleContracts:
             symbol="OIL_FWD",
             name="Oil Forward",
             underlying="OIL",
-            forward_price=75.0,
+            forward_price=Decimal("75.0"),
             delivery_date=datetime(2025, 6, 1),
-            quantity=1000,
+            quantity=Decimal("1000"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob"
@@ -467,13 +467,13 @@ class TestLifecycleEngineMultipleContracts:
         ledger.register_unit(forward_unit)
 
         # Setup positions
-        ledger.balances["alice"]["AAPL_C150"] = 5
+        ledger.balances["alice"]["AAPL_C150"] = Decimal("5")
         ledger.balances["bob"]["AAPL_C150"] = -5
-        ledger.balances["alice"]["OIL_FWD"] = 2
+        ledger.balances["alice"]["OIL_FWD"] = Decimal("2")
         ledger.balances["bob"]["OIL_FWD"] = -2
-        ledger.balances["alice"]["USD"] = 500000
-        ledger.balances["bob"]["AAPL"] = 1000
-        ledger.balances["bob"]["OIL"] = 5000
+        ledger.balances["alice"]["USD"] = Decimal("500000")
+        ledger.balances["bob"]["AAPL"] = Decimal("1000")
+        ledger.balances["bob"]["OIL"] = Decimal("5000")
 
         # Register both contracts
         engine = LifecycleEngine(ledger)
@@ -484,7 +484,7 @@ class TestLifecycleEngineMultipleContracts:
         timestamps = [datetime(2025, 6, 1)]
 
         def price_fn(t):
-            return {'AAPL': 170.0, 'OIL': 80.0}
+            return {'AAPL': Decimal("170.0"), 'OIL': Decimal("80.0")}
 
         engine.run(timestamps, price_fn)
 

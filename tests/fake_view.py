@@ -7,6 +7,7 @@ without requiring a full Ledger instance.
 
 from __future__ import annotations
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict, Set, Optional, Any
 
 from ledger import LedgerView
@@ -32,13 +33,13 @@ class FakeView:
 
     Example:
         view = FakeView(
-            balances={'alice': {'USD': 1000, 'AAPL': 10}},
+            balances={'alice': {'USD': Decimal("1000"), 'AAPL': Decimal("10")}},
             states={'AAPL': {'issuer': 'AAPL'}},
             time=datetime(2025, 1, 1)
         )
 
         positions = view.get_positions('AAPL')
-        # Returns: {'alice': 10}
+        # Returns: {'alice': Decimal("10")}
     """
 
     def __init__(
@@ -58,7 +59,7 @@ class FakeView:
         return self._time
 
     def get_balance(self, wallet_id: str, unit_symbol: str) -> float:
-        return self._balances.get(wallet_id, {}).get(unit_symbol, 0.0)
+        return self._balances.get(wallet_id, {}).get(unit_symbol, Decimal("0.0"))
 
     def get_unit_state(self, unit_symbol: str) -> UnitState:
         return dict(self._states.get(unit_symbol, {}))

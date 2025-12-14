@@ -10,6 +10,7 @@ Tests pure functions for:
 
 import pytest
 from datetime import datetime, timedelta
+from decimal import Decimal
 from ledger import (
     # Core
     PendingTransaction,
@@ -65,7 +66,7 @@ class TestCreateStockUnit:
     def test_create_stock_not_shortable(self):
         """Non-shortable stock has zero min_balance."""
         unit = create_stock_unit("AAPL", "Apple Inc", "treasury", "USD", shortable=False)
-        assert unit.min_balance == 0
+        assert unit.min_balance == Decimal("0")
 
     def test_create_stock_with_dividend_schedule(self):
         """Stock with dividend schedule."""
@@ -75,13 +76,13 @@ class TestCreateStockUnit:
         ]
         unit = create_stock_unit("AAPL", "Apple Inc", "treasury", "USD",
                                   dividend_schedule=schedule)
-        state = unit._state
+        state = unit.state
         assert len(state.get('dividend_schedule', [])) == 2
 
     def test_create_stock_state_has_issuer(self):
         """Stock state includes issuer."""
         unit = create_stock_unit("AAPL", "Apple Inc", "treasury", "USD")
-        assert unit._state['issuer'] == "treasury"
+        assert unit.state['issuer'] == "treasury"
 
 
 class TestProcessDividends:
@@ -91,9 +92,9 @@ class TestProcessDividends:
         """Dividend paid on payment date."""
         view = FakeView(
             balances={
-                "alice": {"AAPL": 1000},
-                "bob": {"AAPL": 500},
-                "treasury": {"USD": 10000000},
+                "alice": {"AAPL": Decimal("1000")},
+                "bob": {"AAPL": Decimal("500")},
+                "treasury": {"USD": Decimal("10000000")},
             },
             states={
                 "AAPL": {
@@ -116,7 +117,7 @@ class TestProcessDividends:
     def test_dividend_before_payment_date(self):
         """No dividend before payment date."""
         view = FakeView(
-            balances={"alice": {"AAPL": 1000}, "treasury": {"USD": 10000000}},
+            balances={"alice": {"AAPL": Decimal("1000")}, "treasury": {"USD": Decimal("10000000")}},
             states={
                 "AAPL": {
                     "unit_type": "STOCK",
@@ -137,8 +138,8 @@ class TestProcessDividends:
         """Dividend amount is shares × dividend_per_share."""
         view = FakeView(
             balances={
-                "alice": {"AAPL": 1000},
-                "treasury": {"USD": 10000000},
+                "alice": {"AAPL": Decimal("1000")},
+                "treasury": {"USD": Decimal("10000000")},
             },
             states={
                 "AAPL": {
@@ -159,14 +160,14 @@ class TestProcessDividends:
         assert len(result.units_to_create) == 1
         # Check DeferredCash amount: 1000 shares × $0.25 = $250
         dc_unit = result.units_to_create[0]
-        assert dc_unit._state["amount"] == 250.0
+        assert dc_unit.state["amount"] == 250.0
 
     def test_dividend_excludes_issuer(self):
         """Issuer doesn't receive dividend on own shares."""
         view = FakeView(
             balances={
-                "alice": {"AAPL": 1000},
-                "treasury": {"AAPL": 5000, "USD": 10000000},
+                "alice": {"AAPL": Decimal("1000")},
+                "treasury": {"AAPL": Decimal("5000"), "USD": Decimal("10000000")},
             },
             states={
                 "AAPL": {
@@ -190,8 +191,8 @@ class TestProcessDividends:
         """State update tracks processed dividends."""
         view = FakeView(
             balances={
-                "alice": {"AAPL": 1000},
-                "treasury": {"USD": 10000000},
+                "alice": {"AAPL": Decimal("1000")},
+                "treasury": {"USD": Decimal("10000000")},
             },
             states={
                 "AAPL": {
@@ -215,8 +216,8 @@ class TestProcessDividends:
         """Empty result when dividend already processed."""
         view = FakeView(
             balances={
-                "alice": {"AAPL": 1000},
-                "treasury": {"USD": 10000000},
+                "alice": {"AAPL": Decimal("1000")},
+                "treasury": {"USD": Decimal("10000000")},
             },
             states={
                 "AAPL": {
@@ -240,7 +241,7 @@ class TestStockContract:
     def test_stock_contract_returns_contract_result(self):
         """stock_contract returns PendingTransaction."""
         view = FakeView(
-            balances={"alice": {"AAPL": 1000}, "treasury": {"USD": 10000000}},
+            balances={"alice": {"AAPL": Decimal("1000")}, "treasury": {"USD": Decimal("10000000")}},
             states={
                 "AAPL": {
                     "unit_type": "STOCK",
@@ -254,7 +255,7 @@ class TestStockContract:
             time=datetime(2025, 3, 15)
         )
 
-        result = stock_contract(view, "AAPL", datetime(2025, 3, 15), {"AAPL": 150.0})
+        result = stock_contract(view, "AAPL", datetime(2025, 3, 15), {"AAPL": Decimal("150.0")})
 
         assert isinstance(result, PendingTransaction)
 
@@ -272,17 +273,17 @@ class TestCreateOptionUnit:
             symbol="AAPL_C150",
             name="AAPL Call $150",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=datetime(2025, 6, 20),
             option_type="call",
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob",
         )
         assert unit.symbol == "AAPL_C150"
         assert unit.unit_type == "BILATERAL_OPTION"
-        assert unit._state['option_type'] == "call"
+        assert unit.state['option_type'] == "call"
 
     def test_create_put_option(self):
         """Create put option."""
@@ -290,15 +291,15 @@ class TestCreateOptionUnit:
             symbol="AAPL_P150",
             name="AAPL Put $150",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=datetime(2025, 6, 20),
             option_type="put",
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob",
         )
-        assert unit._state['option_type'] == "put"
+        assert unit.state['option_type'] == "put"
 
     def test_create_option_invalid_type_raises(self):
         """Invalid option_type raises."""
@@ -307,10 +308,10 @@ class TestCreateOptionUnit:
                 symbol="OPT",
                 name="Invalid",
                 underlying="AAPL",
-                strike=150.0,
+                strike=Decimal("150.0"),
                 maturity=datetime(2025, 6, 20),
                 option_type="invalid",
-                quantity=100,
+                quantity=Decimal("100"),
                 currency="USD",
                 long_wallet="alice",
                 short_wallet="bob",
@@ -322,10 +323,10 @@ class TestCreateOptionUnit:
             symbol="OPT",
             name="Test Option",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=datetime(2025, 6, 20),
             option_type="call",
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob",
@@ -340,17 +341,17 @@ class TestComputeOptionSettlement:
         """ITM call option exercises."""
         view = FakeView(
             balances={
-                "alice": {"OPT": 5, "USD": 100000},
-                "bob": {"OPT": -5, "AAPL": 1000},
+                "alice": {"OPT": Decimal("5"), "USD": Decimal("100000")},
+                "bob": {"OPT": -5, "AAPL": Decimal("1000")},
             },
             states={
                 "OPT": {
                     "unit_type": "BILATERAL_OPTION",
                     "underlying": "AAPL",
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "maturity": datetime(2025, 6, 20),
                     "option_type": "call",
-                    "quantity": 100,
+                    "quantity": Decimal("100"),
                     "currency": "USD",
                     "long_wallet": "alice",
                     "short_wallet": "bob",
@@ -373,17 +374,17 @@ class TestComputeOptionSettlement:
         """OTM call option expires worthless."""
         view = FakeView(
             balances={
-                "alice": {"OPT": 5, "USD": 100000},
-                "bob": {"OPT": -5, "AAPL": 1000},
+                "alice": {"OPT": Decimal("5"), "USD": Decimal("100000")},
+                "bob": {"OPT": -5, "AAPL": Decimal("1000")},
             },
             states={
                 "OPT": {
                     "unit_type": "BILATERAL_OPTION",
                     "underlying": "AAPL",
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "maturity": datetime(2025, 6, 20),
                     "option_type": "call",
-                    "quantity": 100,
+                    "quantity": Decimal("100"),
                     "currency": "USD",
                     "long_wallet": "alice",
                     "short_wallet": "bob",
@@ -405,17 +406,17 @@ class TestComputeOptionSettlement:
         """Already settled option returns empty."""
         view = FakeView(
             balances={
-                "alice": {"OPT": 0},
-                "bob": {"OPT": 0},
+                "alice": {"OPT": Decimal("0")},
+                "bob": {"OPT": Decimal("0")},
             },
             states={
                 "OPT": {
                     "unit_type": "BILATERAL_OPTION",
                     "underlying": "AAPL",
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "maturity": datetime(2025, 6, 20),
                     "option_type": "call",
-                    "quantity": 100,
+                    "quantity": Decimal("100"),
                     "currency": "USD",
                     "long_wallet": "alice",
                     "short_wallet": "bob",
@@ -433,17 +434,17 @@ class TestComputeOptionSettlement:
         """Option before maturity returns empty."""
         view = FakeView(
             balances={
-                "alice": {"OPT": 5},
+                "alice": {"OPT": Decimal("5")},
                 "bob": {"OPT": -5},
             },
             states={
                 "OPT": {
                     "unit_type": "BILATERAL_OPTION",
                     "underlying": "AAPL",
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "maturity": datetime(2025, 6, 20),
                     "option_type": "call",
-                    "quantity": 100,
+                    "quantity": Decimal("100"),
                     "currency": "USD",
                     "long_wallet": "alice",
                     "short_wallet": "bob",
@@ -467,17 +468,17 @@ class TestGetOptionIntrinsicValue:
             balances={},
             states={
                 "OPT": {
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "option_type": "call",
-                    "quantity": 100,
+                    "quantity": Decimal("100"),
                     "long_wallet": "alice",
                 }
             }
         )
 
-        # spot=170, strike=150, quantity=100 → (170-150)*100 = 2000
+        # spot=170, strike=Decimal("150"), quantity=Decimal("100") → (170-150)*100 = 2000
         value = get_option_intrinsic_value(view, "OPT", 170.0)
-        assert value == 2000.0
+        assert value == Decimal("2000.0")
 
     def test_call_otm_intrinsic(self):
         """OTM call has zero intrinsic value."""
@@ -485,16 +486,16 @@ class TestGetOptionIntrinsicValue:
             balances={},
             states={
                 "OPT": {
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "option_type": "call",
-                    "quantity": 100,
+                    "quantity": Decimal("100"),
                     "long_wallet": "alice",
                 }
             }
         )
 
         value = get_option_intrinsic_value(view, "OPT", 140.0)
-        assert value == 0.0
+        assert value == Decimal("0.0")
 
     def test_put_itm_intrinsic(self):
         """ITM put has positive intrinsic value."""
@@ -502,17 +503,17 @@ class TestGetOptionIntrinsicValue:
             balances={},
             states={
                 "OPT": {
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "option_type": "put",
-                    "quantity": 100,
+                    "quantity": Decimal("100"),
                     "long_wallet": "alice",
                 }
             }
         )
 
-        # spot=140, strike=150, quantity=100 → (150-140)*100 = 1000
+        # spot=140, strike=Decimal("150"), quantity=Decimal("100") → (150-140)*100 = 1000
         value = get_option_intrinsic_value(view, "OPT", 140.0)
-        assert value == 1000.0
+        assert value == Decimal("1000.0")
 
 
 # =============================================================================
@@ -528,16 +529,16 @@ class TestCreateForwardUnit:
             symbol="AAPL_FWD",
             name="AAPL Forward",
             underlying="AAPL",
-            forward_price=160.0,
+            forward_price=Decimal("160.0"),
             delivery_date=datetime(2025, 6, 20),
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob",
         )
         assert unit.symbol == "AAPL_FWD"
         assert unit.unit_type == "BILATERAL_FORWARD"
-        assert unit._state['forward_price'] == 160.0
+        assert unit.state['forward_price'] == 160.0
 
     def test_forward_has_bilateral_rule(self):
         """Forward has bilateral transfer rule."""
@@ -545,9 +546,9 @@ class TestCreateForwardUnit:
             symbol="FWD",
             name="Test Forward",
             underlying="AAPL",
-            forward_price=160.0,
+            forward_price=Decimal("160.0"),
             delivery_date=datetime(2025, 6, 20),
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob",
@@ -562,16 +563,16 @@ class TestComputeForwardSettlement:
         """Forward settles at delivery date."""
         view = FakeView(
             balances={
-                "alice": {"FWD": 5, "USD": 100000},
-                "bob": {"FWD": -5, "AAPL": 1000},
+                "alice": {"FWD": Decimal("5"), "USD": Decimal("100000")},
+                "bob": {"FWD": -5, "AAPL": Decimal("1000")},
             },
             states={
                 "FWD": {
                     "unit_type": "BILATERAL_FORWARD",
                     "underlying": "AAPL",
-                    "forward_price": 160.0,
+                    "forward_price": Decimal("160.0"),
                     "delivery_date": datetime(2025, 6, 20),
-                    "quantity": 100,
+                    "quantity": Decimal("100"),
                     "currency": "USD",
                     "long_wallet": "alice",
                     "short_wallet": "bob",
@@ -592,16 +593,16 @@ class TestComputeForwardSettlement:
         """Forward before delivery returns empty."""
         view = FakeView(
             balances={
-                "alice": {"FWD": 5},
+                "alice": {"FWD": Decimal("5")},
                 "bob": {"FWD": -5},
             },
             states={
                 "FWD": {
                     "unit_type": "BILATERAL_FORWARD",
                     "underlying": "AAPL",
-                    "forward_price": 160.0,
+                    "forward_price": Decimal("160.0"),
                     "delivery_date": datetime(2025, 6, 20),
-                    "quantity": 100,
+                    "quantity": Decimal("100"),
                     "currency": "USD",
                     "long_wallet": "alice",
                     "short_wallet": "bob",
@@ -625,16 +626,16 @@ class TestGetForwardValue:
             balances={},
             states={
                 "FWD": {
-                    "forward_price": 160.0,
-                    "quantity": 100,
+                    "forward_price": Decimal("160.0"),
+                    "quantity": Decimal("100"),
                     "long_wallet": "alice",
                 }
             }
         )
 
-        # spot=170, forward=160, quantity=100 → (170-160)*100 = 1000
+        # spot=170, forward=160, quantity=Decimal("100") → (170-160)*100 = 1000
         value = get_forward_value(view, "FWD", 170.0)
-        assert value == 1000.0
+        assert value == Decimal("1000.0")
 
     def test_forward_loss(self):
         """Forward loss when spot < forward_price."""
@@ -642,16 +643,16 @@ class TestGetForwardValue:
             balances={},
             states={
                 "FWD": {
-                    "forward_price": 160.0,
-                    "quantity": 100,
+                    "forward_price": Decimal("160.0"),
+                    "quantity": Decimal("100"),
                     "long_wallet": "alice",
                 }
             }
         )
 
-        # spot=150, forward=160, quantity=100 → (150-160)*100 = -1000
+        # spot=150, forward=160, quantity=Decimal("100") → (150-160)*100 = -1000
         value = get_forward_value(view, "FWD", 150.0)
-        assert value == -1000.0
+        assert value == Decimal("-1000.0")
 
 
 # =============================================================================
@@ -667,20 +668,20 @@ class TestCreateDeltaHedgeUnit:
             symbol="HEDGE",
             name="Test Hedge",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=datetime(2025, 6, 20),
-            volatility=0.25,
-            num_options=10,
-            option_multiplier=100,
+            volatility=Decimal("0.25"),
+            num_options=Decimal("10"),
+            option_multiplier=Decimal("100"),
             currency="USD",
             strategy_wallet="trader",
             market_wallet="market",
-            risk_free_rate=0.0,
+            risk_free_rate=Decimal("0.0"),
         )
         assert unit.symbol == "HEDGE"
         assert unit.unit_type == "DELTA_HEDGE_STRATEGY"
-        assert unit._state['underlying'] == "AAPL"
-        assert unit._state['strike'] == 150.0
+        assert unit.state['underlying'] == "AAPL"
+        assert unit.state['strike'] == 150.0
 
 
 class TestComputeRebalance:
@@ -690,25 +691,25 @@ class TestComputeRebalance:
         """Initial rebalance buys shares."""
         view = FakeView(
             balances={
-                "trader": {"USD": 500000},
-                "market": {"AAPL": 100000, "USD": 10000000},
+                "trader": {"USD": Decimal("500000")},
+                "market": {"AAPL": Decimal("100000"), "USD": Decimal("10000000")},
             },
             states={
                 "HEDGE": {
                     "unit_type": "DELTA_HEDGE_STRATEGY",
                     "underlying": "AAPL",
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "maturity": datetime(2025, 6, 20),
-                    "volatility": 0.25,
-                    "num_options": 10,
-                    "option_multiplier": 100,
+                    "volatility": Decimal("0.25"),
+                    "num_options": Decimal("10"),
+                    "option_multiplier": Decimal("100"),
                     "currency": "USD",
                     "strategy_wallet": "trader",
                     "market_wallet": "market",
-                    "risk_free_rate": 0.0,
-                    "current_shares": 0.0,
-                    "rebalance_count": 0,
-                    "cumulative_cash": 0.0,
+                    "risk_free_rate": Decimal("0.0"),
+                    "current_shares": Decimal("0.0"),
+                    "rebalance_count": Decimal("0"),
+                    "cumulative_cash": Decimal("0.0"),
                     "liquidated": False,
                 }
             },
@@ -726,24 +727,24 @@ class TestComputeRebalance:
         """Rebalance at maturity returns empty."""
         view = FakeView(
             balances={
-                "trader": {"USD": 500000, "AAPL": 500},
-                "market": {"AAPL": 100000, "USD": 10000000},
+                "trader": {"USD": Decimal("500000"), "AAPL": Decimal("500")},
+                "market": {"AAPL": Decimal("100000"), "USD": Decimal("10000000")},
             },
             states={
                 "HEDGE": {
                     "unit_type": "DELTA_HEDGE_STRATEGY",
                     "underlying": "AAPL",
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "maturity": datetime(2025, 6, 20),
-                    "volatility": 0.25,
-                    "num_options": 10,
-                    "option_multiplier": 100,
+                    "volatility": Decimal("0.25"),
+                    "num_options": Decimal("10"),
+                    "option_multiplier": Decimal("100"),
                     "currency": "USD",
                     "strategy_wallet": "trader",
                     "market_wallet": "market",
-                    "risk_free_rate": 0.0,
-                    "current_shares": 500.0,
-                    "rebalance_count": 10,
+                    "risk_free_rate": Decimal("0.0"),
+                    "current_shares": Decimal("500.0"),
+                    "rebalance_count": Decimal("10"),
                     "cumulative_cash": -75000.0,
                     "liquidated": False,
                 }
@@ -758,24 +759,24 @@ class TestComputeRebalance:
         """Rebalance when liquidated returns empty."""
         view = FakeView(
             balances={
-                "trader": {"USD": 500000},
-                "market": {"AAPL": 100000, "USD": 10000000},
+                "trader": {"USD": Decimal("500000")},
+                "market": {"AAPL": Decimal("100000"), "USD": Decimal("10000000")},
             },
             states={
                 "HEDGE": {
                     "unit_type": "DELTA_HEDGE_STRATEGY",
                     "underlying": "AAPL",
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "maturity": datetime(2025, 6, 20),
-                    "volatility": 0.25,
-                    "num_options": 10,
-                    "option_multiplier": 100,
+                    "volatility": Decimal("0.25"),
+                    "num_options": Decimal("10"),
+                    "option_multiplier": Decimal("100"),
                     "currency": "USD",
                     "strategy_wallet": "trader",
                     "market_wallet": "market",
-                    "risk_free_rate": 0.0,
-                    "current_shares": 0.0,
-                    "rebalance_count": 10,
+                    "risk_free_rate": Decimal("0.0"),
+                    "current_shares": Decimal("0.0"),
+                    "rebalance_count": Decimal("10"),
                     "cumulative_cash": -75000.0,
                     "liquidated": True,  # Already liquidated
                 }
@@ -794,24 +795,24 @@ class TestComputeLiquidation:
         """Liquidation sells all shares."""
         view = FakeView(
             balances={
-                "trader": {"USD": 400000, "AAPL": 500},
-                "market": {"AAPL": 100000, "USD": 10000000},
+                "trader": {"USD": Decimal("400000"), "AAPL": Decimal("500")},
+                "market": {"AAPL": Decimal("100000"), "USD": Decimal("10000000")},
             },
             states={
                 "HEDGE": {
                     "unit_type": "DELTA_HEDGE_STRATEGY",
                     "underlying": "AAPL",
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "maturity": datetime(2025, 6, 20),
-                    "volatility": 0.25,
-                    "num_options": 10,
-                    "option_multiplier": 100,
+                    "volatility": Decimal("0.25"),
+                    "num_options": Decimal("10"),
+                    "option_multiplier": Decimal("100"),
                     "currency": "USD",
                     "strategy_wallet": "trader",
                     "market_wallet": "market",
-                    "risk_free_rate": 0.0,
-                    "current_shares": 500.0,
-                    "rebalance_count": 10,
+                    "risk_free_rate": Decimal("0.0"),
+                    "current_shares": Decimal("500.0"),
+                    "rebalance_count": Decimal("10"),
                     "cumulative_cash": -75000.0,
                     "liquidated": False,
                 }
@@ -830,24 +831,24 @@ class TestComputeLiquidation:
         """Liquidation when already liquidated returns empty."""
         view = FakeView(
             balances={
-                "trader": {"USD": 500000},
-                "market": {"AAPL": 100000, "USD": 10000000},
+                "trader": {"USD": Decimal("500000")},
+                "market": {"AAPL": Decimal("100000"), "USD": Decimal("10000000")},
             },
             states={
                 "HEDGE": {
                     "unit_type": "DELTA_HEDGE_STRATEGY",
                     "underlying": "AAPL",
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "maturity": datetime(2025, 6, 20),
-                    "volatility": 0.25,
-                    "num_options": 10,
-                    "option_multiplier": 100,
+                    "volatility": Decimal("0.25"),
+                    "num_options": Decimal("10"),
+                    "option_multiplier": Decimal("100"),
                     "currency": "USD",
                     "strategy_wallet": "trader",
                     "market_wallet": "market",
-                    "risk_free_rate": 0.0,
-                    "current_shares": 0.0,
-                    "rebalance_count": 10,
+                    "risk_free_rate": Decimal("0.0"),
+                    "current_shares": Decimal("0.0"),
+                    "rebalance_count": Decimal("10"),
                     "cumulative_cash": -75000.0,
                     "liquidated": True,
                 }
@@ -866,23 +867,23 @@ class TestGetHedgeState:
         """get_hedge_state returns all relevant fields."""
         view = FakeView(
             balances={
-                "trader": {"AAPL": 500},
+                "trader": {"AAPL": Decimal("500")},
             },
             states={
                 "HEDGE": {
                     "unit_type": "DELTA_HEDGE_STRATEGY",
                     "underlying": "AAPL",
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "maturity": datetime(2025, 6, 20),
-                    "volatility": 0.25,
-                    "num_options": 10,
-                    "option_multiplier": 100,
+                    "volatility": Decimal("0.25"),
+                    "num_options": Decimal("10"),
+                    "option_multiplier": Decimal("100"),
                     "currency": "USD",
                     "strategy_wallet": "trader",
                     "market_wallet": "market",
-                    "risk_free_rate": 0.0,
-                    "current_shares": 500.0,
-                    "rebalance_count": 10,
+                    "risk_free_rate": Decimal("0.0"),
+                    "current_shares": Decimal("500.0"),
+                    "rebalance_count": Decimal("10"),
                     "cumulative_cash": -75000.0,
                     "liquidated": False,
                 }
@@ -910,25 +911,25 @@ class TestDeltaHedgeContract:
         """Contract call returns ."""
         view = FakeView(
             balances={
-                "trader": {"USD": 500000},
-                "market": {"AAPL": 100000, "USD": 10000000},
+                "trader": {"USD": Decimal("500000")},
+                "market": {"AAPL": Decimal("100000"), "USD": Decimal("10000000")},
             },
             states={
                 "HEDGE": {
                     "unit_type": "DELTA_HEDGE_STRATEGY",
                     "underlying": "AAPL",
-                    "strike": 150.0,
+                    "strike": Decimal("150.0"),
                     "maturity": datetime(2025, 6, 20),
-                    "volatility": 0.25,
-                    "num_options": 10,
-                    "option_multiplier": 100,
+                    "volatility": Decimal("0.25"),
+                    "num_options": Decimal("10"),
+                    "option_multiplier": Decimal("100"),
                     "currency": "USD",
                     "strategy_wallet": "trader",
                     "market_wallet": "market",
-                    "risk_free_rate": 0.0,
-                    "current_shares": 0.0,
-                    "rebalance_count": 0,
-                    "cumulative_cash": 0.0,
+                    "risk_free_rate": Decimal("0.0"),
+                    "current_shares": Decimal("0.0"),
+                    "rebalance_count": Decimal("0"),
+                    "cumulative_cash": Decimal("0.0"),
                     "liquidated": False,
                 }
             },
@@ -936,6 +937,6 @@ class TestDeltaHedgeContract:
         )
 
         contract = delta_hedge_contract(min_trade_size=0.01)
-        result = contract(view, "HEDGE", datetime(2025, 1, 1), {"AAPL": 150.0})
+        result = contract(view, "HEDGE", datetime(2025, 1, 1), {"AAPL": Decimal("150.0")})
 
         assert isinstance(result, PendingTransaction)

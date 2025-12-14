@@ -35,6 +35,7 @@ All functions take LedgerView (read-only) and return immutable results.
 from __future__ import annotations
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Optional
+from decimal import Decimal
 
 import math
 
@@ -42,11 +43,12 @@ from ..core import (
     LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     UNIT_TYPE_STRUCTURED_NOTE, QUANTITY_EPSILON,
     build_transaction, empty_pending_transaction,
+    _freeze_state,
 )
 
 
 # Type alias for coupon schedule
-CouponSchedule = List[Tuple[datetime, float]]
+CouponSchedule = List[Tuple[datetime, Decimal]]
 
 
 # ============================================================================
@@ -56,8 +58,8 @@ CouponSchedule = List[Tuple[datetime, float]]
 def generate_structured_note_coupon_schedule(
     issue_date: datetime,
     maturity_date: datetime,
-    coupon_rate: float,
-    notional: float,
+    coupon_rate: Decimal,
+    notional: Decimal,
     frequency: int,
 ) -> CouponSchedule:
     """
@@ -96,9 +98,13 @@ def generate_structured_note_coupon_schedule(
     if frequency not in [1, 2, 4, 12]:
         raise ValueError(f"Frequency must be 0, 1, 2, 4, or 12, got {frequency}")
 
+    # Ensure parameters are Decimal
+    notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
+    coupon_rate = Decimal(str(coupon_rate)) if not isinstance(coupon_rate, Decimal) else coupon_rate
+
     schedule: CouponSchedule = []
     months_between = 12 // frequency
-    coupon_amount = (notional * coupon_rate) / frequency
+    coupon_amount = (notional * coupon_rate) / Decimal(frequency)
 
     current_date = issue_date
 
@@ -145,17 +151,17 @@ def create_structured_note(
     symbol: str,
     name: str,
     underlying: str,
-    notional: float,
-    strike_price: float,
-    participation_rate: float,
-    protection_level: float,
+    notional: Decimal,
+    strike_price: Decimal,
+    participation_rate: Decimal,
+    protection_level: Decimal,
     issue_date: datetime,
     maturity_date: datetime,
     currency: str,
     issuer_wallet: str,
     holder_wallet: str,
-    cap_rate: Optional[float] = None,
-    coupon_rate: float = 0.0,
+    cap_rate: Optional[Decimal] = None,
+    coupon_rate: Decimal = Decimal("0.0"),
     coupon_frequency: int = 0,
     coupon_schedule: Optional[CouponSchedule] = None,
 ) -> Unit:
@@ -220,22 +226,31 @@ def create_structured_note(
         >>> note.unit_type
         'STRUCTURED_NOTE'
     """
+    # Ensure financial parameters are Decimal
+    notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
+    strike_price = Decimal(str(strike_price)) if not isinstance(strike_price, Decimal) else strike_price
+    participation_rate = Decimal(str(participation_rate)) if not isinstance(participation_rate, Decimal) else participation_rate
+    protection_level = Decimal(str(protection_level)) if not isinstance(protection_level, Decimal) else protection_level
+    if cap_rate is not None:
+        cap_rate = Decimal(str(cap_rate)) if not isinstance(cap_rate, Decimal) else cap_rate
+    coupon_rate = Decimal(str(coupon_rate)) if not isinstance(coupon_rate, Decimal) else coupon_rate
+
     # Validation
-    if notional <= 0:
+    if notional <= Decimal("0"):
         raise ValueError(f"notional must be positive, got {notional}")
-    if strike_price <= 0:
+    if strike_price <= Decimal("0"):
         raise ValueError(f"strike_price must be positive, got {strike_price}")
-    if participation_rate <= 0:
+    if participation_rate <= Decimal("0"):
         raise ValueError(
             f"participation_rate must be positive, got {participation_rate}"
         )
-    if protection_level < 0 or protection_level > 1:
+    if protection_level < Decimal("0") or protection_level > Decimal("1"):
         raise ValueError(
             f"protection_level must be between 0 and 1, got {protection_level}"
         )
-    if cap_rate is not None and cap_rate <= 0:
+    if cap_rate is not None and cap_rate <= Decimal("0"):
         raise ValueError(f"cap_rate must be positive if specified, got {cap_rate}")
-    if coupon_rate < 0:
+    if coupon_rate < Decimal("0"):
         raise ValueError(f"coupon_rate cannot be negative, got {coupon_rate}")
     if coupon_frequency not in [0, 1, 2, 4, 12]:
         raise ValueError(
@@ -264,11 +279,11 @@ def create_structured_note(
         symbol=symbol,
         name=name,
         unit_type=UNIT_TYPE_STRUCTURED_NOTE,
-        min_balance=-1.0,  # Allow short positions
-        max_balance=1000000.0,
+        min_balance=Decimal("-1.0"),  # Allow short positions
+        max_balance=Decimal("1000000.0"),
         decimal_places=0,  # Whole units
         transfer_rule=None,
-        _state={
+        _frozen_state=_freeze_state({
             'underlying': underlying,
             'notional': notional,
             'strike_price': strike_price,
@@ -286,7 +301,7 @@ def create_structured_note(
             'paid_coupons': [],
             'matured': False,
             'next_coupon_index': 0,
-        }
+        })
     )
 
 
@@ -294,7 +309,7 @@ def create_structured_note(
 # PURE PAYOFF CALCULATIONS
 # ============================================================================
 
-def compute_performance(final_price: float, strike_price: float) -> float:
+def compute_performance(final_price: Decimal, strike_price: Decimal) -> Decimal:
     """
     Calculate the percentage performance of the underlying.
 
@@ -316,18 +331,22 @@ def compute_performance(final_price: float, strike_price: float) -> float:
         >>> compute_performance(4500.0, 4500.0)
         0.0
     """
-    if strike_price <= 0:
+    # Ensure parameters are Decimal
+    final_price = Decimal(str(final_price)) if not isinstance(final_price, Decimal) else final_price
+    strike_price = Decimal(str(strike_price)) if not isinstance(strike_price, Decimal) else strike_price
+
+    if strike_price <= Decimal("0"):
         raise ValueError(f"strike_price must be positive, got {strike_price}")
 
     return (final_price - strike_price) / strike_price
 
 
 def compute_payoff_rate(
-    performance: float,
-    participation_rate: float,
-    cap_rate: Optional[float],
-    protection_level: float,
-) -> float:
+    performance: Decimal,
+    participation_rate: Decimal,
+    cap_rate: Optional[Decimal],
+    protection_level: Decimal,
+) -> Decimal:
     """
     Calculate the return rate based on performance and note parameters.
 
@@ -359,7 +378,14 @@ def compute_payoff_rate(
         >>> compute_payoff_rate(-0.05, 0.80, 0.25, 0.90)
         -0.05
     """
-    if performance > 0:
+    # Ensure parameters are Decimal
+    performance = Decimal(str(performance)) if not isinstance(performance, Decimal) else performance
+    participation_rate = Decimal(str(participation_rate)) if not isinstance(participation_rate, Decimal) else participation_rate
+    if cap_rate is not None:
+        cap_rate = Decimal(str(cap_rate)) if not isinstance(cap_rate, Decimal) else cap_rate
+    protection_level = Decimal(str(protection_level)) if not isinstance(protection_level, Decimal) else protection_level
+
+    if performance > Decimal("0"):
         # Upside: participate up to cap
         raw_return = participation_rate * performance
         if cap_rate is not None:
@@ -368,7 +394,7 @@ def compute_payoff_rate(
     else:
         # Downside: protected to floor
         # protection_level of 0.90 means max loss is -10% (0.90 - 1.0)
-        floor = protection_level - 1.0
+        floor = protection_level - Decimal("1.0")
         return max(performance, floor)
 
 
@@ -407,12 +433,14 @@ def compute_coupon_payment(
     """
     state = view.get_unit_state(symbol)
     schedule = state.get('coupon_schedule', [])
-    next_idx = state.get('next_coupon_index', 0)
+    next_idx = int(state.get('next_coupon_index', 0))
 
     if next_idx >= len(schedule):
         return empty_pending_transaction(view)
 
     scheduled_date, coupon_amount = schedule[next_idx]
+    # Ensure coupon_amount is Decimal (may be loaded as float from state)
+    coupon_amount = Decimal(str(coupon_amount)) if not isinstance(coupon_amount, Decimal) else coupon_amount
 
     if payment_date < scheduled_date:
         return empty_pending_transaction(view)
@@ -422,12 +450,14 @@ def compute_coupon_payment(
     positions = view.get_positions(symbol)
 
     moves: List[Move] = []
-    total_paid = 0.0
+    total_paid = Decimal("0.0")
 
     for wallet in sorted(positions.keys()):
         notes_held = positions[wallet]
-        if notes_held > 0 and wallet != issuer:
-            payout = notes_held * coupon_amount
+        if notes_held > Decimal("0") and wallet != issuer:
+            # Ensure notes_held is Decimal for arithmetic
+            notes_held_decimal = Decimal(str(notes_held)) if not isinstance(notes_held, Decimal) else notes_held
+            payout = notes_held_decimal * coupon_amount
             moves.append(Move(
                 quantity=payout,
                 unit_symbol=currency,
@@ -462,7 +492,7 @@ def compute_coupon_payment(
 def compute_maturity_payoff(
     view: LedgerView,
     symbol: str,
-    final_price: float,
+    final_price: Decimal,
 ) -> PendingTransaction:
     """
     Calculate and pay the final payoff at maturity.
@@ -489,7 +519,10 @@ def compute_maturity_payoff(
         >>> result = compute_maturity_payoff(view, "SN_SPX_2025", 4950.0)
         >>> # notional=100000, return=8% => payout=108000
     """
-    if final_price <= 0:
+    # Ensure final_price is Decimal
+    final_price = Decimal(str(final_price)) if not isinstance(final_price, Decimal) else final_price
+
+    if final_price <= Decimal("0"):
         raise ValueError(f"final_price must be positive, got {final_price}")
 
     state = view.get_unit_state(symbol)
@@ -501,12 +534,23 @@ def compute_maturity_payoff(
     if view.current_time < maturity_date:
         return empty_pending_transaction(view)
 
-    # Extract parameters
+    # Extract parameters and ensure they are Decimal (may be loaded as float from state)
     notional = state['notional']
+    notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
+
     strike_price = state['strike_price']
+    strike_price = Decimal(str(strike_price)) if not isinstance(strike_price, Decimal) else strike_price
+
     participation_rate = state['participation_rate']
+    participation_rate = Decimal(str(participation_rate)) if not isinstance(participation_rate, Decimal) else participation_rate
+
     cap_rate = state.get('cap_rate')
+    if cap_rate is not None:
+        cap_rate = Decimal(str(cap_rate)) if not isinstance(cap_rate, Decimal) else cap_rate
+
     protection_level = state['protection_level']
+    protection_level = Decimal(str(protection_level)) if not isinstance(protection_level, Decimal) else protection_level
+
     issuer = state['issuer_wallet']
     currency = state['currency']
 
@@ -515,17 +559,19 @@ def compute_maturity_payoff(
     return_rate = compute_payoff_rate(
         performance, participation_rate, cap_rate, protection_level
     )
-    payout_per_note = notional * (1 + return_rate)
+    payout_per_note = notional * (Decimal("1") + return_rate)
 
     # Generate moves for all holders
     positions = view.get_positions(symbol)
     moves: List[Move] = []
-    total_paid = 0.0
+    total_paid = Decimal("0.0")
 
     for wallet in sorted(positions.keys()):
         notes_held = positions[wallet]
-        if notes_held > 0 and wallet != issuer:
-            total_payout = notes_held * payout_per_note
+        if notes_held > Decimal("0") and wallet != issuer:
+            # Ensure notes_held is Decimal for arithmetic
+            notes_held_decimal = Decimal(str(notes_held)) if not isinstance(notes_held, Decimal) else notes_held
+            total_payout = notes_held_decimal * payout_per_note
             if abs(total_payout) > QUANTITY_EPSILON:
                 moves.append(Move(
                     quantity=total_payout,
@@ -561,8 +607,8 @@ def transact(
     symbol: str,
     seller: str,
     buyer: str,
-    qty: float,
-    price: float,
+    qty: Decimal,
+    price: Decimal,
 ) -> PendingTransaction:
     """
     Execute a structured note trade (secondary market transfer).
@@ -575,8 +621,8 @@ def transact(
         symbol: Structured note symbol.
         seller: Wallet selling the structured note units.
         buyer: Wallet buying the structured note units.
-        qty: Quantity to transfer (positive, whole units).
-        price: Price per unit (mark-to-market value).
+        qty: Quantity to transfer (positive Decimal, whole units).
+        price: Price per unit (mark-to-market value, Decimal).
 
     Returns:
         PendingTransaction containing:
@@ -597,13 +643,17 @@ def transact(
         )
         ledger.execute(result)
     """
+    # Ensure parameters are Decimal
+    qty = Decimal(str(qty)) if not isinstance(qty, Decimal) else qty
+    price = Decimal(str(price)) if not isinstance(price, Decimal) else price
+
     # Validate quantity
-    if qty <= 0:
+    if qty <= Decimal("0"):
         raise ValueError(f"qty must be positive, got {qty}")
 
     # Validate price
-    if not math.isfinite(price) or price < 0:
-        raise ValueError(f"price must be non-negative and finite, got {price}")
+    if price < Decimal("0"):
+        raise ValueError(f"price must be non-negative, got {price}")
 
     # Validate wallets
     if seller == buyer:
@@ -670,7 +720,7 @@ def _process_lifecycle_event(
         event_type: Type of event (COUPON or MATURITY).
         event_date: When the event occurs.
         **kwargs: Event-specific parameters:
-            - For MATURITY: final_price (float, required)
+            - For MATURITY: final_price (Decimal, required)
             - For COUPON: None required
 
     Returns:
@@ -706,7 +756,7 @@ def structured_note_contract(
     view: LedgerView,
     symbol: str,
     timestamp: datetime,
-    prices: Dict[str, float]
+    prices: Dict[str, Decimal]
 ) -> PendingTransaction:
     """
     SmartContract function for automatic structured note lifecycle processing.
@@ -736,13 +786,18 @@ def structured_note_contract(
         maturity_date = state.get('maturity_date')
         if maturity_date and timestamp >= maturity_date:
             underlying = state.get('underlying')
-            final_price = prices.get(underlying)
-            if final_price is not None:
-                return compute_maturity_payoff(view, symbol, final_price)
+            if not underlying:
+                raise ValueError(f"Structured note {symbol} has no underlying defined")
+            if underlying not in prices:
+                raise ValueError(f"Missing price for structured note underlying '{underlying}' in {symbol}")
+            final_price = prices[underlying]
+            # Ensure final_price is Decimal (may come as float from prices dict)
+            final_price = Decimal(str(final_price)) if not isinstance(final_price, Decimal) else final_price
+            return compute_maturity_payoff(view, symbol, final_price)
 
     # Check for coupon payment
     schedule = state.get('coupon_schedule', [])
-    next_idx = state.get('next_coupon_index', 0)
+    next_idx = int(state.get('next_coupon_index', 0))
 
     if next_idx < len(schedule):
         scheduled_date, _ = schedule[next_idx]

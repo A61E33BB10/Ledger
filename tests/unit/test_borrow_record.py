@@ -12,6 +12,7 @@ Tests:
 
 import pytest
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from ledger import (
     Ledger, cash, Move, build_transaction,
@@ -37,34 +38,34 @@ class TestComputeBorrowFee:
         # 1000 shares at $100, 50 bps rate, 30 days
         # Fee = 1000 * 100 * (50/10000) * (30/365) = $41.10
         fee = compute_borrow_fee(
-            quantity=1000,
+            quantity=Decimal("1000"),
             rate_bps=50,
             days=30,
-            price=100.0,
+            price=Decimal("100.0"),
         )
-        expected = 1000 * 100 * (50 / 10000) * (30 / 365)
-        assert abs(fee - expected) < 0.01
+        expected = Decimal("1000") * Decimal("100") * (Decimal("50") / Decimal("10000")) * (Decimal("30") / Decimal("365"))
+        assert abs(float(fee) - float(expected)) < 0.01
 
     def test_zero_quantity(self):
         """Zero quantity returns zero fee."""
         fee = compute_borrow_fee(0, 50, 30, 100.0)
-        assert fee == 0.0
+        assert fee == Decimal("0.0")
 
     def test_zero_days(self):
         """Zero days returns zero fee."""
         fee = compute_borrow_fee(1000, 50, 0, 100.0)
-        assert fee == 0.0
+        assert fee == Decimal("0.0")
 
     def test_annual_fee(self):
         """Full year at 100 bps = 1% of notional."""
         fee = compute_borrow_fee(
-            quantity=1000,
+            quantity=Decimal("1000"),
             rate_bps=100,
             days=365,
-            price=100.0,
+            price=Decimal("100.0"),
         )
         # 1000 * 100 * 1% = $1000
-        assert abs(fee - 1000.0) < 0.01
+        assert abs(float(fee) - 1000.0) < 0.01
 
 
 class TestComputeRequiredCollateral:
@@ -73,25 +74,25 @@ class TestComputeRequiredCollateral:
     def test_standard_margin(self):
         """102% margin calculation."""
         collateral = compute_required_collateral(
-            quantity=1000,
+            quantity=Decimal("1000"),
             price=100.0,
             margin=1.02,
         )
-        assert collateral == 102000.0
+        assert collateral == Decimal("102000.0")
 
     def test_htb_margin(self):
         """105% margin for hard-to-borrow."""
         collateral = compute_required_collateral(
-            quantity=1000,
+            quantity=Decimal("1000"),
             price=100.0,
             margin=1.05,
         )
-        assert collateral == 105000.0
+        assert collateral == Decimal("105000.0")
 
     def test_zero_quantity(self):
         """Zero quantity returns zero collateral."""
-        collateral = compute_required_collateral(0, 100.0)
-        assert collateral == 0.0
+        collateral = compute_required_collateral(0, Decimal("100.0"))
+        assert collateral == Decimal("0.0")
 
 
 # =============================================================================
@@ -107,14 +108,14 @@ class TestCreateBorrowRecordUnit:
             stock_symbol="AAPL",
             borrower="alice",
             lender="bob",
-            quantity=1000,
+            quantity=Decimal("1000"),
             borrow_date=datetime(2024, 3, 15),
         )
 
         assert borrow.unit_type == UNIT_TYPE_BORROW_RECORD
         assert "BORROW_AAPL_alice_bob" in borrow.symbol
 
-        state = borrow._state
+        state = borrow.state
         assert state['stock_symbol'] == "AAPL"
         assert state['borrower'] == "alice"
         assert state['lender'] == "bob"
@@ -127,12 +128,12 @@ class TestCreateBorrowRecordUnit:
             stock_symbol="GME",
             borrower="alice",
             lender="bob",
-            quantity=100,
+            quantity=Decimal("100"),
             borrow_date=datetime(2024, 3, 15),
             rate_bps=500,  # 5% for hard-to-borrow
         )
 
-        assert borrow._state['rate_bps'] == 500
+        assert borrow.state['rate_bps'] == 500
 
     def test_term_contract(self):
         """Create a term borrow (fixed duration)."""
@@ -140,14 +141,14 @@ class TestCreateBorrowRecordUnit:
             stock_symbol="AAPL",
             borrower="alice",
             lender="bob",
-            quantity=1000,
+            quantity=Decimal("1000"),
             borrow_date=datetime(2024, 3, 15),
             contract_type=BorrowContractType.TERM,
             term_end_date=datetime(2024, 6, 15),
         )
 
-        assert borrow._state['contract_type'] == BorrowContractType.TERM.value
-        assert borrow._state['term_end_date'] == datetime(2024, 6, 15)
+        assert borrow.state['contract_type'] == BorrowContractType.TERM.value
+        assert borrow.state['term_end_date'] == datetime(2024, 6, 15)
 
     def test_invalid_quantity(self):
         """Zero or negative quantity raises error."""
@@ -156,7 +157,7 @@ class TestCreateBorrowRecordUnit:
                 stock_symbol="AAPL",
                 borrower="alice",
                 lender="bob",
-                quantity=0,
+                quantity=Decimal("0"),
                 borrow_date=datetime(2024, 3, 15),
             )
 
@@ -167,7 +168,7 @@ class TestCreateBorrowRecordUnit:
                 stock_symbol="AAPL",
                 borrower="alice",
                 lender="alice",
-                quantity=1000,
+                quantity=Decimal("1000"),
                 borrow_date=datetime(2024, 3, 15),
             )
 
@@ -182,7 +183,7 @@ class TestComputeAvailablePosition:
     @pytest.fixture
     def ledger_with_stock(self):
         """Create a ledger with stock for testing."""
-        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         stock = create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True)
@@ -200,34 +201,34 @@ class TestComputeAvailablePosition:
     def test_owned_shares_only(self, ledger_with_stock):
         """Available = owned when no borrows."""
         ledger = ledger_with_stock
-        ledger.set_balance("alice", "AAPL", 1000)
+        ledger.set_balance("alice", "AAPL", Decimal("1000"))
 
         available = compute_available_position(ledger, "alice", "AAPL")
-        assert available == 1000.0
+        assert available == Decimal("1000.0")
 
     def test_with_borrow_obligation(self, ledger_with_stock):
         """Available = owned - borrowed obligations."""
         ledger = ledger_with_stock
 
         # Alice borrows 500 AAPL from Bob
-        ledger.set_balance("bob", "AAPL", 500)
+        ledger.set_balance("bob", "AAPL", Decimal("500"))
         ledger.advance_time(datetime(2024, 1, 2))
 
         result = initiate_borrow(ledger, "AAPL", "alice", "bob", 500)
         ledger.execute(result)
 
         # Alice now has 500 AAPL but owes 500 back
-        assert ledger.get_balance("alice", "AAPL") == 500.0
+        assert ledger.get_balance("alice", "AAPL") == Decimal("500.0")
         available = compute_available_position(ledger, "alice", "AAPL")
-        assert available == 0.0  # 500 owned - 500 owed = 0 available
+        assert available == Decimal("0.0")  # 500 owned - 500 owed = 0 available
 
     def test_multiple_borrows(self, ledger_with_stock):
         """Multiple borrows sum up obligations."""
         ledger = ledger_with_stock
 
         # Alice borrows from multiple lenders
-        ledger.set_balance("bob", "AAPL", 1000)
-        ledger.set_balance("treasury", "AAPL", 10000)
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
+        ledger.set_balance("treasury", "AAPL", Decimal("10000"))
 
         ledger.advance_time(datetime(2024, 1, 2))
         result1 = initiate_borrow(ledger, "AAPL", "alice", "bob", 300, borrow_id="001")
@@ -238,16 +239,16 @@ class TestComputeAvailablePosition:
         ledger.execute(result2)
 
         # Alice has 500 AAPL, owes 500 back total
-        assert ledger.get_balance("alice", "AAPL") == 500.0
+        assert ledger.get_balance("alice", "AAPL") == Decimal("500.0")
         available = compute_available_position(ledger, "alice", "AAPL")
-        assert available == 0.0
+        assert available == Decimal("0.0")
 
     def test_partial_return_restores_availability(self, ledger_with_stock):
         """Returning borrowed shares restores availability."""
         ledger = ledger_with_stock
 
         # Alice borrows 500 from Bob
-        ledger.set_balance("bob", "AAPL", 500)
+        ledger.set_balance("bob", "AAPL", Decimal("500"))
         ledger.advance_time(datetime(2024, 1, 2))
 
         result = initiate_borrow(ledger, "AAPL", "alice", "bob", 500)
@@ -260,9 +261,9 @@ class TestComputeAvailablePosition:
         ledger.execute(return_result)
 
         # Alice has 0 AAPL, owes 0
-        assert ledger.get_balance("alice", "AAPL") == 0.0
+        assert ledger.get_balance("alice", "AAPL") == Decimal("0.0")
         available = compute_available_position(ledger, "alice", "AAPL")
-        assert available == 0.0
+        assert available == Decimal("0.0")
 
 
 # =============================================================================
@@ -275,7 +276,7 @@ class TestValidateShortSale:
     @pytest.fixture
     def ledger_with_stock(self):
         """Create a ledger with stock for testing."""
-        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         stock = create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True)
@@ -293,7 +294,7 @@ class TestValidateShortSale:
     def test_sufficient_owned_shares(self, ledger_with_stock):
         """Can sell when owning sufficient shares."""
         ledger = ledger_with_stock
-        ledger.set_balance("alice", "AAPL", 1000)
+        ledger.set_balance("alice", "AAPL", Decimal("1000"))
 
         is_valid, reason = validate_short_sale(ledger, "alice", "AAPL", 500)
         assert is_valid is True
@@ -301,7 +302,7 @@ class TestValidateShortSale:
     def test_insufficient_available(self, ledger_with_stock):
         """Cannot sell more than available."""
         ledger = ledger_with_stock
-        ledger.set_balance("alice", "AAPL", 100)
+        ledger.set_balance("alice", "AAPL", Decimal("100"))
 
         is_valid, reason = validate_short_sale(ledger, "alice", "AAPL", 500)
         assert is_valid is False
@@ -312,7 +313,7 @@ class TestValidateShortSale:
         ledger = ledger_with_stock
 
         # Alice borrows 500 from Bob
-        ledger.set_balance("bob", "AAPL", 500)
+        ledger.set_balance("bob", "AAPL", Decimal("500"))
         ledger.advance_time(datetime(2024, 1, 2))
 
         result = initiate_borrow(ledger, "AAPL", "alice", "bob", 500)
@@ -328,8 +329,8 @@ class TestValidateShortSale:
         ledger = ledger_with_stock
 
         # Alice owns 200, borrows 500 from Bob
-        ledger.set_balance("alice", "AAPL", 200)
-        ledger.set_balance("bob", "AAPL", 500)
+        ledger.set_balance("alice", "AAPL", Decimal("200"))
+        ledger.set_balance("bob", "AAPL", Decimal("500"))
         ledger.advance_time(datetime(2024, 1, 2))
 
         result = initiate_borrow(ledger, "AAPL", "alice", "bob", 500)
@@ -354,7 +355,7 @@ class TestInitiateBorrow:
     @pytest.fixture
     def ledger_with_stock(self):
         """Create a ledger with stock for testing."""
-        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         stock = create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True)
@@ -365,7 +366,7 @@ class TestInitiateBorrow:
         ledger.register_wallet("treasury")
 
         ledger.set_balance("treasury", "USD", 1_000_000)
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
         return ledger
 
@@ -384,8 +385,8 @@ class TestInitiateBorrow:
         ledger.execute(result)
 
         # Verify balances
-        assert ledger.get_balance("alice", "AAPL") == 500.0
-        assert ledger.get_balance("bob", "AAPL") == 500.0
+        assert ledger.get_balance("alice", "AAPL") == Decimal("500.0")
+        assert ledger.get_balance("bob", "AAPL") == Decimal("500.0")
 
         # Verify BorrowRecord exists
         borrows = get_active_borrows(ledger, "alice", "AAPL")
@@ -427,7 +428,7 @@ class TestComputeBorrowReturn:
     @pytest.fixture
     def ledger_with_borrow(self):
         """Create a ledger with an active borrow."""
-        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         stock = create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True)
@@ -439,7 +440,7 @@ class TestComputeBorrowReturn:
 
         ledger.set_balance("treasury", "USD", 1_000_000)
         ledger.set_balance("alice", "USD", 100_000)
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
         # Initiate borrow
         ledger.advance_time(datetime(2024, 1, 2))
@@ -460,8 +461,8 @@ class TestComputeBorrowReturn:
         ledger.execute(result)
 
         # Verify shares returned
-        assert ledger.get_balance("alice", "AAPL") == 0.0
-        assert ledger.get_balance("bob", "AAPL") == 1000.0
+        assert ledger.get_balance("alice", "AAPL") == Decimal("0.0")
+        assert ledger.get_balance("bob", "AAPL") == Decimal("1000.0")
 
         # Verify borrow closed
         assert len(get_active_borrows(ledger, "alice", "AAPL")) == 0
@@ -477,12 +478,12 @@ class TestComputeBorrowReturn:
         # Alice sells the borrowed shares (leaves her short)
         ledger.advance_time(datetime(2024, 1, 5))
         sell_tx = build_transaction(ledger, [
-            Move(500.0, "AAPL", "alice", "treasury", "sell")
+            Move(Decimal("500.0"), "AAPL", "alice", "treasury", "sell")
         ])
         ledger.execute(sell_tx)
 
         # Now Alice has 0 AAPL but owes 500
-        assert ledger.get_balance("alice", "AAPL") == 0.0
+        assert ledger.get_balance("alice", "AAPL") == Decimal("0.0")
 
         # Cannot return
         borrow_symbol = get_active_borrows(ledger, "alice", "AAPL")[0]
@@ -500,7 +501,7 @@ class TestInitiateRecall:
     @pytest.fixture
     def ledger_with_borrow(self):
         """Create a ledger with an active borrow."""
-        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         stock = create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True)
@@ -510,7 +511,7 @@ class TestInitiateRecall:
         ledger.register_wallet("bob")
         ledger.register_wallet("treasury")
 
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
         ledger.advance_time(datetime(2024, 1, 2))
         result = initiate_borrow(ledger, "AAPL", "alice", "bob", 500)
@@ -543,7 +544,7 @@ class TestHelperFunctions:
     @pytest.fixture
     def ledger_with_borrows(self):
         """Create a ledger with multiple borrows."""
-        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         for sym in ["AAPL", "GOOG"]:
@@ -554,8 +555,8 @@ class TestHelperFunctions:
         ledger.register_wallet("bob")
         ledger.register_wallet("treasury")
 
-        ledger.set_balance("bob", "AAPL", 1000)
-        ledger.set_balance("bob", "GOOG", 500)
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
+        ledger.set_balance("bob", "GOOG", Decimal("500"))
 
         # Create multiple borrows
         ledger.advance_time(datetime(2024, 1, 2))
@@ -592,10 +593,10 @@ class TestHelperFunctions:
         ledger = ledger_with_borrows
 
         total_aapl = get_total_borrowed(ledger, "alice", "AAPL")
-        assert total_aapl == 500.0  # 300 + 200
+        assert total_aapl == Decimal("500.0")  # 300 + 200
 
         total_goog = get_total_borrowed(ledger, "alice", "GOOG")
-        assert total_goog == 100.0
+        assert total_goog == Decimal("100.0")
 
 
 # =============================================================================
@@ -607,7 +608,7 @@ class TestBorrowLifecycle:
 
     def test_full_lifecycle(self):
         """Test complete borrow -> short sell -> cover -> return cycle."""
-        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         stock = create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True)
@@ -619,7 +620,7 @@ class TestBorrowLifecycle:
         ledger.register_wallet("treasury")
 
         # Setup
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
         ledger.set_balance("alice", "USD", 100_000)
         ledger.set_balance("market", "AAPL", 10_000)
         ledger.set_balance("market", "USD", 1_000_000)
@@ -629,7 +630,7 @@ class TestBorrowLifecycle:
         borrow_result = initiate_borrow(ledger, "AAPL", "alice", "bob", 500)
         ledger.execute(borrow_result)
 
-        assert ledger.get_balance("alice", "AAPL") == 500.0
+        assert ledger.get_balance("alice", "AAPL") == Decimal("500.0")
         assert compute_available_position(ledger, "alice", "AAPL") == 0.0
 
         # Step 2: Alice sells the borrowed shares (short sale)
@@ -643,15 +644,15 @@ class TestBorrowLifecycle:
         # But if she owns shares separately, she can sell those
 
         # Give Alice some owned shares
-        ledger.set_balance("treasury", "AAPL", 1000)
+        ledger.set_balance("treasury", "AAPL", Decimal("1000"))
         tx = build_transaction(ledger, [
-            Move(200, "AAPL", "treasury", "alice", "gift")
+            Move(Decimal("200"), "AAPL", "treasury", "alice", "gift")
         ])
         ledger.execute(tx)
 
         # Now Alice has 700 AAPL (500 borrowed + 200 owned)
         # Available = 700 - 500 = 200
-        assert ledger.get_balance("alice", "AAPL") == 700.0
+        assert ledger.get_balance("alice", "AAPL") == Decimal("700.0")
         assert compute_available_position(ledger, "alice", "AAPL") == 200.0
 
         # She can sell 200 (her owned shares)
@@ -659,13 +660,13 @@ class TestBorrowLifecycle:
         assert is_valid is True
 
         sell_tx = build_transaction(ledger, [
-            Move(200, "AAPL", "alice", "market", "sell"),
-            Move(30_000, "USD", "market", "alice", "proceeds"),  # $150/share
+            Move(Decimal("200"), "AAPL", "alice", "market", "sell"),
+            Move(Decimal("30000"), "USD", "market", "alice", "proceeds"),  # $150/share
         ])
         ledger.execute(sell_tx)
 
         # After selling, Alice has 500 AAPL (700 - 200)
-        assert ledger.get_balance("alice", "AAPL") == 500.0
+        assert ledger.get_balance("alice", "AAPL") == Decimal("500.0")
 
         # Step 3: Alice needs to return 500 shares to Bob
         # She already has exactly 500, so she can return now
@@ -677,8 +678,8 @@ class TestBorrowLifecycle:
         ledger.execute(return_result)
 
         # Verify final state
-        assert ledger.get_balance("alice", "AAPL") == 0.0
-        assert ledger.get_balance("bob", "AAPL") == 1000.0
+        assert ledger.get_balance("alice", "AAPL") == Decimal("0.0")
+        assert ledger.get_balance("bob", "AAPL") == Decimal("1000.0")
         assert len(get_active_borrows(ledger, "alice", "AAPL")) == 0
 
         state = ledger.get_unit_state(borrow_symbol)
@@ -686,7 +687,7 @@ class TestBorrowLifecycle:
 
     def test_conservation_of_shares(self):
         """Total shares remain constant through borrow cycle."""
-        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2024, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         stock = create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True)
@@ -697,7 +698,7 @@ class TestBorrowLifecycle:
         ledger.register_wallet("treasury")
 
         # Initial: 1000 shares exist (bob has them all)
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
         def total_shares():
             return sum(

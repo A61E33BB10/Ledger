@@ -11,6 +11,7 @@ Provides common fixtures used across unit and functional tests:
 import pytest
 from datetime import datetime, timedelta
 from typing import Dict, Set, Tuple, List, Any
+from decimal import Decimal
 
 from ledger import (
     # Core
@@ -59,14 +60,18 @@ def create_stock(symbol: str, name: str, issuer: str, shortable: bool = False, *
     )
 
 
-def ledger_state_equals(ledger1: Ledger, ledger2: Ledger, tolerance: float = 1e-9) -> bool:
+def ledger_state_equals(ledger1: Ledger, ledger2: Ledger, tolerance: Decimal = None) -> bool:
     """Check if two ledgers have equivalent state (balances and unit states)."""
+    if tolerance is None:
+        tolerance = Decimal("1e-9")
     diff = compare_ledger_states(ledger1, ledger2, tolerance)
     return diff["equal"]
 
 
-def compare_ledger_states(ledger1: Ledger, ledger2: Ledger, tolerance: float = 1e-9) -> dict:
+def compare_ledger_states(ledger1: Ledger, ledger2: Ledger, tolerance: Decimal = None) -> dict:
     """Compare two ledger states and return differences."""
+    if tolerance is None:
+        tolerance = Decimal("1e-9")
     balance_diffs = []
     state_diffs = []
 
@@ -76,8 +81,8 @@ def compare_ledger_states(ledger1: Ledger, ledger2: Ledger, tolerance: float = 1
 
     for wallet in all_wallets:
         for unit in all_units:
-            bal1 = ledger1.balances.get(wallet, {}).get(unit, 0.0)
-            bal2 = ledger2.balances.get(wallet, {}).get(unit, 0.0)
+            bal1 = ledger1.balances.get(wallet, {}).get(unit, Decimal("0"))
+            bal2 = ledger2.balances.get(wallet, {}).get(unit, Decimal("0"))
             if abs(bal1 - bal2) > tolerance:
                 balance_diffs.append({
                     "wallet": wallet,
@@ -118,13 +123,15 @@ def compare_ledger_states(ledger1: Ledger, ledger2: Ledger, tolerance: float = 1
     }
 
 
-def verify_conservation(ledger: Ledger, unit_symbol: str, expected_total: float = None, tolerance: float = 1e-9) -> Tuple[bool, float]:
+def verify_conservation(ledger: Ledger, unit_symbol: str, expected_total: Decimal = None, tolerance: Decimal = None) -> Tuple[bool, Decimal]:
     """
     Verify conservation law for a unit.
 
     Returns:
         (is_conserved, actual_total)
     """
+    if tolerance is None:
+        tolerance = Decimal("1e-9")
     actual = ledger.total_supply(unit_symbol)
     if expected_total is not None:
         return abs(actual - expected_total) < tolerance, actual
@@ -138,13 +145,13 @@ def verify_conservation(ledger: Ledger, unit_symbol: str, expected_total: float 
 @pytest.fixture
 def empty_ledger():
     """Fresh ledger with no registrations."""
-    return Ledger("test", verbose=False)
+    return Ledger("test", verbose=False, test_mode=True)
 
 
 @pytest.fixture
 def basic_ledger():
     """Ledger with USD and two wallets."""
-    ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
+    ledger = Ledger("test", datetime(2025, 1, 1), verbose=False, test_mode=True)
     ledger.register_unit(cash("USD", "US Dollar", decimal_places=2))
     ledger.register_wallet("alice")
     ledger.register_wallet("bob")
@@ -154,7 +161,7 @@ def basic_ledger():
 @pytest.fixture
 def funded_ledger(basic_ledger):
     """Basic ledger with alice having $10,000."""
-    basic_ledger.set_balance("alice", "USD", 10000)
+    basic_ledger.set_balance("alice", "USD", Decimal("10000"))
     return basic_ledger
 
 
@@ -165,7 +172,7 @@ def funded_ledger(basic_ledger):
 @pytest.fixture
 def trading_ledger():
     """Ledger ready for stock trading with multiple wallets."""
-    ledger = Ledger("trading", datetime(2025, 1, 1), verbose=False)
+    ledger = Ledger("trading", datetime(2025, 1, 1), verbose=False, test_mode=True)
     ledger.register_unit(cash("USD", "US Dollar", decimal_places=2))
     ledger.register_unit(create_stock("AAPL", "Apple Inc", "treasury", shortable=True))
 
@@ -176,11 +183,11 @@ def trading_ledger():
     ledger.register_wallet("market")
 
     # Fund wallets
-    ledger.set_balance("alice", "USD", 100000)
-    ledger.set_balance("bob", "USD", 50000)
-    ledger.set_balance("treasury", "USD", 10000000)
-    ledger.set_balance("market", "USD", 1000000)
-    ledger.set_balance("market", "AAPL", 100000)
+    ledger.set_balance("alice", "USD", Decimal("100000"))
+    ledger.set_balance("bob", "USD", Decimal("50000"))
+    ledger.set_balance("treasury", "USD", Decimal("10000000"))
+    ledger.set_balance("market", "USD", Decimal("1000000"))
+    ledger.set_balance("market", "AAPL", Decimal("100000"))
 
     return ledger
 
@@ -188,7 +195,7 @@ def trading_ledger():
 @pytest.fixture
 def multi_stock_ledger():
     """Ledger with multiple stocks for testing."""
-    ledger = Ledger("multi_stock", datetime(2025, 1, 1), verbose=False)
+    ledger = Ledger("multi_stock", datetime(2025, 1, 1), verbose=False, test_mode=True)
     ledger.register_unit(cash("USD", "US Dollar", decimal_places=2))
     ledger.register_unit(create_stock("AAPL", "Apple Inc", "treasury", shortable=True))
     ledger.register_unit(create_stock("MSFT", "Microsoft Corp", "treasury", shortable=True))
@@ -199,11 +206,11 @@ def multi_stock_ledger():
     ledger.register_wallet("treasury")
     ledger.register_wallet("market")
 
-    ledger.set_balance("alice", "USD", 1000000)
-    ledger.set_balance("market", "AAPL", 100000)
-    ledger.set_balance("market", "MSFT", 100000)
-    ledger.set_balance("market", "GOOGL", 100000)
-    ledger.set_balance("market", "USD", 10000000)
+    ledger.set_balance("alice", "USD", Decimal("1000000"))
+    ledger.set_balance("market", "AAPL", Decimal("100000"))
+    ledger.set_balance("market", "MSFT", Decimal("100000"))
+    ledger.set_balance("market", "GOOGL", Decimal("100000"))
+    ledger.set_balance("market", "USD", Decimal("10000000"))
 
     return ledger
 
@@ -215,15 +222,15 @@ def multi_stock_ledger():
 @pytest.fixture
 def dividend_ledger():
     """Ledger with stock that has dividend schedule."""
-    ledger = Ledger("dividend", datetime(2025, 1, 1), verbose=False)
+    ledger = Ledger("dividend", datetime(2025, 1, 1), verbose=False, test_mode=True)
     ledger.register_unit(cash("USD", "US Dollar", decimal_places=2))
 
     # Stock with quarterly dividend schedule
     dividend_schedule = [
-        Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD"),
-        Dividend(datetime(2025, 6, 15), datetime(2025, 6, 15), 0.25, "USD"),
-        Dividend(datetime(2025, 9, 15), datetime(2025, 9, 15), 0.25, "USD"),
-        Dividend(datetime(2025, 12, 15), datetime(2025, 12, 15), 0.25, "USD"),
+        Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), Decimal("0.25"), "USD"),
+        Dividend(datetime(2025, 6, 15), datetime(2025, 6, 15), Decimal("0.25"), "USD"),
+        Dividend(datetime(2025, 9, 15), datetime(2025, 9, 15), Decimal("0.25"), "USD"),
+        Dividend(datetime(2025, 12, 15), datetime(2025, 12, 15), Decimal("0.25"), "USD"),
     ]
     ledger.register_unit(create_stock_unit(
         symbol="AAPL",
@@ -240,10 +247,10 @@ def dividend_ledger():
     ledger.register_wallet("treasury")
 
     # Distribute shares
-    ledger.set_balance("alice", "AAPL", 1000)
-    ledger.set_balance("bob", "AAPL", 500)
-    ledger.set_balance("charlie", "AAPL", 250)
-    ledger.set_balance("treasury", "USD", 10000000)
+    ledger.set_balance("alice", "AAPL", Decimal("1000"))
+    ledger.set_balance("bob", "AAPL", Decimal("500"))
+    ledger.set_balance("charlie", "AAPL", Decimal("250"))
+    ledger.set_balance("treasury", "USD", Decimal("10000000"))
 
     return ledger
 
@@ -255,7 +262,7 @@ def dividend_ledger():
 @pytest.fixture
 def option_ledger():
     """Ledger with bilateral option ready for testing."""
-    ledger = Ledger("options", datetime(2025, 1, 1), verbose=False)
+    ledger = Ledger("options", datetime(2025, 1, 1), verbose=False, test_mode=True)
     ledger.register_unit(cash("USD", "US Dollar", decimal_places=2))
     ledger.register_unit(create_stock("AAPL", "Apple Inc", "treasury", shortable=True))
 
@@ -264,10 +271,10 @@ def option_ledger():
         symbol="AAPL_C150",
         name="AAPL Call $150",
         underlying="AAPL",
-        strike=150.0,
+        strike=Decimal("150"),
         maturity=datetime(2025, 6, 20),
         option_type="call",
-        quantity=100,  # Per contract
+        quantity=Decimal("100"),  # Per contract
         currency="USD",
         long_wallet="alice",
         short_wallet="bob",
@@ -280,10 +287,10 @@ def option_ledger():
     ledger.register_wallet("treasury")
 
     # Fund wallets
-    ledger.set_balance("alice", "USD", 100000)
-    ledger.set_balance("alice", "AAPL_C150", 5)  # Long 5 contracts
-    ledger.set_balance("bob", "AAPL_C150", -5)  # Short 5 contracts
-    ledger.set_balance("bob", "AAPL", 1000)  # Can deliver
+    ledger.set_balance("alice", "USD", Decimal("100000"))
+    ledger.set_balance("alice", "AAPL_C150", Decimal("5"))  # Long 5 contracts
+    ledger.set_balance("bob", "AAPL_C150", Decimal("-5"))  # Short 5 contracts
+    ledger.set_balance("bob", "AAPL", Decimal("1000"))  # Can deliver
 
     return ledger
 
@@ -291,7 +298,7 @@ def option_ledger():
 @pytest.fixture
 def put_option_ledger():
     """Ledger with put option for testing."""
-    ledger = Ledger("put_options", datetime(2025, 1, 1), verbose=False)
+    ledger = Ledger("put_options", datetime(2025, 1, 1), verbose=False, test_mode=True)
     ledger.register_unit(cash("USD", "US Dollar", decimal_places=2))
     ledger.register_unit(create_stock("AAPL", "Apple Inc", "treasury", shortable=True))
 
@@ -300,10 +307,10 @@ def put_option_ledger():
         symbol="AAPL_P150",
         name="AAPL Put $150",
         underlying="AAPL",
-        strike=150.0,
+        strike=Decimal("150"),
         maturity=datetime(2025, 6, 20),
         option_type="put",
-        quantity=100,
+        quantity=Decimal("100"),
         currency="USD",
         long_wallet="alice",
         short_wallet="bob",
@@ -314,11 +321,11 @@ def put_option_ledger():
     ledger.register_wallet("bob")
     ledger.register_wallet("treasury")
 
-    ledger.set_balance("alice", "USD", 100000)
-    ledger.set_balance("alice", "AAPL", 1000)  # Can deliver for put
-    ledger.set_balance("alice", "AAPL_P150", 5)
-    ledger.set_balance("bob", "AAPL_P150", -5)
-    ledger.set_balance("bob", "USD", 100000)  # Cash for put assignment
+    ledger.set_balance("alice", "USD", Decimal("100000"))
+    ledger.set_balance("alice", "AAPL", Decimal("1000"))  # Can deliver for put
+    ledger.set_balance("alice", "AAPL_P150", Decimal("5"))
+    ledger.set_balance("bob", "AAPL_P150", Decimal("-5"))
+    ledger.set_balance("bob", "USD", Decimal("100000"))  # Cash for put assignment
 
     return ledger
 
@@ -330,7 +337,7 @@ def put_option_ledger():
 @pytest.fixture
 def forward_ledger():
     """Ledger with forward contract for testing."""
-    ledger = Ledger("forwards", datetime(2025, 1, 1), verbose=False)
+    ledger = Ledger("forwards", datetime(2025, 1, 1), verbose=False, test_mode=True)
     ledger.register_unit(cash("USD", "US Dollar", decimal_places=2))
     ledger.register_unit(create_stock("AAPL", "Apple Inc", "treasury", shortable=True))
 
@@ -339,9 +346,9 @@ def forward_ledger():
         symbol="AAPL_FWD",
         name="AAPL Forward",
         underlying="AAPL",
-        forward_price=160.0,
+        forward_price=Decimal("160"),
         delivery_date=datetime(2025, 6, 20),
-        quantity=100,
+        quantity=Decimal("100"),
         currency="USD",
         long_wallet="alice",
         short_wallet="bob",
@@ -352,10 +359,10 @@ def forward_ledger():
     ledger.register_wallet("bob")
     ledger.register_wallet("treasury")
 
-    ledger.set_balance("alice", "USD", 100000)
-    ledger.set_balance("alice", "AAPL_FWD", 5)
-    ledger.set_balance("bob", "AAPL_FWD", -5)
-    ledger.set_balance("bob", "AAPL", 1000)
+    ledger.set_balance("alice", "USD", Decimal("100000"))
+    ledger.set_balance("alice", "AAPL_FWD", Decimal("5"))
+    ledger.set_balance("bob", "AAPL_FWD", Decimal("-5"))
+    ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
     return ledger
 
@@ -367,7 +374,7 @@ def forward_ledger():
 @pytest.fixture
 def delta_hedge_ledger():
     """Ledger with delta hedge strategy for testing."""
-    ledger = Ledger("delta_hedge", datetime(2025, 1, 1), verbose=False)
+    ledger = Ledger("delta_hedge", datetime(2025, 1, 1), verbose=False, test_mode=True)
     ledger.register_unit(cash("USD", "US Dollar", decimal_places=2))
     ledger.register_unit(create_stock("AAPL", "Apple Inc", "treasury", shortable=True))
 
@@ -376,15 +383,15 @@ def delta_hedge_ledger():
         symbol="HEDGE_AAPL",
         name="AAPL Delta Hedge",
         underlying="AAPL",
-        strike=150.0,
+        strike=Decimal("150"),
         maturity=datetime(2025, 6, 20),
-        volatility=0.25,
-        num_options=10,
-        option_multiplier=100,
+        volatility=Decimal("0.25"),
+        num_options=Decimal("10"),
+        option_multiplier=Decimal("100"),
         currency="USD",
         strategy_wallet="trader",
         market_wallet="market",
-        risk_free_rate=0.0,
+        risk_free_rate=Decimal("0"),
     )
     ledger.register_unit(hedge)
 
@@ -392,9 +399,9 @@ def delta_hedge_ledger():
     ledger.register_wallet("market")
     ledger.register_wallet("treasury")
 
-    ledger.set_balance("trader", "USD", 500000)
-    ledger.set_balance("market", "USD", 10000000)
-    ledger.set_balance("market", "AAPL", 100000)
+    ledger.set_balance("trader", "USD", Decimal("500000"))
+    ledger.set_balance("market", "USD", Decimal("10000000"))
+    ledger.set_balance("market", "AAPL", Decimal("100000"))
 
     return ledger
 
@@ -439,12 +446,12 @@ def simple_price_path():
     """Simple price path for testing."""
     t0 = datetime(2025, 1, 1)
     prices = [
-        (t0, 150.0),
-        (t0 + timedelta(days=1), 152.0),
-        (t0 + timedelta(days=2), 148.0),
-        (t0 + timedelta(days=3), 155.0),
-        (t0 + timedelta(days=4), 153.0),
-        (t0 + timedelta(days=5), 158.0),
+        (t0, Decimal("150")),
+        (t0 + timedelta(days=1), Decimal("152")),
+        (t0 + timedelta(days=2), Decimal("148")),
+        (t0 + timedelta(days=3), Decimal("155")),
+        (t0 + timedelta(days=4), Decimal("153")),
+        (t0 + timedelta(days=5), Decimal("158")),
     ]
     return TimeSeriesPricingSource({"AAPL": prices}, base_currency="USD")
 
@@ -457,11 +464,12 @@ def volatile_price_path():
 
     t0 = datetime(2025, 1, 1)
     prices = []
-    price = 150.0
+    price = Decimal("150")
     for i in range(180):  # ~6 months
         prices.append((t0 + timedelta(days=i), price))
         # Daily return with 30% annualized vol
-        price *= (1 + random.gauss(0, 0.019))  # ~0.30/sqrt(252)
+        daily_return = Decimal(str(random.gauss(0, 0.019)))  # ~0.30/sqrt(252)
+        price *= (Decimal("1") + daily_return)
 
     return TimeSeriesPricingSource({"AAPL": prices}, base_currency="USD")
 
@@ -475,16 +483,16 @@ def stock_view():
     """FakeView for stock dividend testing."""
     return FakeView(
         balances={
-            "alice": {"AAPL": 1000, "USD": 50000},
-            "bob": {"AAPL": 500},
-            "treasury": {"USD": 10000000},
+            "alice": {"AAPL": Decimal("1000"), "USD": Decimal("50000")},
+            "bob": {"AAPL": Decimal("500")},
+            "treasury": {"USD": Decimal("10000000")},
         },
         states={
             "AAPL": {
                 "unit_type": "STOCK",
                 "issuer": "treasury",
                 "currency": "USD",
-                "dividend_schedule": [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 0.25, "USD")],
+                "dividend_schedule": [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), Decimal("0.25"), "USD")],
                 "snapshots": {},
                 "paid": {},
             }
@@ -498,17 +506,17 @@ def option_view():
     """FakeView for option settlement testing."""
     return FakeView(
         balances={
-            "alice": {"OPT": 5, "USD": 100000},
-            "bob": {"OPT": -5, "AAPL": 1000, "USD": 50000},
+            "alice": {"OPT": Decimal("5"), "USD": Decimal("100000")},
+            "bob": {"OPT": Decimal("-5"), "AAPL": Decimal("1000"), "USD": Decimal("50000")},
         },
         states={
             "OPT": {
                 "unit_type": "BILATERAL_OPTION",
                 "underlying": "AAPL",
-                "strike": 150.0,
+                "strike": Decimal("150"),
                 "maturity": datetime(2025, 6, 20),
                 "option_type": "call",
-                "quantity": 100,
+                "quantity": Decimal("100"),
                 "currency": "USD",
                 "long_wallet": "alice",
                 "short_wallet": "bob",

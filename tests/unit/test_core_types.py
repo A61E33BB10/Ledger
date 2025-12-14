@@ -11,6 +11,7 @@ Tests:
 import pytest
 import math
 from datetime import datetime
+from decimal import Decimal
 from ledger import (
     Move, Transaction, Unit, UnitStateChange,
     TransactionOrigin, OriginType,
@@ -31,34 +32,34 @@ class TestMoveCreation:
 
     def test_create_valid_move(self):
         """Valid move creation with all fields."""
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         assert move.source == "alice"
         assert move.dest == "bob"
         assert move.unit_symbol == "USD"
-        assert move.quantity == 100.0
+        assert move.quantity == Decimal("100.0")
         assert move.contract_id == "tx_001"
         assert move.metadata is None
 
     def test_move_with_metadata(self):
         """Move can carry arbitrary metadata."""
         metadata = {"note": "payment", "reference": "INV-123"}
-        move = Move(100.0, "USD", "alice", "bob", "tx_001", metadata)
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001", metadata)
         assert move.metadata == metadata
 
     def test_move_large_quantity(self):
         """Move handles large quantities."""
-        move = Move(1_000_000_000.0, "USD", "alice", "bob", "tx_001")
-        assert move.quantity == 1_000_000_000.0
+        move = Move(Decimal("1000000000"), "USD", "alice", "bob", "tx_001")
+        assert move.quantity == Decimal("1000000000")
 
     def test_move_small_quantity(self):
         """Move handles small quantities above epsilon."""
-        move = Move(0.0001, "USD", "alice", "bob", "tx_001")
-        assert move.quantity == 0.0001
+        move = Move(Decimal("0.0001"), "USD", "alice", "bob", "tx_001")
+        assert move.quantity == Decimal("0.0001")
 
     def test_move_fractional_quantity(self):
         """Move handles fractional quantities."""
-        move = Move(10.5, "AAPL", "alice", "bob", "tx_001")
-        assert move.quantity == 10.5
+        move = Move(Decimal("10.5"), "AAPL", "alice", "bob", "tx_001")
+        assert move.quantity == Decimal("10.5")
 
 
 class TestMoveValidation:
@@ -67,38 +68,38 @@ class TestMoveValidation:
     def test_move_zero_quantity_raises(self):
         """Zero quantity is rejected."""
         with pytest.raises(ValueError, match="quantity is effectively zero"):
-            Move(0.0, "USD", "alice", "bob", "tx_001")
+            Move(Decimal("0.0"), "USD", "alice", "bob", "tx_001")
 
     def test_move_near_zero_quantity_allowed(self):
         """Very small quantities near zero are allowed if above epsilon."""
         # The epsilon check in Move allows very small quantities
-        move = Move(1e-12, "USD", "alice", "bob", "tx_001")
-        assert move.quantity == 1e-12
+        move = Move(Decimal("1e-12"), "USD", "alice", "bob", "tx_001")
+        assert move.quantity == Decimal("1e-12")
 
     def test_move_same_source_dest_raises(self):
         """Source and dest must differ."""
         with pytest.raises(ValueError, match="Source and dest must be different"):
-            Move(100.0, "USD", "alice", "alice", "tx_001")
+            Move(Decimal("100.0"), "USD", "alice", "alice", "tx_001")
 
     def test_move_nan_quantity_raises(self):
         """NaN quantity is rejected."""
-        with pytest.raises(ValueError, match="finite"):
+        with pytest.raises(ValueError, match="must be Decimal"):
             Move(float('nan'), "USD", "alice", "bob", "tx_001")
 
     def test_move_inf_quantity_raises(self):
         """Infinite quantity is rejected."""
-        with pytest.raises(ValueError, match="finite"):
+        with pytest.raises(ValueError, match="must be Decimal"):
             Move(float('inf'), "USD", "alice", "bob", "tx_001")
 
     def test_move_neg_inf_quantity_raises(self):
         """Negative infinite quantity is rejected."""
-        with pytest.raises(ValueError, match="finite"):
+        with pytest.raises(ValueError, match="must be Decimal"):
             Move(float('-inf'), "USD", "alice", "bob", "tx_001")
 
     def test_move_negative_quantity_allowed(self):
         """Negative quantities are allowed (for reversals)."""
-        move = Move(-100.0, "USD", "alice", "bob", "tx_001")
-        assert move.quantity == -100.0
+        move = Move(Decimal("-100.0"), "USD", "alice", "bob", "tx_001")
+        assert move.quantity == Decimal("-100.0")
 
 
 class TestMoveImmutability:
@@ -106,26 +107,26 @@ class TestMoveImmutability:
 
     def test_move_is_frozen(self):
         """Move attributes cannot be modified."""
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         with pytest.raises(AttributeError):
             move.quantity = 200.0
 
     def test_move_source_frozen(self):
         """Move source cannot be modified."""
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         with pytest.raises(AttributeError):
             move.source = "charlie"
 
     def test_move_hashable(self):
         """Frozen Move is hashable."""
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         # Should not raise
         hash(move)
 
     def test_move_equality(self):
         """Two identical moves are equal."""
-        move1 = Move(100.0, "USD", "alice", "bob", "tx_001")
-        move2 = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move1 = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
+        move2 = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         assert move1 == move2
 
 
@@ -134,7 +135,7 @@ class TestMoveRepr:
 
     def test_move_repr_contains_fields(self):
         """Repr includes key fields."""
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         repr_str = repr(move)
         assert "alice" in repr_str
         assert "bob" in repr_str
@@ -147,7 +148,7 @@ class TestTransaction:
 
     def test_create_valid_transaction(self):
         """Transaction with single move."""
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         tx = Transaction(
             moves=(move,),
             state_changes=(),
@@ -167,8 +168,8 @@ class TestTransaction:
     def test_transaction_multiple_moves(self):
         """Transaction with multiple moves."""
         moves = (
-            Move(100.0, "USD", "alice", "bob", "trade_001"),
-            Move(10.0, "AAPL", "bob", "alice", "trade_001"),
+            Move(Decimal("100.0"), "USD", "alice", "bob", "trade_001"),
+            Move(Decimal("10.0"), "AAPL", "bob", "alice", "trade_001"),
         )
         tx = Transaction(
             moves=moves,
@@ -187,8 +188,8 @@ class TestTransaction:
     def test_transaction_multiple_contract_ids(self):
         """Transaction aggregates multiple contract IDs."""
         moves = (
-            Move(100.0, "USD", "alice", "bob", "contract_A"),
-            Move(10.0, "AAPL", "bob", "alice", "contract_B"),
+            Move(Decimal("100.0"), "USD", "alice", "bob", "contract_A"),
+            Move(Decimal("10.0"), "AAPL", "bob", "alice", "contract_B"),
         )
         tx = Transaction(
             moves=moves,
@@ -205,8 +206,8 @@ class TestTransaction:
 
     def test_transaction_with_state_changes(self):
         """Transaction can include state deltas."""
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
-        delta = UnitStateChange("AAPL", {"price": 100}, {"price": 105})
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
+        delta = UnitStateChange("AAPL", {"price": Decimal("100")}, {"price": Decimal("105")})
         tx = Transaction(
             moves=(move,),
             state_changes=(delta,),
@@ -255,7 +256,7 @@ class TestTransaction:
 
     def test_transaction_is_frozen(self):
         """Transaction attributes cannot be modified."""
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
         tx = Transaction(
             moves=(move,),
             state_changes=(),
@@ -272,8 +273,8 @@ class TestTransaction:
 
     def test_transaction_repr_includes_state_changes(self):
         """Repr shows state deltas when present."""
-        move = Move(100.0, "USD", "alice", "bob", "tx_001")
-        delta = UnitStateChange("AAPL", {"old": 1}, {"new": 2})
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "tx_001")
+        delta = UnitStateChange("AAPL", {"old": Decimal("1")}, {"new": Decimal("2")})
         tx = Transaction(
             moves=(move,),
             state_changes=(delta,),
@@ -297,12 +298,12 @@ class TestUnitStateChange:
         """Create valid UnitStateChange."""
         sc = UnitStateChange(
             unit="AAPL",
-            old_state={"settled": False, "price": 100},
-            new_state={"settled": True, "price": 150}
+            old_state={"settled": False, "price": Decimal("100")},
+            new_state={"settled": True, "price": Decimal("150")}
         )
         assert sc.unit == "AAPL"
-        assert sc.old_state == {"settled": False, "price": 100}
-        assert sc.new_state == {"settled": True, "price": 150}
+        assert sc.old_state == {"settled": False, "price": Decimal("100")}
+        assert sc.new_state == {"settled": True, "price": Decimal("150")}
 
     def test_state_change_is_frozen(self):
         """UnitStateChange attributes cannot be modified."""
@@ -326,7 +327,7 @@ class TestUnitFactories:
         assert usd.symbol == "USD"
         assert usd.name == "US Dollar"
         assert usd.unit_type == "CASH"
-        assert usd.decimal_places == 2
+        assert usd.decimal_places == Decimal("2")
         # Cash allows negative balances (borrowing)
         assert usd.min_balance == -1_000_000_000.0
 
@@ -338,16 +339,16 @@ class TestUnitFactories:
     def test_cash_rounding(self):
         """Cash unit rounds correctly."""
         usd = cash("USD", "US Dollar", decimal_places=2)
-        assert usd.round(100.456) == 100.46
-        assert usd.round(100.454) == 100.45
+        assert usd.round(Decimal("100.456")) == Decimal("100.46")
+        assert usd.round(Decimal("100.454")) == Decimal("100.45")
         # Standard rounding (not banker's rounding)
-        assert usd.round(100.445) == 100.44
+        assert usd.round(Decimal("100.445")) == Decimal("100.44")
 
     def test_cash_rounding_negative(self):
         """Cash unit rounds negative values correctly."""
         usd = cash("USD", "US Dollar", decimal_places=2)
-        assert usd.round(-100.456) == -100.46
-        assert usd.round(-100.454) == -100.45
+        assert usd.round(Decimal("-100.456")) == Decimal("-100.46")
+        assert usd.round(Decimal("-100.454")) == Decimal("-100.45")
 
 
 class TestUnitRounding:
@@ -356,16 +357,18 @@ class TestUnitRounding:
     def test_round_no_decimal_places(self):
         """Unit with no decimal places rounds to int."""
         unit = Unit("SHARES", "Shares", "STOCK", None, decimal_places=0)
-        assert unit.round(10.6) == 11
-        assert unit.round(10.4) == 10
+        # STOCK units use ROUND_DOWN
+        assert unit.round(Decimal("10.6")) == Decimal("10")
+        assert unit.round(Decimal("10.4")) == Decimal("10")
 
     def test_round_many_decimal_places(self):
         """Unit with many decimal places preserves precision."""
         unit = Unit("PRECISE", "Precise", "STOCK", None, decimal_places=8)
-        assert unit.round(0.123456789) == 0.12345679
+        # STOCK units use ROUND_DOWN
+        assert unit.round(Decimal("0.123456789")) == Decimal("0.12345678")
 
     def test_round_none_decimal_places(self):
         """Unit with None decimal places doesn't round."""
         unit = Unit("NOROUND", "No Rounding", "STOCK", None, decimal_places=None)
-        value = 100.123456789
+        value = Decimal("100.123456789")
         assert unit.round(value) == value

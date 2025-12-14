@@ -28,29 +28,31 @@ but without tracking avg_entry_price explicitly.
 from __future__ import annotations
 import math
 from datetime import datetime, date
+from decimal import Decimal
 from typing import Dict
 from ..core import (
     LedgerView, Move, PendingTransaction, Unit, UnitStateChange, QUANTITY_EPSILON, UNIT_TYPE_FUTURE,
     build_transaction, empty_pending_transaction,
+    _freeze_state,
 )
 
 
 def create_future(
     symbol: str, name: str, underlying: str, expiry: datetime,
-    multiplier: float, currency: str, clearinghouse_id: str,
+    multiplier: Decimal, currency: str, clearinghouse_id: str,
 ) -> Unit:
     """Create a futures contract."""
-    if multiplier <= 0:
+    if multiplier <= Decimal("0"):
         raise ValueError(f"multiplier must be positive, got {multiplier}")
     if not clearinghouse_id or not clearinghouse_id.strip():
         raise ValueError("clearinghouse_id cannot be empty")
     return Unit(
         symbol=symbol, name=name, unit_type=UNIT_TYPE_FUTURE,
-        min_balance=-1_000_000.0, max_balance=1_000_000.0, decimal_places=2,
-        _state={'underlying': underlying, 'expiry': expiry, 'multiplier': multiplier,
+        min_balance=Decimal("-1000000"), max_balance=Decimal("1000000"), decimal_places=2,
+        _frozen_state=_freeze_state({'underlying': underlying, 'expiry': expiry, 'multiplier': multiplier,
                 'currency': currency, 'clearinghouse': clearinghouse_id,
                 'last_settle_price': None, 'last_settle_date': None, 'settled': False,
-                'wallets': {}})
+                'wallets': {}}))
 
 
 def transact(
@@ -58,8 +60,8 @@ def transact(
     symbol: str,
     seller_id: str,
     buyer_id: str,
-    qty: float,
-    price: float,
+    qty: Decimal,
+    price: Decimal,
 ) -> PendingTransaction:
     """
     Execute a futures trade.
@@ -87,9 +89,14 @@ def transact(
     state = view.get_unit_state(symbol)
     if state.get('settled'):
         raise ValueError(f"Cannot trade settled contract {symbol}")
-    if qty <= 0:
+
+    # Ensure Decimal types
+    qty = Decimal(str(qty)) if not isinstance(qty, Decimal) else qty
+    price = Decimal(str(price)) if not isinstance(price, Decimal) else price
+
+    if qty <= Decimal("0"):
         raise ValueError(f"qty must be positive, got {qty}")
-    if not math.isfinite(price):
+    if not math.isfinite(float(price)):
         raise ValueError(f"price must be finite, got {price}")
 
     ch_id = state['clearinghouse']
@@ -98,14 +105,14 @@ def transact(
     if seller_id == ch_id and buyer_id == ch_id:
         raise ValueError("clearinghouse cannot be both seller and buyer")
 
-    mult = state['multiplier']
+    mult = Decimal(str(state['multiplier'])) if not isinstance(state['multiplier'], Decimal) else state['multiplier']
     wallet_states = dict(state.get('wallets', {}))
     unit = view.get_unit(symbol)
 
     # Helper to update wallet state
-    def update_wallet(wallet_id: str, position_delta: float, vcash_delta: float):
+    def update_wallet(wallet_id: str, position_delta: Decimal, vcash_delta: Decimal):
         wallet_state = wallet_states.get(wallet_id, {})
-        state_position = wallet_state.get('position', 0.0)
+        state_position = wallet_state.get('position', Decimal("0"))
         ledger_position = view.get_balance(wallet_id, symbol)
 
         # Defense-in-depth: validate state matches ledger
@@ -121,7 +128,9 @@ def transact(
             if new_position > unit.max_balance:
                 raise ValueError(f"Position {new_position} would exceed max_balance {unit.max_balance} for {wallet_id}")
 
-        old_vcash = wallet_state.get('virtual_cash', 0.0)
+        old_vcash = wallet_state.get('virtual_cash', Decimal("0"))
+        # Ensure old_vcash is Decimal (in case it was stored as float)
+        old_vcash = Decimal(str(old_vcash)) if not isinstance(old_vcash, Decimal) else old_vcash
         wallet_states[wallet_id] = {'position': new_position, 'virtual_cash': old_vcash + vcash_delta}
 
     value = qty * price * mult
@@ -148,7 +157,9 @@ def transact(
             update_wallet(buyer_id, +qty, -value)
             ch_wallet_state = wallet_states.get(ch_id, {})
             ch_ledger_position = view.get_balance(ch_id, symbol)
-            wallet_states[ch_id] = {'position': ch_ledger_position, 'virtual_cash': ch_wallet_state.get('virtual_cash', 0.0)}
+            ch_vcash = ch_wallet_state.get('virtual_cash', Decimal("0"))
+            ch_vcash = Decimal(str(ch_vcash)) if not isinstance(ch_vcash, Decimal) else ch_vcash
+            wallet_states[ch_id] = {'position': ch_ledger_position, 'virtual_cash': ch_vcash}
             moves = [
                 Move(quantity=qty, unit_symbol=symbol, source=seller_id, dest=ch_id,
                      contract_id=f'future_{symbol}_sell_{seller_id}'),
@@ -166,7 +177,7 @@ def transact(
 
 
 def mark_to_market(
-    view: LedgerView, symbol: str, price: float, settle_date: date | None = None
+    view: LedgerView, symbol: str, price: Decimal, settle_date: date | None = None
 ) -> PendingTransaction:
     """
     Mark all positions to market.
@@ -184,12 +195,17 @@ def mark_to_market(
     state = view.get_unit_state(symbol)
     if state.get('settled'):
         raise ValueError(f"Cannot mark-to-market settled contract {symbol}")
-    if not math.isfinite(price):
+
+    # Ensure Decimal type
+    price = Decimal(str(price)) if not isinstance(price, Decimal) else price
+
+    if not math.isfinite(float(price)):
         raise ValueError(f"price must be finite, got {price}")
     if settle_date and state.get('last_settle_date') == settle_date:
         return empty_pending_transaction(view)  # Idempotent
 
-    mult, currency, ch_id = state['multiplier'], state['currency'], state['clearinghouse']
+    mult = Decimal(str(state['multiplier'])) if not isinstance(state['multiplier'], Decimal) else state['multiplier']
+    currency, ch_id = state['currency'], state['clearinghouse']
     positions = view.get_positions(symbol)
     wallet_states = dict(state.get('wallets', {}))
     moves = []
@@ -198,10 +214,15 @@ def mark_to_market(
     wallet_ids_to_settle = set(positions.keys()) | set(wallet_states.keys())
 
     for wallet_id in sorted(wallet_ids_to_settle):
-        ledger_position = positions.get(wallet_id, 0.0)
+        ledger_position = positions.get(wallet_id, Decimal("0"))
         wallet_state = wallet_states.get(wallet_id, {})
-        vcash = wallet_state.get('virtual_cash', 0.0)
-        state_position = wallet_state.get('position', 0.0)
+        vcash = wallet_state.get('virtual_cash', Decimal("0"))
+        state_position = wallet_state.get('position', Decimal("0"))
+
+        # Ensure Decimal types (in case stored as float)
+        ledger_position = Decimal(str(ledger_position)) if not isinstance(ledger_position, Decimal) else ledger_position
+        vcash = Decimal(str(vcash)) if not isinstance(vcash, Decimal) else vcash
+        state_position = Decimal(str(state_position)) if not isinstance(state_position, Decimal) else state_position
 
         # Validate position consistency (defense-in-depth)
         if wallet_id in wallet_states and abs(state_position - ledger_position) >= QUANTITY_EPSILON:
@@ -237,15 +258,18 @@ def mark_to_market(
 
 
 def future_contract(
-    view: LedgerView, symbol: str, timestamp: datetime, prices: Dict[str, float]
+    view: LedgerView, symbol: str, timestamp: datetime, prices: Dict[str, Decimal]
 ) -> PendingTransaction:
     """SmartContract: daily MTM and expiry. Called by LifecycleEngine."""
     state = view.get_unit_state(symbol)
     if state.get('settled'):
         return empty_pending_transaction(view)
-    price = prices.get(state.get('underlying'))
-    if price is None:
-        return empty_pending_transaction(view)
+    underlying = state.get('underlying')
+    if not underlying:
+        raise ValueError(f"Future {symbol} has no underlying defined")
+    if underlying not in prices:
+        raise ValueError(f"Missing price for future underlying '{underlying}' in {symbol}")
+    price = prices[underlying]
 
     result = mark_to_market(view, symbol, price, settle_date=timestamp.date())
 

@@ -16,6 +16,7 @@ Core concepts:
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict, List, Optional, Callable, Any, FrozenSet
 import heapq
 
@@ -71,7 +72,7 @@ class Event:
 # ============================================================================
 
 # Handler type: (event, view, prices) -> PendingTransaction
-EventHandler = Callable[[Event, LedgerView, Dict[str, float]], PendingTransaction]
+EventHandler = Callable[[Event, LedgerView, Dict[str, Decimal]], PendingTransaction]
 
 
 class EventScheduler:
@@ -130,29 +131,34 @@ class EventScheduler:
         self,
         event: Event,
         view: LedgerView,
-        prices: Dict[str, float],
+        prices: Dict[str, Decimal],
     ) -> Optional[PendingTransaction]:
         """
         Execute a single event via its registered handler.
 
-        Returns PendingTransaction or None if no handler/error.
+        Returns PendingTransaction or None if no handler registered.
+
+        Raises:
+            Exception: Any exception raised by the handler propagates unchanged.
+                       Handlers are expected to be pure functions that either
+                       return a valid PendingTransaction or raise an explicit error.
+                       Silent failures are forbidden by design.
         """
         handler = self._handlers.get(event.action)
         if not handler:
             return None
 
-        try:
-            result = handler(event, view, prices)
-            self._executed.add(event.event_id)
-            return result
-        except Exception:
-            return None
+        # Execute handler - exceptions propagate (no silent swallowing)
+        # This ensures failures are explicit and debuggable
+        result = handler(event, view, prices)
+        self._executed.add(event.event_id)
+        return result
 
     def step(
         self,
         as_of: datetime,
         view: LedgerView,
-        prices: Dict[str, float],
+        prices: Dict[str, Decimal],
     ) -> List[PendingTransaction]:
         """
         Process all due events and return their transactions.
@@ -186,7 +192,7 @@ class EventScheduler:
 def dividend_event(
     symbol: str,
     ex_date: datetime,
-    amount_per_share: float,
+    amount_per_share: Decimal,
     currency: str,
     payment_date: Optional[datetime] = None,
 ) -> Event:
@@ -207,7 +213,7 @@ def dividend_event(
 def coupon_event(
     bond_symbol: str,
     payment_date: datetime,
-    coupon_amount: float,
+    coupon_amount: Decimal,
     currency: str,
 ) -> Event:
     """Create a bond coupon payment event."""
@@ -226,7 +232,7 @@ def coupon_event(
 def maturity_event(
     bond_symbol: str,
     maturity_date: datetime,
-    redemption_price: float,
+    redemption_price: Decimal,
     currency: str,
 ) -> Event:
     """Create a bond maturity/redemption event."""
@@ -278,7 +284,7 @@ def settlement_event(
 def split_event(
     symbol: str,
     effective_date: datetime,
-    ratio: float,
+    ratio: Decimal,
 ) -> Event:
     """Create a stock split event."""
     return Event(

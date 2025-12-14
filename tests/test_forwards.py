@@ -10,6 +10,7 @@ Tests:
 
 import pytest
 from datetime import datetime
+from decimal import Decimal
 from ledger import (
     Move, Unit,
     create_forward_unit,
@@ -28,9 +29,9 @@ class TestCreateForwardUnit:
             symbol="OIL_FWD_JUN25",
             name="Oil Forward Jun25",
             underlying="OIL",
-            forward_price=75.0,
+            forward_price=Decimal("75.0"),
             delivery_date=datetime(2025, 6, 1),
-            quantity=1000,
+            quantity=Decimal("1000"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob"
@@ -39,10 +40,10 @@ class TestCreateForwardUnit:
         assert unit.symbol == "OIL_FWD_JUN25"
         assert unit.name == "Oil Forward Jun25"
         assert unit.unit_type == "BILATERAL_FORWARD"
-        assert unit._state['underlying'] == "OIL"
-        assert unit._state['forward_price'] == 75.0
-        assert unit._state['quantity'] == 1000
-        assert unit._state['settled'] is False
+        assert unit.state['underlying'] == "OIL"
+        assert unit.state['forward_price'] == 75.0
+        assert unit.state['quantity'] == 1000
+        assert unit.state['settled'] is False
 
     def test_create_forward_unit_validates_price(self):
         """Non-positive forward price should raise."""
@@ -51,9 +52,9 @@ class TestCreateForwardUnit:
                 symbol="TEST",
                 name="Test Forward",
                 underlying="OIL",
-                forward_price=0.0,
+                forward_price=Decimal("0.0"),
                 delivery_date=datetime(2025, 6, 1),
-                quantity=1000,
+                quantity=Decimal("1000"),
                 currency="USD",
                 long_wallet="alice",
                 short_wallet="bob"
@@ -68,7 +69,7 @@ class TestCreateForwardUnit:
                 underlying="OIL",
                 forward_price=-10.0,
                 delivery_date=datetime(2025, 6, 1),
-                quantity=1000,
+                quantity=Decimal("1000"),
                 currency="USD",
                 long_wallet="alice",
                 short_wallet="bob"
@@ -81,7 +82,7 @@ class TestCreateForwardUnit:
                 symbol="TEST",
                 name="Test Forward",
                 underlying="OIL",
-                forward_price=75.0,
+                forward_price=Decimal("75.0"),
                 delivery_date=datetime(2025, 6, 1),
                 quantity=-100,
                 currency="USD",
@@ -94,9 +95,9 @@ class TestCreateForwardUnit:
             symbol="GBP_FWD",
             name="GBP Forward",
             underlying="GBP",
-            forward_price=1.25,
+            forward_price=Decimal("1.25"),
             delivery_date=datetime(2025, 6, 1),
-            quantity=10000,
+            quantity=Decimal("10000"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob"
@@ -111,15 +112,15 @@ class TestComputeForwardSettlement:
         """Forward settlement: long pays cash, receives underlying."""
         view = FakeView(
             balances={
-                'alice': {'FWD': 2, 'USD': 200000},
-                'bob': {'FWD': -2, 'OIL': 5000},
+                'alice': {'FWD': Decimal("2"), 'USD': Decimal("200000")},
+                'bob': {'FWD': -2, 'OIL': Decimal("5000")},
             },
             states={
                 'FWD': {
                     'underlying': 'OIL',
-                    'forward_price': 75.0,
+                    'forward_price': Decimal("75.0"),
                     'delivery_date': datetime(2025, 6, 1),
-                    'quantity': 1000,
+                    'quantity': Decimal("1000"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -138,19 +139,19 @@ class TestComputeForwardSettlement:
         assert cash_move.source == 'alice'
         assert cash_move.dest == 'bob'
         # 2 contracts * 1000 qty * $75 = $150,000
-        assert cash_move.quantity == 2 * 1000 * 75.0
+        assert cash_move.quantity == Decimal("2") * Decimal("1000") * Decimal("75.0")
 
         # Check delivery move
         delivery_move = next(m for m in result.moves if m.unit_symbol == 'OIL')
         assert delivery_move.source == 'bob'
         assert delivery_move.dest == 'alice'
-        assert delivery_move.quantity == 2 * 1000
+        assert delivery_move.quantity == Decimal("2") * 1000
 
         # Check close position
         close_move = next(m for m in result.moves if m.unit_symbol == 'FWD')
         assert close_move.source == 'alice'
         assert close_move.dest == 'bob'
-        assert close_move.quantity == 2
+        assert close_move.quantity == Decimal("2")
 
         # Check state updates
         sc = next(d for d in result.state_changes if d.unit == "FWD")
@@ -158,13 +159,13 @@ class TestComputeForwardSettlement:
 
     def test_settlement_before_delivery_returns_empty(self):
         view = FakeView(
-            balances={'alice': {'FWD': 2}, 'bob': {'FWD': -2}},
+            balances={'alice': {'FWD': Decimal("2")}, 'bob': {'FWD': -2}},
             states={
                 'FWD': {
                     'underlying': 'OIL',
-                    'forward_price': 75.0,
+                    'forward_price': Decimal("75.0"),
                     'delivery_date': datetime(2025, 12, 31),
-                    'quantity': 1000,
+                    'quantity': Decimal("1000"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -179,15 +180,15 @@ class TestComputeForwardSettlement:
     def test_force_settlement_before_delivery(self):
         view = FakeView(
             balances={
-                'alice': {'FWD': 1, 'USD': 100000},
-                'bob': {'FWD': -1, 'OIL': 2000},
+                'alice': {'FWD': Decimal("1"), 'USD': Decimal("100000")},
+                'bob': {'FWD': -1, 'OIL': Decimal("2000")},
             },
             states={
                 'FWD': {
                     'underlying': 'OIL',
-                    'forward_price': 75.0,
+                    'forward_price': Decimal("75.0"),
                     'delivery_date': datetime(2025, 12, 31),
-                    'quantity': 1000,
+                    'quantity': Decimal("1000"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -207,9 +208,9 @@ class TestComputeForwardSettlement:
             states={
                 'FWD': {
                     'underlying': 'OIL',
-                    'forward_price': 75.0,
+                    'forward_price': Decimal("75.0"),
                     'delivery_date': datetime(2025, 6, 1),
-                    'quantity': 1000,
+                    'quantity': Decimal("1000"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -223,13 +224,13 @@ class TestComputeForwardSettlement:
 
     def test_no_position_returns_empty(self):
         view = FakeView(
-            balances={'alice': {'FWD': 0}, 'bob': {'FWD': 0}},
+            balances={'alice': {'FWD': Decimal("0")}, 'bob': {'FWD': Decimal("0")}},
             states={
                 'FWD': {
                     'underlying': 'OIL',
-                    'forward_price': 75.0,
+                    'forward_price': Decimal("75.0"),
                     'delivery_date': datetime(2025, 6, 1),
-                    'quantity': 1000,
+                    'quantity': Decimal("1000"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -252,9 +253,9 @@ class TestForwardConvenienceFunctions:
             states={
                 'FWD': {
                     'underlying': 'OIL',
-                    'forward_price': 75.0,
+                    'forward_price': Decimal("75.0"),
                     'delivery_date': datetime(2025, 6, 1),
-                    'quantity': 1000,
+                    'quantity': Decimal("1000"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -263,7 +264,7 @@ class TestForwardConvenienceFunctions:
         )
         value = get_forward_value(view, 'FWD', spot_price=80.0)
         # (80 - 75) * 1000 = 5000
-        assert value == 5000.0
+        assert value == Decimal("5000.0")
 
     def test_get_forward_value_loss(self):
         """Value to long when spot < forward_price."""
@@ -272,9 +273,9 @@ class TestForwardConvenienceFunctions:
             states={
                 'FWD': {
                     'underlying': 'OIL',
-                    'forward_price': 75.0,
+                    'forward_price': Decimal("75.0"),
                     'delivery_date': datetime(2025, 6, 1),
-                    'quantity': 1000,
+                    'quantity': Decimal("1000"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -283,7 +284,7 @@ class TestForwardConvenienceFunctions:
         )
         value = get_forward_value(view, 'FWD', spot_price=70.0)
         # (70 - 75) * 1000 = -5000
-        assert value == -5000.0
+        assert value == Decimal("-5000.0")
 
     def test_get_forward_value_breakeven(self):
         """Value to long when spot == forward_price."""
@@ -292,9 +293,9 @@ class TestForwardConvenienceFunctions:
             states={
                 'FWD': {
                     'underlying': 'OIL',
-                    'forward_price': 75.0,
+                    'forward_price': Decimal("75.0"),
                     'delivery_date': datetime(2025, 6, 1),
-                    'quantity': 1000,
+                    'quantity': Decimal("1000"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -302,20 +303,20 @@ class TestForwardConvenienceFunctions:
             }
         )
         value = get_forward_value(view, 'FWD', spot_price=75.0)
-        assert value == 0.0
+        assert value == Decimal("0.0")
 
 class TestForwardContract:
     """Tests for forward_contract SmartContract implementation."""
 
     def test_check_lifecycle_not_matured(self):
         view = FakeView(
-            balances={'alice': {'FWD': 2}, 'bob': {'FWD': -2}},
+            balances={'alice': {'FWD': Decimal("2")}, 'bob': {'FWD': -2}},
             states={
                 'FWD': {
                     'underlying': 'OIL',
-                    'forward_price': 75.0,
+                    'forward_price': Decimal("75.0"),
                     'delivery_date': datetime(2025, 12, 31),
-                    'quantity': 1000,
+                    'quantity': Decimal("1000"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -324,21 +325,21 @@ class TestForwardContract:
             },
             time=datetime(2025, 6, 1)
         )
-        result = forward_contract(view, 'FWD', datetime(2025, 6, 1), {'OIL': 80.0})
+        result = forward_contract(view, 'FWD', datetime(2025, 6, 1), {'OIL': Decimal("80.0")})
         assert result.is_empty()
 
     def test_check_lifecycle_at_delivery_date(self):
         view = FakeView(
             balances={
-                'alice': {'FWD': 1, 'USD': 100000},
-                'bob': {'FWD': -1, 'OIL': 2000},
+                'alice': {'FWD': Decimal("1"), 'USD': Decimal("100000")},
+                'bob': {'FWD': -1, 'OIL': Decimal("2000")},
             },
             states={
                 'FWD': {
                     'underlying': 'OIL',
-                    'forward_price': 75.0,
+                    'forward_price': Decimal("75.0"),
                     'delivery_date': datetime(2025, 6, 1),
-                    'quantity': 1000,
+                    'quantity': Decimal("1000"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -347,7 +348,7 @@ class TestForwardContract:
             },
             time=datetime(2025, 6, 1)
         )
-        result = forward_contract(view, 'FWD', datetime(2025, 6, 1), {'OIL': 80.0})
+        result = forward_contract(view, 'FWD', datetime(2025, 6, 1), {'OIL': Decimal("80.0")})
         assert not result.is_empty()
 
     def test_check_lifecycle_already_settled(self):
@@ -356,9 +357,9 @@ class TestForwardContract:
             states={
                 'FWD': {
                     'underlying': 'OIL',
-                    'forward_price': 75.0,
+                    'forward_price': Decimal("75.0"),
                     'delivery_date': datetime(2025, 6, 1),
-                    'quantity': 1000,
+                    'quantity': Decimal("1000"),
                     'currency': 'USD',
                     'long_wallet': 'alice',
                     'short_wallet': 'bob',
@@ -367,12 +368,12 @@ class TestForwardContract:
             },
             time=datetime(2025, 6, 1)
         )
-        result = forward_contract(view, 'FWD', datetime(2025, 6, 1), {'OIL': 80.0})
+        result = forward_contract(view, 'FWD', datetime(2025, 6, 1), {'OIL': Decimal("80.0")})
         assert result.is_empty()
 
     def test_check_lifecycle_no_delivery_date(self):
         view = FakeView(
-            balances={'alice': {'FWD': 1}, 'bob': {'FWD': -1}},
+            balances={'alice': {'FWD': Decimal("1")}, 'bob': {'FWD': -1}},
             states={
                 'FWD': {
                     'settled': False,
@@ -380,5 +381,5 @@ class TestForwardContract:
             },
             time=datetime(2025, 6, 1)
         )
-        result = forward_contract(view, 'FWD', datetime(2025, 6, 1), {'OIL': 80.0})
+        result = forward_contract(view, 'FWD', datetime(2025, 6, 1), {'OIL': Decimal("80.0")})
         assert result.is_empty()

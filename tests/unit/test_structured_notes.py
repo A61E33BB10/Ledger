@@ -16,6 +16,7 @@ Tests:
 
 import pytest
 from datetime import datetime, timedelta
+from decimal import Decimal
 from tests.fake_view import FakeView
 from ledger.units.structured_note import (
     create_structured_note,
@@ -60,7 +61,7 @@ class TestGenerateCouponSchedule:
         assert len(schedule) == 2  # 2 annual payments
         # Annual coupon = 100000 * 0.02 / 1 = 2000
         for _, amount in schedule:
-            assert amount == 2000.0
+            assert amount == Decimal("2000.0")
 
     def test_semi_annual_coupon_schedule(self):
         """Generate semi-annual coupon schedule."""
@@ -74,7 +75,7 @@ class TestGenerateCouponSchedule:
         assert len(schedule) == 2  # 2 semi-annual payments
         # Semi-annual coupon = 100000 * 0.02 / 2 = 1000
         for _, amount in schedule:
-            assert amount == 1000.0
+            assert amount == Decimal("1000.0")
 
     def test_quarterly_coupon_schedule(self):
         """Generate quarterly coupon schedule."""
@@ -88,7 +89,7 @@ class TestGenerateCouponSchedule:
         assert len(schedule) == 4  # 4 quarterly payments
         # Quarterly coupon = 100000 * 0.04 / 4 = 1000
         for _, amount in schedule:
-            assert amount == 1000.0
+            assert amount == Decimal("1000.0")
 
     def test_invalid_frequency_raises(self):
         """Invalid frequency raises ValueError."""
@@ -130,13 +131,13 @@ class TestCreateStructuredNote:
         assert note.symbol == "SN_SPX_2025"
         assert note.unit_type == "STRUCTURED_NOTE"
 
-        state = note._state
+        state = note.state
         assert state['underlying'] == "SPX"
-        assert state['notional'] == 100000.0
-        assert state['strike_price'] == 4500.0
-        assert state['participation_rate'] == 0.80
-        assert state['cap_rate'] == 0.25
-        assert state['protection_level'] == 0.90
+        assert state['notional'] == Decimal("100000.0")
+        assert state['strike_price'] == Decimal("4500.0")
+        assert state['participation_rate'] == Decimal("0.80")
+        assert state['cap_rate'] == Decimal("0.25")
+        assert state['protection_level'] == Decimal("0.90")
         assert state['currency'] == "USD"
         assert state['issuer_wallet'] == "bank"
         assert state['holder_wallet'] == "investor"
@@ -160,7 +161,7 @@ class TestCreateStructuredNote:
             cap_rate=None,  # Uncapped
         )
 
-        assert note._state['cap_rate'] is None
+        assert note.state['cap_rate'] is None
 
     def test_create_note_with_coupons(self):
         """Create a structured note with coupon payments."""
@@ -181,8 +182,8 @@ class TestCreateStructuredNote:
             coupon_frequency=2,
         )
 
-        state = note._state
-        assert state['coupon_rate'] == 0.02
+        state = note.state
+        assert state['coupon_rate'] == Decimal("0.02")
         assert state['coupon_frequency'] == 2
         assert len(state['coupon_schedule']) == 2
 
@@ -209,7 +210,7 @@ class TestCreateStructuredNote:
             coupon_schedule=custom_schedule,
         )
 
-        assert note._state['coupon_schedule'] == custom_schedule
+        assert note.state['coupon_schedule'] == custom_schedule
 
     def test_zero_notional_raises(self):
         """Zero or negative notional raises ValueError."""
@@ -384,33 +385,33 @@ class TestComputePerformance:
 
     def test_performance_positive(self):
         """Positive performance when final > strike."""
-        perf = compute_performance(4950.0, 4500.0)
-        assert perf == pytest.approx(0.10, abs=0.0001)
+        perf = compute_performance(4950.0, Decimal("4500.0"))
+        assert float(perf) == pytest.approx(0.10, abs=0.0001)
 
     def test_performance_negative(self):
         """Negative performance when final < strike."""
-        perf = compute_performance(4050.0, 4500.0)
-        assert perf == pytest.approx(-0.10, abs=0.0001)
+        perf = compute_performance(4050.0, Decimal("4500.0"))
+        assert float(perf) == pytest.approx(-0.10, abs=0.0001)
 
     def test_performance_flat(self):
         """Zero performance when final == strike."""
-        perf = compute_performance(4500.0, 4500.0)
-        assert perf == 0.0
+        perf = compute_performance(4500.0, Decimal("4500.0"))
+        assert perf == Decimal("0.0")
 
     def test_performance_large_gain(self):
         """Large positive performance."""
-        perf = compute_performance(6750.0, 4500.0)
-        assert perf == pytest.approx(0.50, abs=0.0001)
+        perf = compute_performance(6750.0, Decimal("4500.0"))
+        assert float(perf) == pytest.approx(0.50, abs=0.0001)
 
     def test_performance_large_loss(self):
         """Large negative performance."""
-        perf = compute_performance(2250.0, 4500.0)
-        assert perf == pytest.approx(-0.50, abs=0.0001)
+        perf = compute_performance(2250.0, Decimal("4500.0"))
+        assert float(perf) == pytest.approx(-0.50, abs=0.0001)
 
     def test_performance_zero_strike_raises(self):
         """Zero strike price raises ValueError."""
         with pytest.raises(ValueError, match="strike_price must be positive"):
-            compute_performance(4500.0, 0.0)
+            compute_performance(4500.0, Decimal("0.0"))
 
     def test_performance_negative_strike_raises(self):
         """Negative strike price raises ValueError."""
@@ -429,72 +430,72 @@ class TestComputePayoffRate:
         """Upside with participation only (no cap)."""
         # 20% up, 80% participation
         rate = compute_payoff_rate(0.20, 0.80, None, 0.90)
-        assert rate == pytest.approx(0.16, abs=0.0001)
+        assert float(rate) == pytest.approx(0.16, abs=0.0001)
 
     def test_payoff_upside_below_cap(self):
         """Upside with participation below cap."""
         # 20% up, 80% participation, 25% cap
         rate = compute_payoff_rate(0.20, 0.80, 0.25, 0.90)
-        assert rate == pytest.approx(0.16, abs=0.0001)
+        assert float(rate) == pytest.approx(0.16, abs=0.0001)
 
     def test_payoff_upside_at_cap(self):
         """Upside exactly at cap."""
         # 31.25% up, 80% participation = 25%, cap = 25%
         rate = compute_payoff_rate(0.3125, 0.80, 0.25, 0.90)
-        assert rate == pytest.approx(0.25, abs=0.0001)
+        assert float(rate) == pytest.approx(0.25, abs=0.0001)
 
     def test_payoff_upside_hit_cap(self):
         """Upside exceeds cap."""
         # 40% up, 80% participation = 32%, capped at 25%
         rate = compute_payoff_rate(0.40, 0.80, 0.25, 0.90)
-        assert rate == pytest.approx(0.25, abs=0.0001)
+        assert float(rate) == pytest.approx(0.25, abs=0.0001)
 
     def test_payoff_downside_within_protection(self):
         """Downside loss within protection level."""
         # 5% down, 90% protection (floor at -10%)
         rate = compute_payoff_rate(-0.05, 0.80, 0.25, 0.90)
-        assert rate == pytest.approx(-0.05, abs=0.0001)
+        assert float(rate) == pytest.approx(-0.05, abs=0.0001)
 
     def test_payoff_downside_at_protection(self):
         """Downside exactly at protection floor."""
         # 10% down, 90% protection (floor at -10%)
         rate = compute_payoff_rate(-0.10, 0.80, 0.25, 0.90)
-        assert rate == pytest.approx(-0.10, abs=0.0001)
+        assert float(rate) == pytest.approx(-0.10, abs=0.0001)
 
     def test_payoff_downside_protection_triggered(self):
         """Downside exceeds protection, loss capped at floor."""
         # 15% down, 90% protection (floor at -10%)
         rate = compute_payoff_rate(-0.15, 0.80, 0.25, 0.90)
-        assert rate == pytest.approx(-0.10, abs=0.0001)
+        assert float(rate) == pytest.approx(-0.10, abs=0.0001)
 
     def test_payoff_downside_large_loss_protected(self):
         """Large loss protected at floor."""
         # 50% down, 90% protection (floor at -10%)
         rate = compute_payoff_rate(-0.50, 0.80, 0.25, 0.90)
-        assert rate == pytest.approx(-0.10, abs=0.0001)
+        assert float(rate) == pytest.approx(-0.10, abs=0.0001)
 
     def test_payoff_full_protection(self):
         """100% protection means no loss."""
         # 30% down, 100% protection
         rate = compute_payoff_rate(-0.30, 0.80, 0.25, 1.00)
-        assert rate == pytest.approx(0.0, abs=0.0001)
+        assert float(rate) == pytest.approx(0.0, abs=0.0001)
 
     def test_payoff_no_protection(self):
         """0% protection means full downside exposure."""
         # 30% down, 0% protection (floor at -100%)
         rate = compute_payoff_rate(-0.30, 0.80, 0.25, 0.00)
-        assert rate == pytest.approx(-0.30, abs=0.0001)
+        assert float(rate) == pytest.approx(-0.30, abs=0.0001)
 
     def test_payoff_flat_performance(self):
         """Flat performance returns zero."""
         rate = compute_payoff_rate(0.0, 0.80, 0.25, 0.90)
-        assert rate == 0.0
+        assert rate == Decimal("0.0")
 
     def test_payoff_high_participation(self):
         """Participation rate > 100% (leverage)."""
         # 10% up, 150% participation = 15%
         rate = compute_payoff_rate(0.10, 1.50, None, 0.90)
-        assert rate == pytest.approx(0.15, abs=0.0001)
+        assert float(rate) == pytest.approx(0.15, abs=0.0001)
 
 
 # ============================================================================
@@ -508,33 +509,33 @@ class TestComputeCouponPayment:
         """Setup common test fixtures."""
         self.note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 4500.0,
-            'participation_rate': 0.80,
-            'cap_rate': 0.25,
-            'protection_level': 0.90,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("0.80"),
+            'cap_rate': Decimal("0.25"),
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.02,
-            'coupon_frequency': 2,
+            'coupon_rate': Decimal("0.02"),
+            'coupon_frequency': Decimal("2"),
             'coupon_schedule': [
                 (datetime(2024, 7, 15), 1000.0),
                 (datetime(2025, 1, 15), 1000.0),
             ],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
     def test_coupon_payment_on_schedule(self):
         """Coupon payment generates correct moves."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 5, 'USD': 0},
-                'bank': {'USD': 1000000},
+                'investor': {'SN_TEST': Decimal("5"), 'USD': Decimal("0")},
+                'bank': {'USD': Decimal("1000000")},
             },
             states={'SN_TEST': self.note_state},
         )
@@ -547,14 +548,14 @@ class TestComputeCouponPayment:
         assert move.dest == 'investor'
         assert move.unit_symbol == 'USD'
         # 5 notes * $1000 coupon = $5000
-        assert move.quantity == 5000.0
+        assert move.quantity == Decimal("5000.0")
 
     def test_coupon_payment_updates_state(self):
         """Coupon payment updates state correctly."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 5},
-                'bank': {'USD': 1000000},
+                'investor': {'SN_TEST': Decimal("5")},
+                'bank': {'USD': Decimal("1000000")},
             },
             states={'SN_TEST': self.note_state},
         )
@@ -569,8 +570,8 @@ class TestComputeCouponPayment:
         """Coupon before scheduled date returns empty."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 5},
-                'bank': {'USD': 1000000},
+                'investor': {'SN_TEST': Decimal("5")},
+                'bank': {'USD': Decimal("1000000")},
             },
             states={'SN_TEST': self.note_state},
         )
@@ -586,8 +587,8 @@ class TestComputeCouponPayment:
 
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 5},
-                'bank': {'USD': 1000000},
+                'investor': {'SN_TEST': Decimal("5")},
+                'bank': {'USD': Decimal("1000000")},
             },
             states={'SN_TEST': state},
         )
@@ -600,9 +601,9 @@ class TestComputeCouponPayment:
         """Coupon payment to multiple holders."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 5},
-                'alice': {'SN_TEST': 3},
-                'bank': {'USD': 1000000},
+                'investor': {'SN_TEST': Decimal("5")},
+                'alice': {'SN_TEST': Decimal("3")},
+                'bank': {'USD': Decimal("1000000")},
             },
             states={'SN_TEST': self.note_state},
         )
@@ -612,7 +613,7 @@ class TestComputeCouponPayment:
         assert len(result.moves) == 2
         total = sum(m.quantity for m in result.moves)
         # (5 + 3) * $1000 = $8000
-        assert total == 8000.0
+        assert total == Decimal("8000.0")
 
 
 # ============================================================================
@@ -626,30 +627,30 @@ class TestComputeMaturityPayoff:
         """Setup common test fixtures."""
         self.note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 4500.0,
-            'participation_rate': 0.80,
-            'cap_rate': 0.25,
-            'protection_level': 0.90,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("0.80"),
+            'cap_rate': Decimal("0.25"),
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.0,
-            'coupon_frequency': 0,
+            'coupon_rate': Decimal("0.0"),
+            'coupon_frequency': Decimal("0"),
             'coupon_schedule': [],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
     def test_maturity_payoff_upside(self):
         """Maturity payoff with positive performance."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1, 'USD': 0},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1"), 'USD': Decimal("0")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2025, 1, 15),
@@ -663,14 +664,14 @@ class TestComputeMaturityPayoff:
         move = result.moves[0]
         assert move.source == 'bank'
         assert move.dest == 'investor'
-        assert move.quantity == pytest.approx(108000.0, abs=0.01)
+        assert float(move.quantity) == pytest.approx(108000.0, abs=0.01)
 
     def test_maturity_payoff_cap_hit(self):
         """Maturity payoff when cap is hit."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2025, 1, 15),
@@ -681,14 +682,14 @@ class TestComputeMaturityPayoff:
         result = compute_maturity_payoff(view, 'SN_TEST', 6750.0)
 
         move = result.moves[0]
-        assert move.quantity == pytest.approx(125000.0, abs=0.01)
+        assert float(move.quantity) == pytest.approx(125000.0, abs=0.01)
 
     def test_maturity_payoff_protection_triggered(self):
         """Maturity payoff when protection is triggered."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2025, 1, 15),
@@ -699,14 +700,14 @@ class TestComputeMaturityPayoff:
         result = compute_maturity_payoff(view, 'SN_TEST', 3600.0)
 
         move = result.moves[0]
-        assert move.quantity == pytest.approx(90000.0, abs=0.01)
+        assert float(move.quantity) == pytest.approx(90000.0, abs=0.01)
 
     def test_maturity_payoff_flat(self):
         """Maturity payoff with flat performance."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2025, 1, 15),
@@ -716,14 +717,14 @@ class TestComputeMaturityPayoff:
         result = compute_maturity_payoff(view, 'SN_TEST', 4500.0)
 
         move = result.moves[0]
-        assert move.quantity == pytest.approx(100000.0, abs=0.01)
+        assert float(move.quantity) == pytest.approx(100000.0, abs=0.01)
 
     def test_maturity_marks_matured(self):
         """Maturity marks note as matured."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2025, 1, 15),
@@ -742,8 +743,8 @@ class TestComputeMaturityPayoff:
 
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': state},
             time=datetime(2025, 1, 15),
@@ -757,8 +758,8 @@ class TestComputeMaturityPayoff:
         """Maturity before maturity date returns empty."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2024, 12, 15),  # Before maturity
@@ -772,8 +773,8 @@ class TestComputeMaturityPayoff:
         """Zero final price raises ValueError."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2025, 1, 15),
@@ -786,9 +787,9 @@ class TestComputeMaturityPayoff:
         """Maturity payoff to multiple holders."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 2},
-                'alice': {'SN_TEST': 3},
-                'bank': {'USD': 1000000},
+                'investor': {'SN_TEST': Decimal("2")},
+                'alice': {'SN_TEST': Decimal("3")},
+                'bank': {'USD': Decimal("1000000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2025, 1, 15),
@@ -800,7 +801,7 @@ class TestComputeMaturityPayoff:
         assert len(result.moves) == 2
         total = sum(m.quantity for m in result.moves)
         # (2 + 3) * 108000 = 540000
-        assert total == pytest.approx(540000.0, abs=0.01)
+        assert float(total) == pytest.approx(540000.0, abs=0.01)
 
 
 # ============================================================================
@@ -814,32 +815,32 @@ class TestTransact:
         """Setup common test fixtures."""
         self.note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 4500.0,
-            'participation_rate': 0.80,
-            'cap_rate': 0.25,
-            'protection_level': 0.90,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("0.80"),
+            'cap_rate': Decimal("0.25"),
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.02,
-            'coupon_frequency': 2,
+            'coupon_rate': Decimal("0.02"),
+            'coupon_frequency': Decimal("2"),
             'coupon_schedule': [
                 (datetime(2024, 7, 15), 1000.0),
             ],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
     def test_lifecycle_event_coupon(self):
         """_process_lifecycle_event handles COUPON event."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 5},
-                'bank': {'USD': 100000},
+                'investor': {'SN_TEST': Decimal("5")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'SN_TEST': self.note_state},
         )
@@ -852,8 +853,8 @@ class TestTransact:
         """_process_lifecycle_event handles MATURITY event."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2025, 1, 15),
@@ -868,8 +869,8 @@ class TestTransact:
         """MATURITY without final_price returns empty."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2025, 1, 15),
@@ -902,39 +903,39 @@ class TestStructuredNoteContract:
         """Setup common test fixtures."""
         self.note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 4500.0,
-            'participation_rate': 0.80,
-            'cap_rate': 0.25,
-            'protection_level': 0.90,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("0.80"),
+            'cap_rate': Decimal("0.25"),
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.02,
-            'coupon_frequency': 2,
+            'coupon_rate': Decimal("0.02"),
+            'coupon_frequency': Decimal("2"),
             'coupon_schedule': [
                 (datetime(2024, 7, 15), 1000.0),
             ],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
     def test_contract_processes_maturity(self):
         """Smart contract processes maturity when due."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2025, 1, 15),
         )
 
         result = structured_note_contract(
-            view, 'SN_TEST', datetime(2025, 1, 15), {'SPX': 4950.0}
+            view, 'SN_TEST', datetime(2025, 1, 15), {'SPX': Decimal("4950.0")}
         )
 
         assert len(result.moves) == 1
@@ -943,15 +944,15 @@ class TestStructuredNoteContract:
         """Smart contract processes coupon when due."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 5},
-                'bank': {'USD': 100000},
+                'investor': {'SN_TEST': Decimal("5")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2024, 7, 15),
         )
 
         result = structured_note_contract(
-            view, 'SN_TEST', datetime(2024, 7, 15), {'SPX': 4500.0}
+            view, 'SN_TEST', datetime(2024, 7, 15), {'SPX': Decimal("4500.0")}
         )
 
         assert len(result.moves) == 1
@@ -960,15 +961,15 @@ class TestStructuredNoteContract:
         """Smart contract returns empty when no events due."""
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': self.note_state},
             time=datetime(2024, 5, 15),
         )
 
         result = structured_note_contract(
-            view, 'SN_TEST', datetime(2024, 5, 15), {'SPX': 4500.0}
+            view, 'SN_TEST', datetime(2024, 5, 15), {'SPX': Decimal("4500.0")}
         )
 
         assert len(result.moves) == 0
@@ -985,32 +986,32 @@ class TestFullLifecycle:
         """Complete lifecycle: issue -> coupons -> maturity with gain."""
         note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 4500.0,
-            'participation_rate': 0.80,
-            'cap_rate': 0.25,
-            'protection_level': 0.90,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("0.80"),
+            'cap_rate': Decimal("0.25"),
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.02,
-            'coupon_frequency': 2,
+            'coupon_rate': Decimal("0.02"),
+            'coupon_frequency': Decimal("2"),
             'coupon_schedule': [
                 (datetime(2024, 7, 15), 1000.0),
                 (datetime(2025, 1, 15), 1000.0),
             ],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
         # Step 1: First coupon
         view1 = FakeView(
             balances={
-                'investor': {'SN_TEST': 1, 'USD': 0},
-                'bank': {'USD': 1000000},
+                'investor': {'SN_TEST': Decimal("1"), 'USD': Decimal("0")},
+                'bank': {'USD': Decimal("1000000")},
             },
             states={'SN_TEST': note_state},
         )
@@ -1024,8 +1025,8 @@ class TestFullLifecycle:
         # Step 2: Second coupon
         view2 = FakeView(
             balances={
-                'investor': {'SN_TEST': 1, 'USD': 1000},
-                'bank': {'USD': 999000},
+                'investor': {'SN_TEST': Decimal("1"), 'USD': Decimal("1000")},
+                'bank': {'USD': Decimal("999000")},
             },
             states={'SN_TEST': state_after_c1},
         )
@@ -1039,8 +1040,8 @@ class TestFullLifecycle:
         # Step 3: Maturity (10% up, 8% participation return)
         view3 = FakeView(
             balances={
-                'investor': {'SN_TEST': 1, 'USD': 2000},
-                'bank': {'USD': 998000},
+                'investor': {'SN_TEST': Decimal("1"), 'USD': Decimal("2000")},
+                'bank': {'USD': Decimal("998000")},
             },
             states={'SN_TEST': state_after_c2},
             time=datetime(2025, 1, 15),
@@ -1057,28 +1058,28 @@ class TestFullLifecycle:
         """Lifecycle with loss limited by protection."""
         note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 4500.0,
-            'participation_rate': 0.80,
-            'cap_rate': 0.25,
-            'protection_level': 0.90,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("0.80"),
+            'cap_rate': Decimal("0.25"),
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.0,
-            'coupon_frequency': 0,
+            'coupon_rate': Decimal("0.0"),
+            'coupon_frequency': Decimal("0"),
             'coupon_schedule': [],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': note_state},
             time=datetime(2025, 1, 15),
@@ -1087,7 +1088,7 @@ class TestFullLifecycle:
         # 30% down, but protected to 10% loss
         result = compute_maturity_payoff(view, 'SN_TEST', 3150.0)
 
-        assert result.moves[0].quantity == pytest.approx(90000.0, abs=0.01)
+        assert float(result.moves[0].quantity) == pytest.approx(90000.0, abs=0.01)
 
 
 # ============================================================================
@@ -1101,28 +1102,28 @@ class TestEdgeCases:
         """100% protection means no loss possible."""
         note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 4500.0,
-            'participation_rate': 0.50,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("0.50"),
             'cap_rate': None,
-            'protection_level': 1.00,  # 100% protection
+            'protection_level': Decimal("1.00"),  # 100% protection
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.0,
-            'coupon_frequency': 0,
+            'coupon_rate': Decimal("0.0"),
+            'coupon_frequency': Decimal("0"),
             'coupon_schedule': [],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': note_state},
             time=datetime(2025, 1, 15),
@@ -1132,34 +1133,34 @@ class TestEdgeCases:
         result = compute_maturity_payoff(view, 'SN_TEST', 2250.0)
 
         # Full principal returned
-        assert result.moves[0].quantity == pytest.approx(100000.0, abs=0.01)
+        assert float(result.moves[0].quantity) == pytest.approx(100000.0, abs=0.01)
 
     def test_100_percent_participation_full_upside(self):
         """100% participation captures full upside."""
         note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 4500.0,
-            'participation_rate': 1.00,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("1.00"),
             'cap_rate': None,
-            'protection_level': 0.90,
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.0,
-            'coupon_frequency': 0,
+            'coupon_rate': Decimal("0.0"),
+            'coupon_frequency': Decimal("0"),
             'coupon_schedule': [],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': note_state},
             time=datetime(2025, 1, 15),
@@ -1168,34 +1169,34 @@ class TestEdgeCases:
         # 20% up, 100% participation
         result = compute_maturity_payoff(view, 'SN_TEST', 5400.0)
 
-        assert result.moves[0].quantity == pytest.approx(120000.0, abs=0.01)
+        assert float(result.moves[0].quantity) == pytest.approx(120000.0, abs=0.01)
 
     def test_very_small_notional(self):
         """Very small notional handled correctly."""
         note_state = {
             'underlying': 'SPX',
-            'notional': 100.0,  # Small notional
-            'strike_price': 4500.0,
-            'participation_rate': 0.80,
-            'cap_rate': 0.25,
-            'protection_level': 0.90,
+            'notional': Decimal("100.0"),  # Small notional
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("0.80"),
+            'cap_rate': Decimal("0.25"),
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.0,
-            'coupon_frequency': 0,
+            'coupon_rate': Decimal("0.0"),
+            'coupon_frequency': Decimal("0"),
             'coupon_schedule': [],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': note_state},
             time=datetime(2025, 1, 15),
@@ -1204,34 +1205,34 @@ class TestEdgeCases:
         result = compute_maturity_payoff(view, 'SN_TEST', 4950.0)
 
         # 10% up, 8% return on 100 = 108
-        assert result.moves[0].quantity == pytest.approx(108.0, abs=0.01)
+        assert float(result.moves[0].quantity) == pytest.approx(108.0, abs=0.01)
 
     def test_very_high_strike_price(self):
         """Very high strike price handled correctly."""
         note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 100000.0,  # High strike
-            'participation_rate': 0.80,
-            'cap_rate': 0.25,
-            'protection_level': 0.90,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("100000.0"),  # High strike
+            'participation_rate': Decimal("0.80"),
+            'cap_rate': Decimal("0.25"),
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.0,
-            'coupon_frequency': 0,
+            'coupon_rate': Decimal("0.0"),
+            'coupon_frequency': Decimal("0"),
             'coupon_schedule': [],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': note_state},
             time=datetime(2025, 1, 15),
@@ -1240,7 +1241,7 @@ class TestEdgeCases:
         # Final at 50000 = 50% loss, protected to 10%
         result = compute_maturity_payoff(view, 'SN_TEST', 50000.0)
 
-        assert result.moves[0].quantity == pytest.approx(90000.0, abs=0.01)
+        assert float(result.moves[0].quantity) == pytest.approx(90000.0, abs=0.01)
 
 
 # ============================================================================
@@ -1254,28 +1255,28 @@ class TestConservationLaws:
         """Coupon payment is a pure transfer."""
         note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 4500.0,
-            'participation_rate': 0.80,
-            'cap_rate': 0.25,
-            'protection_level': 0.90,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("0.80"),
+            'cap_rate': Decimal("0.25"),
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.02,
-            'coupon_frequency': 2,
+            'coupon_rate': Decimal("0.02"),
+            'coupon_frequency': Decimal("2"),
             'coupon_schedule': [(datetime(2024, 7, 15), 1000.0)],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 10, 'USD': 0},
-                'bank': {'USD': 100000},
+                'investor': {'SN_TEST': Decimal("10"), 'USD': Decimal("0")},
+                'bank': {'USD': Decimal("100000")},
             },
             states={'SN_TEST': note_state},
         )
@@ -1291,29 +1292,29 @@ class TestConservationLaws:
         """Maturity payoff is a pure transfer."""
         note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 4500.0,
-            'participation_rate': 0.80,
-            'cap_rate': 0.25,
-            'protection_level': 0.90,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("0.80"),
+            'cap_rate': Decimal("0.25"),
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.0,
-            'coupon_frequency': 0,
+            'coupon_rate': Decimal("0.0"),
+            'coupon_frequency': Decimal("0"),
             'coupon_schedule': [],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 2},
-                'alice': {'SN_TEST': 3},
-                'bank': {'USD': 1000000},
+                'investor': {'SN_TEST': Decimal("2")},
+                'alice': {'SN_TEST': Decimal("3")},
+                'bank': {'USD': Decimal("1000000")},
             },
             states={'SN_TEST': note_state},
             time=datetime(2025, 1, 15),
@@ -1327,34 +1328,34 @@ class TestConservationLaws:
             total_out += move.quantity
 
         # (2 + 3) * 108000 = 540000
-        assert total_out == pytest.approx(540000.0, abs=0.01)
+        assert float(total_out) == pytest.approx(540000.0, abs=0.01)
 
     def test_net_flow_equals_payoff_calculation(self):
         """Net cash flow matches payoff formula."""
         note_state = {
             'underlying': 'SPX',
-            'notional': 100000.0,
-            'strike_price': 4500.0,
-            'participation_rate': 0.80,
-            'cap_rate': 0.25,
-            'protection_level': 0.90,
+            'notional': Decimal("100000.0"),
+            'strike_price': Decimal("4500.0"),
+            'participation_rate': Decimal("0.80"),
+            'cap_rate': Decimal("0.25"),
+            'protection_level': Decimal("0.90"),
             'issue_date': datetime(2024, 1, 15),
             'maturity_date': datetime(2025, 1, 15),
             'currency': 'USD',
             'issuer_wallet': 'bank',
             'holder_wallet': 'investor',
-            'coupon_rate': 0.0,
-            'coupon_frequency': 0,
+            'coupon_rate': Decimal("0.0"),
+            'coupon_frequency': Decimal("0"),
             'coupon_schedule': [],
             'paid_coupons': [],
             'matured': False,
-            'next_coupon_index': 0,
+            'next_coupon_index': Decimal("0"),
         }
 
         view = FakeView(
             balances={
-                'investor': {'SN_TEST': 1},
-                'bank': {'USD': 500000},
+                'investor': {'SN_TEST': Decimal("1")},
+                'bank': {'USD': Decimal("500000")},
             },
             states={'SN_TEST': note_state},
             time=datetime(2025, 1, 15),
@@ -1364,8 +1365,8 @@ class TestConservationLaws:
         result = compute_maturity_payoff(view, 'SN_TEST', final_price)
 
         # Calculate expected payoff manually
-        perf = compute_performance(final_price, 4500.0)
-        rate = compute_payoff_rate(perf, 0.80, 0.25, 0.90)
-        expected_payout = 100000.0 * (1 + rate)
+        perf = compute_performance(final_price, Decimal("4500.0"))
+        rate = compute_payoff_rate(perf, Decimal("0.80"), Decimal("0.25"), Decimal("0.90"))
+        expected_payout = Decimal("100000.0") * (Decimal("1") + rate)
 
-        assert result.moves[0].quantity == pytest.approx(expected_payout, abs=0.01)
+        assert float(result.moves[0].quantity) == pytest.approx(float(expected_payout), abs=0.01)

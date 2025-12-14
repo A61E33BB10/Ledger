@@ -11,6 +11,7 @@ Tests cover:
 
 import pytest
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from ledger.scheduled_events import (
     Event,
@@ -297,7 +298,7 @@ class TestEventFactoryFunctions:
         assert event.action == "dividend"
         assert event.symbol == "AAPL"
         assert event.trigger_time == datetime(2024, 6, 15)
-        assert event.priority == 0  # Record phase
+        assert event.priority == Decimal("0")  # Record phase
         assert event.params_dict["amount_per_share"] == "0.25"
         assert event.params_dict["currency"] == "USD"
 
@@ -312,7 +313,7 @@ class TestEventFactoryFunctions:
 
         assert event.action == "coupon"
         assert event.symbol == "CORP_5Y"
-        assert event.priority == 30  # Payment phase
+        assert event.priority == Decimal("30")  # Payment phase
 
     def test_maturity_event(self):
         """maturity_event creates correct event."""
@@ -324,7 +325,7 @@ class TestEventFactoryFunctions:
         )
 
         assert event.action == "maturity"
-        assert event.priority == 40  # Settlement phase
+        assert event.priority == Decimal("40")  # Settlement phase
         assert event.params_dict["redemption_price"] == "1000.0"
 
     def test_expiry_event(self):
@@ -336,7 +337,7 @@ class TestEventFactoryFunctions:
         )
 
         assert event.action == "expiry"
-        assert event.priority == 40  # Settlement phase
+        assert event.priority == Decimal("40")  # Settlement phase
         assert event.params_dict["underlying"] == "AAPL"
 
     def test_settlement_event(self):
@@ -348,7 +349,7 @@ class TestEventFactoryFunctions:
         )
 
         assert event.action == "settlement"
-        assert event.priority == 40
+        assert event.priority == Decimal("40")
 
     def test_split_event(self):
         """split_event creates correct event."""
@@ -359,7 +360,7 @@ class TestEventFactoryFunctions:
         )
 
         assert event.action == "split"
-        assert event.priority == 0  # Record phase
+        assert event.priority == Decimal("0")  # Record phase
         assert event.params_dict["ratio"] == "4.0"
 
 

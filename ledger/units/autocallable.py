@@ -19,6 +19,7 @@ All functions take LedgerView (read-only) and return immutable results.
 
 from __future__ import annotations
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict, Any, List, Optional
 
 import math
@@ -27,6 +28,7 @@ from ..core import (
     LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     QUANTITY_EPSILON, UNIT_TYPE_AUTOCALLABLE,
     build_transaction, empty_pending_transaction,
+    _freeze_state,
 )
 
 
@@ -34,12 +36,12 @@ def create_autocallable(
     symbol: str,
     name: str,
     underlying: str,
-    notional: float,
-    initial_spot: float,
-    autocall_barrier: float,
-    coupon_barrier: float,
-    coupon_rate: float,
-    put_barrier: float,
+    notional: Decimal,
+    initial_spot: Decimal,
+    autocall_barrier: Decimal,
+    coupon_barrier: Decimal,
+    coupon_rate: Decimal,
+    put_barrier: Decimal,
     issue_date: datetime,
     maturity_date: datetime,
     observation_schedule: List[datetime],
@@ -118,23 +120,23 @@ def create_autocallable(
         ledger.register_unit(autocallable)
     """
     # Validate notional
-    if notional <= 0:
+    if notional <= Decimal('0'):
         raise ValueError(f"notional must be positive, got {notional}")
 
     # Validate initial_spot
-    if initial_spot <= 0:
+    if initial_spot <= Decimal('0'):
         raise ValueError(f"initial_spot must be positive, got {initial_spot}")
 
     # Validate barriers
-    if autocall_barrier <= 0:
+    if autocall_barrier <= Decimal('0'):
         raise ValueError(f"autocall_barrier must be positive, got {autocall_barrier}")
-    if coupon_barrier <= 0:
+    if coupon_barrier <= Decimal('0'):
         raise ValueError(f"coupon_barrier must be positive, got {coupon_barrier}")
-    if put_barrier <= 0:
+    if put_barrier <= Decimal('0'):
         raise ValueError(f"put_barrier must be positive, got {put_barrier}")
 
     # Validate coupon_rate
-    if coupon_rate < 0:
+    if coupon_rate < Decimal('0'):
         raise ValueError(f"coupon_rate cannot be negative, got {coupon_rate}")
 
     # Validate wallets
@@ -164,11 +166,11 @@ def create_autocallable(
         symbol=symbol,
         name=name,
         unit_type=UNIT_TYPE_AUTOCALLABLE,
-        min_balance=-10.0,
-        max_balance=10.0,
+        min_balance=Decimal('-10'),
+        max_balance=Decimal('10'),
         decimal_places=0,
         transfer_rule=None,
-        _state={
+        _frozen_state=_freeze_state({
             'underlying': underlying,
             'notional': notional,
             'initial_spot': initial_spot,
@@ -185,12 +187,12 @@ def create_autocallable(
             'memory_feature': memory_feature,
             # State tracking
             'observation_history': [],
-            'coupon_memory': 0.0,
+            'coupon_memory': Decimal('0'),
             'put_knocked_in': False,
             'autocalled': False,
             'autocall_date': None,
             'settled': False,
-        }
+        })
     )
 
 
@@ -198,7 +200,7 @@ def compute_observation(
     view: LedgerView,
     symbol: str,
     observation_date: datetime,
-    spot: float,
+    spot: Decimal,
 ) -> PendingTransaction:
     """
     Process an observation date for an autocallable.
@@ -216,7 +218,7 @@ def compute_observation(
         view: Read-only ledger access
         symbol: Autocallable symbol
         observation_date: Date of observation
-        spot: Current spot price of underlying
+        spot: Current spot price of underlying (float or Decimal, converted internally)
 
     Returns:
         PendingTransaction with:
@@ -235,7 +237,11 @@ def compute_observation(
         )
         # Product autocalls, holder receives notional + coupon
     """
-    if spot <= 0:
+    # Convert spot to Decimal if it's not already (defensive type conversion)
+    if not isinstance(spot, Decimal):
+        spot = Decimal(str(spot))
+
+    if spot <= Decimal('0'):
         raise ValueError(f"spot must be positive, got {spot}")
 
     state = view.get_unit_state(symbol)
@@ -255,18 +261,40 @@ def compute_observation(
     if observation_date in processed_dates:
         return empty_pending_transaction(view)
 
-    # Get state values
+    # Get state values - convert to Decimal if needed
     initial_spot = state['initial_spot']
+    if not isinstance(initial_spot, Decimal):
+        initial_spot = Decimal(str(initial_spot))
+
     notional = state['notional']
+    if not isinstance(notional, Decimal):
+        notional = Decimal(str(notional))
+
     autocall_barrier = state['autocall_barrier']
+    if not isinstance(autocall_barrier, Decimal):
+        autocall_barrier = Decimal(str(autocall_barrier))
+
     coupon_barrier = state['coupon_barrier']
+    if not isinstance(coupon_barrier, Decimal):
+        coupon_barrier = Decimal(str(coupon_barrier))
+
     coupon_rate = state['coupon_rate']
+    if not isinstance(coupon_rate, Decimal):
+        coupon_rate = Decimal(str(coupon_rate))
+
     put_barrier = state['put_barrier']
+    if not isinstance(put_barrier, Decimal):
+        put_barrier = Decimal(str(put_barrier))
+
     currency = state['currency']
     issuer_wallet = state['issuer_wallet']
     holder_wallet = state['holder_wallet']
     memory_feature = state.get('memory_feature', True)
-    coupon_memory = state.get('coupon_memory', 0.0)
+
+    coupon_memory = state.get('coupon_memory', Decimal('0'))
+    if not isinstance(coupon_memory, Decimal):
+        coupon_memory = Decimal(str(coupon_memory))
+
     put_knocked_in = state.get('put_knocked_in', False)
 
     # Calculate performance
@@ -278,9 +306,9 @@ def compute_observation(
         'spot': spot,
         'performance': performance,
         'autocalled': False,
-        'coupon_paid': 0.0,
-        'memory_paid': 0.0,
-        'total_coupon_earned': 0.0,
+        'coupon_paid': Decimal('0'),
+        'memory_paid': Decimal('0'),
+        'total_coupon_earned': Decimal('0'),
         'put_knocked_in': False,
     }
 
@@ -295,12 +323,12 @@ def compute_observation(
         # Autocall triggered - pay principal + current coupon + memory
         current_coupon = notional * coupon_rate
         payout_per_unit = notional + current_coupon
-        memory_paid = 0.0
+        memory_paid = Decimal('0')
 
         if memory_feature and coupon_memory > QUANTITY_EPSILON:
             payout_per_unit += coupon_memory
             memory_paid = coupon_memory
-            new_coupon_memory = 0.0
+            new_coupon_memory = Decimal('0')
 
         observation_record['autocalled'] = True
         observation_record['coupon_paid'] = current_coupon
@@ -328,14 +356,14 @@ def compute_observation(
         if performance >= coupon_barrier:
             # Coupon paid
             current_coupon = notional * coupon_rate
-            memory_paid = 0.0
+            memory_paid = Decimal('0')
             payment_per_unit = current_coupon
 
             if memory_feature and coupon_memory > QUANTITY_EPSILON:
                 # Pay accumulated coupons too
                 payment_per_unit += coupon_memory
                 memory_paid = coupon_memory
-                new_coupon_memory = 0.0
+                new_coupon_memory = Decimal('0')
 
             observation_record['coupon_paid'] = current_coupon
             observation_record['memory_paid'] = memory_paid
@@ -386,7 +414,7 @@ def compute_observation(
 def compute_maturity_payoff(
     view: LedgerView,
     symbol: str,
-    final_spot: float,
+    final_spot: Decimal,
 ) -> PendingTransaction:
     """
     Compute final settlement at maturity if not already autocalled.
@@ -400,7 +428,7 @@ def compute_maturity_payoff(
     Args:
         view: Read-only ledger access
         symbol: Autocallable symbol
-        final_spot: Final spot price at maturity
+        final_spot: Final spot price at maturity (float or Decimal, converted internally)
 
     Returns:
         PendingTransaction with:
@@ -419,7 +447,11 @@ def compute_maturity_payoff(
         result = compute_maturity_payoff(view, "AUTO_SPX_2025", final_spot=4000.0)
         # Holder receives full notional (principal protected)
     """
-    if final_spot <= 0:
+    # Convert final_spot to Decimal if it's not already (defensive type conversion)
+    if not isinstance(final_spot, Decimal):
+        final_spot = Decimal(str(final_spot))
+
+    if final_spot <= Decimal('0'):
         raise ValueError(f"final_spot must be positive, got {final_spot}")
 
     state = view.get_unit_state(symbol)
@@ -428,14 +460,24 @@ def compute_maturity_payoff(
     if state.get('autocalled', False) or state.get('settled', False):
         return empty_pending_transaction(view)
 
-    # Get state values
+    # Get state values - convert to Decimal if needed
     initial_spot = state['initial_spot']
+    if not isinstance(initial_spot, Decimal):
+        initial_spot = Decimal(str(initial_spot))
+
     notional = state['notional']
+    if not isinstance(notional, Decimal):
+        notional = Decimal(str(notional))
+
     currency = state['currency']
     issuer_wallet = state['issuer_wallet']
     holder_wallet = state['holder_wallet']
     memory_feature = state.get('memory_feature', True)
-    coupon_memory = state.get('coupon_memory', 0.0)
+
+    coupon_memory = state.get('coupon_memory', Decimal('0'))
+    if not isinstance(coupon_memory, Decimal):
+        coupon_memory = Decimal(str(coupon_memory))
+
     put_knocked_in = state.get('put_knocked_in', False)
 
     # Calculate final performance
@@ -444,7 +486,7 @@ def compute_maturity_payoff(
     # Determine payout per unit
     if put_knocked_in:
         # Principal at risk - pay back based on final performance, capped at 100%
-        payout_per_unit = notional * min(1.0, final_perf)
+        payout_per_unit = notional * min(Decimal('1'), final_perf)
     else:
         # Principal protected
         payout_per_unit = notional
@@ -478,7 +520,7 @@ def compute_maturity_payoff(
         'final_spot': final_spot,
         'final_performance': final_perf,
         'final_payout': payout_per_unit,
-        'coupon_memory': 0.0,  # Paid out
+        'coupon_memory': Decimal('0'),  # Paid out
     }
     state_changes = [UnitStateChange(unit=symbol, old_state=state, new_state=new_state)]
 
@@ -490,8 +532,8 @@ def transact(
     symbol: str,
     seller: str,
     buyer: str,
-    qty: float,
-    price: float,
+    qty: Decimal,
+    price: Decimal,
 ) -> PendingTransaction:
     """
     Execute an autocallable trade (secondary market transfer).
@@ -527,11 +569,11 @@ def transact(
         ledger.execute(result)
     """
     # Validate quantity
-    if qty <= 0:
+    if qty <= Decimal('0'):
         raise ValueError(f"qty must be positive, got {qty}")
 
     # Validate price
-    if not math.isfinite(price) or price < 0:
+    if not price.is_finite() or price < Decimal('0'):
         raise ValueError(f"price must be non-negative and finite, got {price}")
 
     # Validate wallets
@@ -599,8 +641,8 @@ def _process_lifecycle_event(
         event_type: Type of event (OBSERVATION, MATURITY)
         event_date: When the event occurs
         **kwargs: Event-specific parameters:
-            - For OBSERVATION: spot (float, required) - current spot price
-            - For MATURITY: final_spot (float, required) - final spot price
+            - For OBSERVATION: spot (float or Decimal, required) - current spot price
+            - For MATURITY: final_spot (float or Decimal, required) - final spot price
 
     Returns:
         PendingTransaction with moves and state_updates, or empty result
@@ -635,7 +677,7 @@ def autocallable_contract(
     view: LedgerView,
     symbol: str,
     timestamp: datetime,
-    prices: Dict[str, float]
+    prices: Dict[str, Decimal]
 ) -> PendingTransaction:
     """
     SmartContract function for automatic autocallable lifecycle processing.
@@ -675,9 +717,14 @@ def autocallable_contract(
         return empty_pending_transaction(view)
 
     underlying = state.get('underlying')
-    spot = prices.get(underlying)
-    if spot is None:
-        return empty_pending_transaction(view)
+    if not underlying:
+        raise ValueError(f"Autocallable {symbol} has no underlying defined")
+    if underlying not in prices:
+        raise ValueError(f"Missing price for autocallable underlying '{underlying}' in {symbol}")
+    spot = prices[underlying]
+    # Ensure spot is Decimal (defensive programming)
+    if not isinstance(spot, Decimal):
+        spot = Decimal(str(spot))
 
     # Check for observation dates
     schedule = state.get('observation_schedule', [])
@@ -735,24 +782,37 @@ def get_autocallable_status(
             next_obs = obs_date
             break
 
+    # Convert state values to Decimal if needed
+    coupon_memory = state.get('coupon_memory', Decimal('0'))
+    if not isinstance(coupon_memory, Decimal):
+        coupon_memory = Decimal(str(coupon_memory))
+
+    notional = state.get('notional', Decimal('0'))
+    if not isinstance(notional, Decimal):
+        notional = Decimal(str(notional))
+
+    initial_spot = state.get('initial_spot', Decimal('0'))
+    if not isinstance(initial_spot, Decimal):
+        initial_spot = Decimal(str(initial_spot))
+
     return {
         'autocalled': state.get('autocalled', False),
         'autocall_date': state.get('autocall_date'),
         'settled': state.get('settled', False),
         'put_knocked_in': state.get('put_knocked_in', False),
-        'coupon_memory': state.get('coupon_memory', 0.0),
+        'coupon_memory': coupon_memory,
         'observations_processed': len(history),
         'total_observations': len(schedule),
         'next_observation': next_obs,
-        'notional': state.get('notional', 0.0),
-        'initial_spot': state.get('initial_spot', 0.0),
+        'notional': notional,
+        'initial_spot': initial_spot,
     }
 
 
 def get_total_coupons_paid(
     view: LedgerView,
     symbol: str,
-) -> float:
+) -> Decimal:
     """
     Calculate total coupons paid to date.
 
@@ -770,9 +830,17 @@ def get_total_coupons_paid(
     state = view.get_unit_state(symbol)
     history = state.get('observation_history', [])
 
-    total = 0.0
+    total = Decimal('0')
     for obs in history:
-        total += obs.get('coupon_paid', 0.0)
-        total += obs.get('memory_paid', 0.0)
+        coupon_paid = obs.get('coupon_paid', Decimal('0'))
+        if not isinstance(coupon_paid, Decimal):
+            coupon_paid = Decimal(str(coupon_paid))
+
+        memory_paid = obs.get('memory_paid', Decimal('0'))
+        if not isinstance(memory_paid, Decimal):
+            memory_paid = Decimal(str(memory_paid))
+
+        total += coupon_paid
+        total += memory_paid
 
     return total

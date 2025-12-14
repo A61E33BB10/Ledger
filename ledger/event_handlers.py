@@ -12,6 +12,7 @@ Following expert recommendations:
 
 from __future__ import annotations
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict
 
 from .core import LedgerView, PendingTransaction, empty_pending_transaction
@@ -19,7 +20,7 @@ from .scheduled_events import Event, EventScheduler
 
 # Import pure functions from unit modules
 from .units.stock import process_dividends, compute_stock_split
-from .units.bond import compute_coupon_payment, compute_redemption
+from .units.bond import process_coupons, compute_redemption
 from .units.option import compute_option_settlement
 from .units.forward import compute_forward_settlement
 from .units.deferred_cash import compute_deferred_cash_settlement
@@ -32,7 +33,7 @@ from .units.deferred_cash import compute_deferred_cash_settlement
 def handle_dividend(
     event: Event,
     view: LedgerView,
-    prices: Dict[str, float],
+    prices: Dict[str, Decimal],
 ) -> PendingTransaction:
     """Process dividend entitlement."""
     return process_dividends(
@@ -45,38 +46,42 @@ def handle_dividend(
 def handle_coupon(
     event: Event,
     view: LedgerView,
-    prices: Dict[str, float],
+    prices: Dict[str, Decimal],
 ) -> PendingTransaction:
     """Process bond coupon payment."""
-    return compute_coupon_payment(
+    return process_coupons(
         view=view,
-        bond_symbol=event.symbol,
-        payment_date=event.trigger_time,
+        symbol=event.symbol,
+        timestamp=event.trigger_time,
     )
 
 
 def handle_maturity(
     event: Event,
     view: LedgerView,
-    prices: Dict[str, float],
+    prices: Dict[str, Decimal],
 ) -> PendingTransaction:
     """Process bond maturity/redemption."""
     return compute_redemption(
         view=view,
-        bond_symbol=event.symbol,
-        redemption_date=event.trigger_time,
+        symbol=event.symbol,
+        timestamp=event.trigger_time,
     )
 
 
 def handle_expiry(
     event: Event,
     view: LedgerView,
-    prices: Dict[str, float],
+    prices: Dict[str, Decimal],
 ) -> PendingTransaction:
     """Process option/derivative expiry."""
     params = event.params_dict
-    underlying = params.get("underlying", "")
-    settlement_price = prices.get(underlying, 0.0)
+    underlying = params.get("underlying")
+    if not underlying:
+        raise ValueError(f"Missing 'underlying' in expiry event params for {event.symbol}")
+    if underlying not in prices:
+        raise ValueError(f"Missing price for underlying '{underlying}' in expiry settlement for {event.symbol}")
+    settlement_price = prices[underlying]
 
     return compute_option_settlement(
         view=view,
@@ -88,15 +93,21 @@ def handle_expiry(
 def handle_settlement(
     event: Event,
     view: LedgerView,
-    prices: Dict[str, float],
+    prices: Dict[str, Decimal],
 ) -> PendingTransaction:
     """Process settlement (forward, cash, etc.)."""
     state = view.get_unit_state(event.symbol)
-    unit_type = state.get("unit_type", "")
+    unit_type = state.get("unit_type")
+    if not unit_type:
+        raise ValueError(f"Missing 'unit_type' in state for {event.symbol}")
 
     if unit_type == "FORWARD":
-        underlying = state.get("underlying", "")
-        settlement_price = prices.get(underlying, 0.0)
+        underlying = state.get("underlying")
+        if not underlying:
+            raise ValueError(f"Missing 'underlying' in forward state for {event.symbol}")
+        if underlying not in prices:
+            raise ValueError(f"Missing price for underlying '{underlying}' in forward settlement for {event.symbol}")
+        settlement_price = prices[underlying]
         return compute_forward_settlement(
             view=view,
             forward_symbol=event.symbol,
@@ -109,17 +120,22 @@ def handle_settlement(
             settlement_time=event.trigger_time,
         )
     else:
-        return empty_pending_transaction(view)
+        raise ValueError(f"Unknown unit_type '{unit_type}' in settlement event for {event.symbol}")
 
 
 def handle_split(
     event: Event,
     view: LedgerView,
-    prices: Dict[str, float],
+    prices: Dict[str, Decimal],
 ) -> PendingTransaction:
     """Process stock split."""
     params = event.params_dict
-    ratio = float(params.get("ratio", 1.0))
+    ratio = params.get("ratio")
+    if ratio is None:
+        raise ValueError(f"Missing 'ratio' in split event params for {event.symbol}")
+    ratio = Decimal(ratio)
+    if ratio <= 0:
+        raise ValueError(f"Split ratio must be positive, got {ratio} for {event.symbol}")
 
     return compute_stock_split(
         view=view,

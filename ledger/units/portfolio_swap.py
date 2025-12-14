@@ -28,26 +28,28 @@ All functions take LedgerView (read-only) and return immutable results.
 
 from __future__ import annotations
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict, Any, List, Optional
 
 from ..core import (
     LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     QUANTITY_EPSILON, UNIT_TYPE_PORTFOLIO_SWAP,
     build_transaction, empty_pending_transaction,
+    _freeze_state,
 )
 
 
 def create_portfolio_swap(
     symbol: str,
     name: str,
-    reference_portfolio: Dict[str, float],
-    notional: float,
-    funding_spread: float,
+    reference_portfolio: Dict[str, Decimal],
+    notional: Decimal | float,
+    funding_spread: Decimal | float,
     reset_schedule: List[datetime],
     payer_wallet: str,
     receiver_wallet: str,
     currency: str,
-    initial_nav: Optional[float] = None,
+    initial_nav: Optional[Decimal | float] = None,
     issue_date: Optional[datetime] = None,
 ) -> Unit:
     """
@@ -97,9 +99,9 @@ def create_portfolio_swap(
         swap = create_portfolio_swap(
             symbol="TRS_TECH_2025",
             name="Tech Portfolio TRS Q1 2025",
-            reference_portfolio={"AAPL": 0.4, "GOOG": 0.35, "MSFT": 0.25},
-            notional=1_000_000.0,
-            funding_spread=0.0050,  # 50 bps annual
+            reference_portfolio={"AAPL": Decimal('0.4'), "GOOG": Decimal('0.35'), "MSFT": Decimal('0.25')},
+            notional=Decimal('1000000.0'),
+            funding_spread=Decimal('0.0050'),  # 50 bps annual
             reset_schedule=[datetime(2025, 1, 15), datetime(2025, 4, 15)],
             payer_wallet="dealer",
             receiver_wallet="hedge_fund",
@@ -107,12 +109,24 @@ def create_portfolio_swap(
         )
         ledger.register_unit(swap)
     """
+    # Convert float inputs to Decimal
+    notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
+    funding_spread = Decimal(str(funding_spread)) if not isinstance(funding_spread, Decimal) else funding_spread
+    if initial_nav is not None:
+        initial_nav = Decimal(str(initial_nav)) if not isinstance(initial_nav, Decimal) else initial_nav
+
     # Validate portfolio weights sum to 1.0
     if not reference_portfolio:
         raise ValueError("reference_portfolio cannot be empty")
 
+    # Convert all portfolio weights to Decimal
+    reference_portfolio = {
+        asset: Decimal(str(weight)) if not isinstance(weight, Decimal) else weight
+        for asset, weight in reference_portfolio.items()
+    }
+
     weight_sum = sum(reference_portfolio.values())
-    if abs(weight_sum - 1.0) > QUANTITY_EPSILON:
+    if abs(weight_sum - Decimal('1.0')) > QUANTITY_EPSILON:
         raise ValueError(
             f"Portfolio weights must sum to 1.0, got {weight_sum:.6f}"
         )
@@ -155,11 +169,11 @@ def create_portfolio_swap(
         symbol=symbol,
         name=name,
         unit_type=UNIT_TYPE_PORTFOLIO_SWAP,
-        min_balance=-1.0,  # Swaps typically tracked as position count
-        max_balance=1.0,
+        min_balance=Decimal('-1.0'),  # Swaps typically tracked as position count
+        max_balance=Decimal('1.0'),
         decimal_places=0,
         transfer_rule=None,
-        _state={
+        _frozen_state=_freeze_state({
             'reference_portfolio': dict(reference_portfolio),
             'notional': notional,
             'last_nav': initial_nav,  # May be None until initialized
@@ -173,15 +187,15 @@ def create_portfolio_swap(
             'next_reset_index': 0,
             'reset_history': [],
             'issue_date': issue_date,
-        }
+        })
     )
 
 
 def compute_portfolio_nav(
-    portfolio_weights: Dict[str, float],
-    prices: Dict[str, float],
-    notional: float,
-) -> float:
+    portfolio_weights: Dict[str, Decimal],
+    prices: Dict[str, Decimal],
+    notional: Decimal | float,
+) -> Decimal:
     """
     Calculate the current NAV of a reference portfolio.
 
@@ -203,18 +217,21 @@ def compute_portfolio_nav(
         notional: The notional principal amount
 
     Returns:
-        float: Current NAV of the portfolio
+        Decimal: Current NAV of the portfolio
 
     Raises:
         ValueError: If a portfolio asset is missing from prices
 
     Example:
-        weights = {"AAPL": 0.5, "GOOG": 0.5}
-        prices = {"AAPL": 150.0, "GOOG": 100.0}
-        nav = compute_portfolio_nav(weights, prices, 1_000_000.0)
+        weights = {"AAPL": Decimal('0.5'), "GOOG": Decimal('0.5')}
+        prices = {"AAPL": Decimal('150.0'), "GOOG": Decimal('100.0')}
+        nav = compute_portfolio_nav(weights, prices, Decimal('1000000.0'))
         # NAV = (0.5 * 150 + 0.5 * 100) * 1_000_000 / 100 = 1,250,000
     """
-    weighted_price = 0.0
+    # Convert float inputs to Decimal
+    notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
+
+    weighted_price = Decimal('0.0')
 
     for asset, weight in portfolio_weights.items():
         if asset not in prices:
@@ -224,16 +241,16 @@ def compute_portfolio_nav(
     # The weighted price gives us a portfolio "index level"
     # NAV is this index level times the notional, normalized
     # Using 100 as the base level for prices
-    nav = weighted_price * notional / 100.0
+    nav = weighted_price * notional / Decimal('100.0')
 
     return nav
 
 
 def compute_funding_amount(
-    notional: float,
-    spread: float,
+    notional: Decimal | float,
+    spread: Decimal | float,
     days: int,
-) -> float:
+) -> Decimal:
     """
     Calculate the funding leg payment for a period.
 
@@ -246,24 +263,28 @@ def compute_funding_amount(
         days: Number of days in the period
 
     Returns:
-        float: Funding amount for the period
+        Decimal: Funding amount for the period
 
     Example:
         # 50 bps on $1M for 90 days
-        funding = compute_funding_amount(1_000_000.0, 0.005, 90)
+        funding = compute_funding_amount(Decimal('1000000.0'), Decimal('0.005'), 90)
         # funding = 1,000,000 * 0.005 * (90/365) = 1,232.88
     """
+    # Convert float inputs to Decimal
+    notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
+    spread = Decimal(str(spread)) if not isinstance(spread, Decimal) else spread
+
     if days < 0:
         raise ValueError(f"days cannot be negative, got {days}")
 
-    return notional * spread * (days / 365.0)
+    return notional * spread * (Decimal(days) / Decimal('365'))
 
 
 def compute_swap_reset(
     view: LedgerView,
     symbol: str,
-    current_nav: float,
-    funding_rate: float,
+    current_nav: Decimal | float,
+    funding_rate: Decimal | float,
     days_elapsed: int,
 ) -> PendingTransaction:
     """
@@ -292,11 +313,15 @@ def compute_swap_reset(
 
     Example:
         # Reset with NAV increase from 1M to 1.05M over 90 days
-        result = compute_swap_reset(view, "TRS_TECH", 1_050_000.0, 0.005, 90)
+        result = compute_swap_reset(view, "TRS_TECH", Decimal('1050000.0'), Decimal('0.005'), 90)
         # return_amount = 1M * 0.05 = 50,000
         # funding_amount = 1M * 0.005 * (90/365) = 1,232.88
         # net = 50,000 - 1,232.88 = 48,767.12 (payer to receiver)
     """
+    # Convert float inputs to Decimal
+    current_nav = Decimal(str(current_nav)) if not isinstance(current_nav, Decimal) else current_nav
+    funding_rate = Decimal(str(funding_rate)) if not isinstance(funding_rate, Decimal) else funding_rate
+
     if current_nav <= 0:
         raise ValueError(f"current_nav must be positive, got {current_nav}")
     if days_elapsed < 0:
@@ -314,7 +339,11 @@ def compute_swap_reset(
             "Set initial_nav when creating the swap or initialize before first reset."
         )
 
+    # Convert state values to Decimal if they're floats
+    last_nav = Decimal(str(last_nav)) if not isinstance(last_nav, Decimal) else last_nav
     notional = state['notional']
+    notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
+
     payer_wallet = state['payer_wallet']
     receiver_wallet = state['receiver_wallet']
     currency = state['currency']
@@ -384,8 +413,8 @@ def compute_swap_reset(
 def compute_termination(
     view: LedgerView,
     symbol: str,
-    final_nav: float,
-    funding_rate: float,
+    final_nav: Decimal | float,
+    funding_rate: Decimal | float,
     days_elapsed: int,
 ) -> PendingTransaction:
     """
@@ -408,8 +437,12 @@ def compute_termination(
 
     Example:
         # Early termination with final NAV
-        result = compute_termination(view, "TRS_TECH", 980_000.0, 0.005, 45)
+        result = compute_termination(view, "TRS_TECH", Decimal('980000.0'), Decimal('0.005'), 45)
     """
+    # Convert float inputs to Decimal
+    final_nav = Decimal(str(final_nav)) if not isinstance(final_nav, Decimal) else final_nav
+    funding_rate = Decimal(str(funding_rate)) if not isinstance(funding_rate, Decimal) else funding_rate
+
     if final_nav <= 0:
         raise ValueError(f"final_nav must be positive, got {final_nav}")
     if days_elapsed < 0:
@@ -427,7 +460,11 @@ def compute_termination(
             "Cannot terminate without a baseline NAV."
         )
 
+    # Convert state values to Decimal if they're floats
+    last_nav = Decimal(str(last_nav)) if not isinstance(last_nav, Decimal) else last_nav
     notional = state['notional']
+    notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
+
     payer_wallet = state['payer_wallet']
     receiver_wallet = state['receiver_wallet']
     currency = state['currency']
@@ -509,11 +546,11 @@ def transact(
         event_type: Type of event (RESET, TERMINATION, INITIALIZE)
         event_date: When the event occurs
         **kwargs: Event-specific parameters:
-            - For RESET: current_nav (float), days_elapsed (int),
-                        funding_rate (float, optional - uses state default)
-            - For TERMINATION: final_nav (float), days_elapsed (int),
-                              funding_rate (float, optional)
-            - For INITIALIZE: initial_nav (float) - sets the baseline NAV
+            - For RESET: current_nav (Decimal), days_elapsed (int),
+                        funding_rate (Decimal, optional - uses state default)
+            - For TERMINATION: final_nav (Decimal), days_elapsed (int),
+                              funding_rate (Decimal, optional)
+            - For INITIALIZE: initial_nav (Decimal) - sets the baseline NAV
 
     Returns:
         PendingTransaction with moves and state_updates, or empty result
@@ -522,15 +559,15 @@ def transact(
     Example:
         # Initialize swap with starting NAV
         result = transact(view, "TRS_TECH", "INITIALIZE", datetime(2025, 1, 1),
-                         initial_nav=1_000_000.0)
+                         initial_nav=Decimal('1000000.0'))
 
         # Periodic reset
         result = transact(view, "TRS_TECH", "RESET", datetime(2025, 4, 1),
-                         current_nav=1_050_000.0, days_elapsed=90)
+                         current_nav=Decimal('1050000.0'), days_elapsed=90)
 
         # Early termination
         result = transact(view, "TRS_TECH", "TERMINATION", datetime(2025, 6, 1),
-                         final_nav=1_020_000.0, days_elapsed=61)
+                         final_nav=Decimal('1020000.0'), days_elapsed=61)
     """
     state = view.get_unit_state(symbol)
 
@@ -539,6 +576,10 @@ def transact(
         initial_nav = kwargs.get('initial_nav')
         if initial_nav is None:
             return empty_pending_transaction(view)
+
+        # Convert float to Decimal
+        initial_nav = Decimal(str(initial_nav)) if not isinstance(initial_nav, Decimal) else initial_nav
+
         if initial_nav <= 0:
             return empty_pending_transaction(view)
 
@@ -556,7 +597,7 @@ def transact(
         if current_nav is None or days_elapsed is None:
             return empty_pending_transaction(view)
 
-        funding_rate = kwargs.get('funding_rate', state.get('funding_spread', 0.0))
+        funding_rate = kwargs.get('funding_rate', state.get('funding_spread', Decimal('0.0')))
         return compute_swap_reset(view, symbol, current_nav, funding_rate, days_elapsed)
 
     elif event_type == 'TERMINATION':
@@ -565,7 +606,7 @@ def transact(
         if final_nav is None or days_elapsed is None:
             return empty_pending_transaction(view)
 
-        funding_rate = kwargs.get('funding_rate', state.get('funding_spread', 0.0))
+        funding_rate = kwargs.get('funding_rate', state.get('funding_spread', Decimal('0.0')))
         return compute_termination(view, symbol, final_nav, funding_rate, days_elapsed)
 
     else:
@@ -576,7 +617,7 @@ def portfolio_swap_contract(
     view: LedgerView,
     symbol: str,
     timestamp: datetime,
-    prices: Dict[str, float]
+    prices: Dict[str, Decimal]
 ) -> PendingTransaction:
     """
     SmartContract function for automatic portfolio swap processing.
@@ -604,7 +645,7 @@ def portfolio_swap_contract(
 
         # Engine will automatically process resets
         timestamps = [datetime(2025, 1, i) for i in range(1, 120)]
-        prices_func = lambda ts: {"AAPL": 150.0, "GOOG": 100.0}
+        prices_func = lambda ts: {"AAPL": Decimal('150.0'), "GOOG": Decimal('100.0')}
         engine.run(timestamps, prices_func)
     """
     state = view.get_unit_state(symbol)
@@ -624,7 +665,9 @@ def portfolio_swap_contract(
 
     # Time for a reset - calculate current NAV
     portfolio = state.get('reference_portfolio', {})
-    notional = state.get('notional', 0.0)
+    notional = state.get('notional', Decimal('0.0'))
+    # Convert notional to Decimal if it's a float
+    notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
 
     try:
         current_nav = compute_portfolio_nav(portfolio, prices, notional)
@@ -643,7 +686,9 @@ def portfolio_swap_contract(
     else:
         days_elapsed = (next_reset_date - last_reset_date).days
 
-    funding_rate = state.get('funding_spread', 0.0)
+    funding_rate = state.get('funding_spread', Decimal('0.0'))
+    # Convert funding_rate to Decimal if it's a float
+    funding_rate = Decimal(str(funding_rate)) if not isinstance(funding_rate, Decimal) else funding_rate
 
     # Check if last_nav is initialized
     if state.get('last_nav') is None:
@@ -662,13 +707,15 @@ def portfolio_swap_contract(
         payer_wallet = state['payer_wallet']
         receiver_wallet = state['receiver_wallet']
         currency = state['currency']
-        notional = state.get('notional', 0.0)
+        notional_for_funding = state.get('notional', Decimal('0.0'))
+        # Convert notional to Decimal if it's a float
+        notional_for_funding = Decimal(str(notional_for_funding)) if not isinstance(notional_for_funding, Decimal) else notional_for_funding
         reset_history = list(state.get('reset_history', []))
 
         moves: List[Move] = []
 
         # Compute funding for the period from issue_date to first reset
-        funding_amount = compute_funding_amount(notional, funding_rate, days_elapsed)
+        funding_amount = compute_funding_amount(notional_for_funding, funding_rate, days_elapsed)
 
         if abs(funding_amount) > QUANTITY_EPSILON:
             # Receiver pays funding to payer (no portfolio return to offset)
@@ -686,8 +733,8 @@ def portfolio_swap_contract(
             'reset_date': timestamp,
             'last_nav': None,  # No prior NAV
             'current_nav': current_nav,
-            'portfolio_return': 0.0,  # First reset: no return calculation
-            'return_amount': 0.0,
+            'portfolio_return': Decimal('0.0'),  # First reset: no return calculation
+            'return_amount': Decimal('0.0'),
             'funding_amount': funding_amount,
             'net_settlement': -funding_amount,  # Negative = receiver pays
             'days_elapsed': days_elapsed,

@@ -19,12 +19,13 @@ Key Components:
 
 from __future__ import annotations
 from datetime import datetime
+from decimal import Decimal
 import math
 from typing import Dict, Any, List
 
 from ..core import (
     LedgerView, Move, PendingTransaction, Unit, UnitStateChange, UNIT_TYPE_DELTA_HEDGE_STRATEGY,
-    build_transaction, empty_pending_transaction,
+    build_transaction, empty_pending_transaction, _freeze_state,
 )
 from ..black_scholes import call_s as bs_call_delta, call as bs_call_price
 
@@ -33,15 +34,15 @@ def create_delta_hedge_unit(
     symbol: str,
     name: str,
     underlying: str,
-    strike: float,
+    strike: Decimal,
     maturity: datetime,
-    volatility: float,
-    num_options: float,
+    volatility: Decimal,
+    num_options: Decimal,
     option_multiplier: int,
     currency: str,
     strategy_wallet: str,
     market_wallet: str,
-    risk_free_rate: float = 0.0,
+    risk_free_rate: Decimal = Decimal("0.0"),
 ) -> Unit:
     """
     Create a delta hedge strategy unit with complete term sheet configuration.
@@ -91,7 +92,7 @@ def create_delta_hedge_unit(
         min_balance=-100.0,
         max_balance=100.0,
         decimal_places=4,
-        _state={
+        _frozen_state=_freeze_state({
             'underlying': underlying,
             'strike': strike,
             'maturity': maturity,
@@ -102,11 +103,11 @@ def create_delta_hedge_unit(
             'currency': currency,
             'strategy_wallet': strategy_wallet,
             'market_wallet': market_wallet,
-            'current_shares': 0.0,
-            'cumulative_cash': 0.0,
+            'current_shares': Decimal("0.0"),
+            'cumulative_cash': Decimal("0.0"),
             'rebalance_count': 0,
             'liquidated': False,
-        }
+        })
     )
 
 
@@ -130,7 +131,7 @@ def _time_to_maturity_days(maturity: datetime, current_time: datetime) -> float:
     return max(0.0, trading_days)
 
 
-def _compute_delta(spot: float, strike: float, t_in_days: float, volatility: float) -> float:
+def _compute_delta(spot: Decimal, strike: Decimal, t_in_days: float, volatility: Decimal) -> Decimal:
     """
     Compute Black-Scholes delta for a call option.
 
@@ -144,19 +145,21 @@ def _compute_delta(spot: float, strike: float, t_in_days: float, volatility: flo
         volatility: Annualized volatility
 
     Returns:
-        float: Call option delta. Returns 1.0 if expired in-the-money, 0.0 if expired
-               out-of-the-money, or the Black-Scholes delta if time remains.
+        Decimal: Call option delta. Returns 1.0 if expired in-the-money, 0.0 if expired
+                 out-of-the-money, or the Black-Scholes delta if time remains.
     """
     if t_in_days <= 0:
-        return 1.0 if spot > strike else 0.0
-    return bs_call_delta(spot, strike, t_in_days, volatility)
+        return Decimal("1.0") if spot > strike else Decimal("0.0")
+    # Convert Decimal to float for Black-Scholes computation, then back to Decimal
+    delta_float = bs_call_delta(float(spot), float(strike), t_in_days, float(volatility))
+    return Decimal(str(delta_float))
 
 
 def compute_rebalance(
     view: LedgerView,
     strategy_symbol: str,
-    spot_price: float,
-    min_trade_size: float = 0.0001,
+    spot_price: Decimal,
+    min_trade_size: Decimal = Decimal("0.0001"),
 ) -> PendingTransaction:
     """
     Compute the rebalancing trades needed to maintain delta neutrality.
@@ -188,7 +191,11 @@ def compute_rebalance(
         - All trades are atomic with matching contract IDs for audit trail
         - State updates preserve all existing strategy parameters
     """
-    if not (spot_price > 0 and math.isfinite(spot_price)):
+    # Ensure parameters are Decimal
+    spot_price = Decimal(str(spot_price)) if not isinstance(spot_price, Decimal) else spot_price
+    min_trade_size = Decimal(str(min_trade_size)) if not isinstance(min_trade_size, Decimal) else min_trade_size
+
+    if not (spot_price > 0 and math.isfinite(float(spot_price))):
         raise ValueError(f"spot_price must be positive and finite, got {spot_price}")
 
     state = view.get_unit_state(strategy_symbol)
@@ -196,8 +203,11 @@ def compute_rebalance(
     if state.get('liquidated'):
         return empty_pending_transaction(view)
 
-    current_shares = state.get('current_shares', 0.0)
-    cumulative_cash = state.get('cumulative_cash', 0.0)
+    # Ensure state values are Decimal
+    current_shares_raw = state.get('current_shares', Decimal("0.0"))
+    current_shares = Decimal(str(current_shares_raw)) if not isinstance(current_shares_raw, Decimal) else current_shares_raw
+    cumulative_cash_raw = state.get('cumulative_cash', Decimal("0.0"))
+    cumulative_cash = Decimal(str(cumulative_cash_raw)) if not isinstance(cumulative_cash_raw, Decimal) else cumulative_cash_raw
     rebalance_count = state.get('rebalance_count', 0)
 
     t_in_days = _time_to_maturity_days(state['maturity'], view.current_time)
@@ -205,8 +215,14 @@ def compute_rebalance(
     if t_in_days <= 0:
         return empty_pending_transaction(view)
 
-    delta = _compute_delta(spot_price, state['strike'], t_in_days, state['volatility'])
-    target_shares = delta * state['num_options'] * state['option_multiplier']
+    # Ensure state values are Decimal for arithmetic
+    strike = Decimal(str(state['strike'])) if not isinstance(state['strike'], Decimal) else state['strike']
+    volatility = Decimal(str(state['volatility'])) if not isinstance(state['volatility'], Decimal) else state['volatility']
+    num_options = Decimal(str(state['num_options'])) if not isinstance(state['num_options'], Decimal) else state['num_options']
+    option_multiplier = Decimal(str(state['option_multiplier']))
+
+    delta = _compute_delta(spot_price, strike, t_in_days, volatility)
+    target_shares = delta * num_options * option_multiplier
     shares_to_trade = target_shares - current_shares
 
     if abs(shares_to_trade) < min_trade_size:
@@ -254,7 +270,7 @@ def compute_rebalance(
 def compute_liquidation(
     view: LedgerView,
     strategy_symbol: str,
-    spot_price: float,
+    spot_price: Decimal,
 ) -> PendingTransaction:
     """
     Compute trades to liquidate all remaining hedge positions at maturity.
@@ -283,7 +299,10 @@ def compute_liquidation(
         - All remaining shares are sold in a single transaction
         - Cash proceeds are added to cumulative_cash for final P&L calculation
     """
-    if not (spot_price > 0 and math.isfinite(spot_price)):
+    # Ensure spot_price is Decimal
+    spot_price = Decimal(str(spot_price)) if not isinstance(spot_price, Decimal) else spot_price
+
+    if not (spot_price > 0 and math.isfinite(float(spot_price))):
         raise ValueError(f"spot_price must be positive and finite, got {spot_price}")
 
     state = view.get_unit_state(strategy_symbol)
@@ -291,12 +310,15 @@ def compute_liquidation(
     if state.get('liquidated'):
         return empty_pending_transaction(view)
 
-    current_shares = state.get('current_shares', 0.0)
-    cumulative_cash = state.get('cumulative_cash', 0.0)
+    # Ensure state values are Decimal
+    current_shares_raw = state.get('current_shares', Decimal("0.0"))
+    current_shares = Decimal(str(current_shares_raw)) if not isinstance(current_shares_raw, Decimal) else current_shares_raw
+    cumulative_cash_raw = state.get('cumulative_cash', Decimal("0.0"))
+    cumulative_cash = Decimal(str(cumulative_cash_raw)) if not isinstance(cumulative_cash_raw, Decimal) else cumulative_cash_raw
     rebalance_count = state.get('rebalance_count', 0)
 
     if current_shares <= 0:
-        new_state = {**state, 'current_shares': 0.0, 'liquidated': True}
+        new_state = {**state, 'current_shares': Decimal("0.0"), 'liquidated': True}
         state_changes = [UnitStateChange(unit=strategy_symbol, old_state=state, new_state=new_state)]
         return build_transaction(view, [], state_changes)
 
@@ -312,7 +334,7 @@ def compute_liquidation(
 
     new_state = {
         **state,
-        'current_shares': 0.0,
+        'current_shares': Decimal("0.0"),
         'cumulative_cash': cumulative_cash + cash_amount,
         'rebalance_count': rebalance_count + 1,
         'liquidated': True,
@@ -325,7 +347,7 @@ def compute_liquidation(
 def get_hedge_state(
     view: LedgerView,
     strategy_symbol: str,
-    spot_price: float,
+    spot_price: Decimal,
 ) -> Dict[str, Any]:
     """
     Get comprehensive snapshot of the delta hedge strategy state.
@@ -361,21 +383,36 @@ def get_hedge_state(
         - At maturity, option value equals intrinsic value max(0, spot - strike)
         - hedge_pnl represents the cost of maintaining the delta hedge
     """
-    if not (spot_price > 0 and math.isfinite(spot_price)):
+    # Ensure spot_price is Decimal
+    spot_price = Decimal(str(spot_price)) if not isinstance(spot_price, Decimal) else spot_price
+
+    if not (spot_price > 0 and math.isfinite(float(spot_price))):
         raise ValueError(f"spot_price must be positive and finite, got {spot_price}")
 
     state = view.get_unit_state(strategy_symbol)
-    current_shares = state.get('current_shares', 0.0)
-    cumulative_cash = state.get('cumulative_cash', 0.0)
+
+    # Ensure state values are Decimal
+    current_shares_raw = state.get('current_shares', Decimal("0.0"))
+    current_shares = Decimal(str(current_shares_raw)) if not isinstance(current_shares_raw, Decimal) else current_shares_raw
+    cumulative_cash_raw = state.get('cumulative_cash', Decimal("0.0"))
+    cumulative_cash = Decimal(str(cumulative_cash_raw)) if not isinstance(cumulative_cash_raw, Decimal) else cumulative_cash_raw
+
+    # Ensure state values are Decimal for arithmetic
+    strike = Decimal(str(state['strike'])) if not isinstance(state['strike'], Decimal) else state['strike']
+    volatility = Decimal(str(state['volatility'])) if not isinstance(state['volatility'], Decimal) else state['volatility']
+    num_options = Decimal(str(state['num_options'])) if not isinstance(state['num_options'], Decimal) else state['num_options']
+    option_multiplier = Decimal(str(state['option_multiplier']))
 
     t_in_days = _time_to_maturity_days(state['maturity'], view.current_time)
-    delta = _compute_delta(spot_price, state['strike'], t_in_days, state['volatility'])
-    target_shares = delta * state['num_options'] * state['option_multiplier']
+    delta = _compute_delta(spot_price, strike, t_in_days, volatility)
+    target_shares = delta * num_options * option_multiplier
 
     if t_in_days <= 0:
-        option_value = max(0, spot_price - state['strike']) * state['num_options'] * state['option_multiplier']
+        option_value = max(Decimal("0"), spot_price - strike) * num_options * option_multiplier
     else:
-        option_value = bs_call_price(spot_price, state['strike'], t_in_days, state['volatility']) * state['num_options'] * state['option_multiplier']
+        # Convert to float for Black-Scholes, then back to Decimal
+        bs_price = bs_call_price(float(spot_price), float(strike), t_in_days, float(volatility))
+        option_value = Decimal(str(bs_price)) * num_options * option_multiplier
 
     shares_value = current_shares * spot_price
     hedge_pnl = shares_value + cumulative_cash
@@ -399,8 +436,8 @@ def get_hedge_state(
 def compute_hedge_pnl_breakdown(
     view: LedgerView,
     strategy_symbol: str,
-    final_spot: float,
-) -> Dict[str, float]:
+    final_spot: Decimal,
+) -> Dict[str, Decimal]:
     """
     Compute detailed profit and loss breakdown for the delta hedge strategy.
 
@@ -414,7 +451,7 @@ def compute_hedge_pnl_breakdown(
         final_spot: Final price of the underlying asset for P&L calculation
 
     Returns:
-        Dict[str, float]: Dictionary containing:
+        Dict[str, Decimal]: Dictionary containing:
             - final_spot: Input final spot price
             - option_payoff: Intrinsic value of option at final spot
             - shares_held: Number of shares in hedge position
@@ -433,15 +470,27 @@ def compute_hedge_pnl_breakdown(
         - Positive net_pnl: hedge cost less than option value (unlikely with frequent rebalancing)
         - option_payoff = max(0, final_spot - strike) * num_options * multiplier
     """
-    if not (final_spot > 0 and math.isfinite(final_spot)):
+    # Ensure final_spot is Decimal
+    final_spot = Decimal(str(final_spot)) if not isinstance(final_spot, Decimal) else final_spot
+
+    if not (final_spot > 0 and math.isfinite(float(final_spot))):
         raise ValueError(f"final_spot must be positive and finite, got {final_spot}")
 
     state = view.get_unit_state(strategy_symbol)
-    current_shares = state.get('current_shares', 0.0)
-    cumulative_cash = state.get('cumulative_cash', 0.0)
 
-    intrinsic = max(0, final_spot - state['strike'])
-    option_payoff = intrinsic * state['num_options'] * state['option_multiplier']
+    # Ensure state values are Decimal
+    current_shares_raw = state.get('current_shares', Decimal("0.0"))
+    current_shares = Decimal(str(current_shares_raw)) if not isinstance(current_shares_raw, Decimal) else current_shares_raw
+    cumulative_cash_raw = state.get('cumulative_cash', Decimal("0.0"))
+    cumulative_cash = Decimal(str(cumulative_cash_raw)) if not isinstance(cumulative_cash_raw, Decimal) else cumulative_cash_raw
+
+    # Ensure state values are Decimal for arithmetic
+    strike = Decimal(str(state['strike'])) if not isinstance(state['strike'], Decimal) else state['strike']
+    num_options = Decimal(str(state['num_options'])) if not isinstance(state['num_options'], Decimal) else state['num_options']
+    option_multiplier = Decimal(str(state['option_multiplier']))
+
+    intrinsic = max(Decimal("0"), final_spot - strike)
+    option_payoff = intrinsic * num_options * option_multiplier
     shares_value = current_shares * final_spot
     hedge_pnl = shares_value + cumulative_cash
     net_pnl = option_payoff - hedge_pnl
@@ -458,7 +507,7 @@ def compute_hedge_pnl_breakdown(
     }
 
 
-def delta_hedge_contract(min_trade_size: float = 0.01):
+def delta_hedge_contract(min_trade_size: Decimal = Decimal("0.01")):
     """
     Factory function that returns a smart contract for automated delta hedging.
 
@@ -471,7 +520,7 @@ def delta_hedge_contract(min_trade_size: float = 0.01):
 
     Returns:
         Callable: A smart contract function with signature:
-                 (view: LedgerView, symbol: str, timestamp: datetime, prices: Dict[str, float])
+                 (view: LedgerView, symbol: str, timestamp: datetime, prices: Dict[str, Decimal])
                  -> PendingTransaction
 
     Smart Contract Behavior:
@@ -497,7 +546,7 @@ def delta_hedge_contract(min_trade_size: float = 0.01):
         view: LedgerView,
         symbol: str,
         timestamp: datetime,
-        prices: Dict[str, float]
+        prices: Dict[str, Decimal]
     ) -> PendingTransaction:
         state = view.get_unit_state(symbol)
 
@@ -505,9 +554,11 @@ def delta_hedge_contract(min_trade_size: float = 0.01):
             return empty_pending_transaction(view)
 
         underlying = state.get('underlying')
-        spot_price = prices.get(underlying)
-        if spot_price is None:
-            return empty_pending_transaction(view)
+        if not underlying:
+            raise ValueError(f"Delta hedge {symbol} has no underlying defined")
+        if underlying not in prices:
+            raise ValueError(f"Missing price for delta hedge underlying '{underlying}' in {symbol}")
+        spot_price = prices[underlying]
 
         maturity = state.get('maturity')
         if maturity and timestamp >= maturity:

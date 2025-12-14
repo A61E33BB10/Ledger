@@ -21,6 +21,7 @@ Tests:
 
 import pytest
 from datetime import datetime
+from decimal import Decimal
 from tests.fake_view import FakeView
 from ledger import (
     create_autocallable,
@@ -71,17 +72,17 @@ class TestCreateAutocallable:
         assert unit.symbol == "AUTO_SPX_2025"
         assert unit.name == "SPX Autocallable 8% 2025"
         assert unit.unit_type == UNIT_TYPE_AUTOCALLABLE
-        assert unit._state['underlying'] == "SPX"
-        assert unit._state['notional'] == 100000.0
-        assert unit._state['initial_spot'] == 4500.0
-        assert unit._state['autocall_barrier'] == 1.0
-        assert unit._state['coupon_barrier'] == 0.7
-        assert unit._state['coupon_rate'] == 0.08
-        assert unit._state['put_barrier'] == 0.6
-        assert unit._state['memory_feature'] is True
-        assert unit._state['autocalled'] is False
-        assert unit._state['put_knocked_in'] is False
-        assert unit._state['settled'] is False
+        assert unit.state['underlying'] == "SPX"
+        assert unit.state['notional'] == 100000.0
+        assert unit.state['initial_spot'] == 4500.0
+        assert unit.state['autocall_barrier'] == 1.0
+        assert unit.state['coupon_barrier'] == 0.7
+        assert unit.state['coupon_rate'] == 0.08
+        assert unit.state['put_barrier'] == 0.6
+        assert unit.state['memory_feature'] is True
+        assert unit.state['autocalled'] is False
+        assert unit.state['put_knocked_in'] is False
+        assert unit.state['settled'] is False
 
     def test_create_autocallable_without_memory(self):
         """Create autocallable without memory feature."""
@@ -104,7 +105,7 @@ class TestCreateAutocallable:
             memory_feature=False,
         )
 
-        assert unit._state['memory_feature'] is False
+        assert unit.state['memory_feature'] is False
 
     def test_observation_schedule_sorted(self):
         """Observation schedule should be sorted."""
@@ -130,7 +131,7 @@ class TestCreateAutocallable:
             holder_wallet="investor",
         )
 
-        schedule = unit._state['observation_schedule']
+        schedule = unit.state['observation_schedule']
         assert schedule[0] == datetime(2024, 4, 15)
         assert schedule[1] == datetime(2024, 7, 15)
         assert schedule[2] == datetime(2024, 10, 15)
@@ -311,18 +312,18 @@ class TestComputeObservationAutocall:
             obs_dates = [datetime(2024, 4, 15), datetime(2024, 7, 15)]
         return FakeView(
             balances={
-                'bank': {'USD': 1000000},
-                'investor': {'AUTO': 1},
+                'bank': {'USD': Decimal("1000000")},
+                'investor': {'AUTO': Decimal("1")},
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
+                    'notional': Decimal("100000.0"),
                     'initial_spot': initial_spot,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': obs_dates,
@@ -354,7 +355,7 @@ class TestComputeObservationAutocall:
         assert move.dest == 'investor'
         assert move.unit_symbol == 'USD'
         # Principal + coupon = 100000 + 8000 = 108000
-        assert move.quantity == 108000.0
+        assert move.quantity == Decimal("108000.0")
 
         sc = next(d for d in result.state_changes if d.unit == "AUTO")
         assert sc.new_state['autocalled'] is True
@@ -368,7 +369,7 @@ class TestComputeObservationAutocall:
 
         assert not result.is_empty()
         move = result.moves[0]
-        assert move.quantity == 108000.0  # Same payout regardless of how far above
+        assert move.quantity == Decimal("108000.0")  # Same payout regardless of how far above
 
     def test_autocall_with_memory_coupon(self):
         """Autocall pays accumulated memory coupons."""
@@ -377,7 +378,7 @@ class TestComputeObservationAutocall:
 
         move = result.moves[0]
         # Principal + current coupon + memory = 100000 + 8000 + 8000 = 116000
-        assert move.quantity == 116000.0
+        assert move.quantity == Decimal("116000.0")
 
     def test_autocall_clears_memory(self):
         """Autocall resets coupon memory to zero."""
@@ -399,18 +400,18 @@ class TestComputeObservationCoupon:
         """Helper to create a FakeView with autocallable state."""
         return FakeView(
             balances={
-                'bank': {'USD': 1000000},
-                'investor': {'AUTO': 1},
+                'bank': {'USD': Decimal("1000000")},
+                'investor': {'AUTO': Decimal("1")},
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15), datetime(2024, 7, 15)],
@@ -442,7 +443,7 @@ class TestComputeObservationCoupon:
         assert move.source == 'bank'
         assert move.dest == 'investor'
         assert move.unit_symbol == 'USD'
-        assert move.quantity == 8000.0  # 8% of 100000
+        assert move.quantity == Decimal("8000.0")  # 8% of 100000
 
         sc = next(d for d in result.state_changes if d.unit == "AUTO")
         assert sc.new_state['autocalled'] is False
@@ -463,7 +464,7 @@ class TestComputeObservationCoupon:
 
         move = result.moves[0]
         # Current coupon + memory = 8000 + 16000 = 24000
-        assert move.quantity == 24000.0
+        assert move.quantity == Decimal("24000.0")
 
         sc = next(d for d in result.state_changes if d.unit == "AUTO")
         assert sc.new_state['coupon_memory'] == 0.0  # Memory cleared
@@ -478,10 +479,10 @@ class TestComputeObservationCoupon:
         assert len(history) == 1
         obs = history[0]
         assert obs['date'] == datetime(2024, 4, 15)
-        assert obs['spot'] == 80.0
-        assert obs['performance'] == 0.8
+        assert obs['spot'] == Decimal("80.0")
+        assert obs['performance'] == Decimal("0.8")
         assert obs['autocalled'] is False
-        assert obs['coupon_paid'] == 8000.0
+        assert obs['coupon_paid'] == Decimal("8000.0")
 
 
 # ============================================================================
@@ -495,18 +496,18 @@ class TestComputeObservationMissedCoupon:
         """Helper to create a FakeView with autocallable state."""
         return FakeView(
             balances={
-                'bank': {'USD': 1000000},
-                'investor': {'AUTO': 1},
+                'bank': {'USD': Decimal("1000000")},
+                'investor': {'AUTO': Decimal("1")},
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [
@@ -571,18 +572,18 @@ class TestComputeObservationPutKnockIn:
         """Helper to create a FakeView with autocallable state."""
         return FakeView(
             balances={
-                'bank': {'USD': 1000000},
-                'investor': {'AUTO': 1},
+                'bank': {'USD': Decimal("1000000")},
+                'investor': {'AUTO': Decimal("1")},
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -591,7 +592,7 @@ class TestComputeObservationPutKnockIn:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': put_knocked,
                     'autocalled': False,
                     'autocall_date': None,
@@ -649,18 +650,18 @@ class TestComputeMaturityPayoff:
         """Helper to create a FakeView with autocallable state."""
         return FakeView(
             balances={
-                'bank': {'USD': 1000000},
-                'investor': {'AUTO': 1},
+                'bank': {'USD': Decimal("1000000")},
+                'investor': {'AUTO': Decimal("1")},
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -686,7 +687,7 @@ class TestComputeMaturityPayoff:
 
         assert len(result.moves) == 1
         move = result.moves[0]
-        assert move.quantity == 100000.0  # Full notional
+        assert move.quantity == Decimal("100000.0")  # Full notional
 
         sc = next(d for d in result.state_changes if d.unit == "AUTO")
         assert sc.new_state['settled'] is True
@@ -698,7 +699,7 @@ class TestComputeMaturityPayoff:
         result = compute_maturity_payoff(view, 'AUTO', final_spot=50.0)
 
         move = result.moves[0]
-        assert move.quantity == 50000.0  # 50% of notional
+        assert move.quantity == Decimal("50000.0")  # 50% of notional
 
     def test_maturity_with_knockin_capped_at_notional(self):
         """Payout capped at notional even if spot > initial."""
@@ -707,7 +708,7 @@ class TestComputeMaturityPayoff:
         result = compute_maturity_payoff(view, 'AUTO', final_spot=120.0)
 
         move = result.moves[0]
-        assert move.quantity == 100000.0  # Capped at notional
+        assert move.quantity == Decimal("100000.0")  # Capped at notional
 
     def test_maturity_with_memory_coupon(self):
         """Memory coupon added to maturity payout."""
@@ -716,7 +717,7 @@ class TestComputeMaturityPayoff:
 
         move = result.moves[0]
         # Notional + memory = 100000 + 16000 = 116000
-        assert move.quantity == 116000.0
+        assert move.quantity == Decimal("116000.0")
 
     def test_maturity_with_knockin_and_memory(self):
         """Knock-in loss + memory coupon."""
@@ -726,7 +727,7 @@ class TestComputeMaturityPayoff:
 
         move = result.moves[0]
         # 60% of notional + memory = 60000 + 8000 = 68000
-        assert move.quantity == 68000.0
+        assert move.quantity == Decimal("68000.0")
 
     def test_maturity_already_autocalled(self):
         """No action if already autocalled."""
@@ -753,18 +754,18 @@ class TestEdgeCases:
         """Helper to create a FakeView with autocallable state."""
         return FakeView(
             balances={
-                'bank': {'USD': 1000000},
-                'investor': {'AUTO': 1},
+                'bank': {'USD': Decimal("1000000")},
+                'investor': {'AUTO': Decimal("1")},
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15), datetime(2024, 7, 15)],
@@ -773,7 +774,7 @@ class TestEdgeCases:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -792,16 +793,16 @@ class TestEdgeCases:
     def test_observation_already_processed(self):
         """Already processed observation returns empty."""
         view = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -810,8 +811,8 @@ class TestEdgeCases:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [
-                        {'date': datetime(2024, 4, 15), 'spot': 80.0, 'performance': 0.8,
-                         'autocalled': False, 'coupon_paid': 8000.0, 'memory_paid': 0.0,
+                        {'date': datetime(2024, 4, 15), 'spot': Decimal("80.0"), 'performance': Decimal("0.8"),
+                         'autocalled': False, 'coupon_paid': Decimal("8000.0"), 'memory_paid': Decimal("0.0"),
                          'put_knocked_in': False}
                     ],
                     'coupon_memory': 0.0,
@@ -829,16 +830,16 @@ class TestEdgeCases:
     def test_observation_already_autocalled(self):
         """Observation after autocall returns empty."""
         view = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15), datetime(2024, 7, 15)],
@@ -847,7 +848,7 @@ class TestEdgeCases:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': True,
                     'autocall_date': datetime(2024, 4, 15),
@@ -889,18 +890,18 @@ class TestTransact:
         """Helper to create a FakeView with autocallable state."""
         return FakeView(
             balances={
-                'bank': {'USD': 1000000},
-                'investor': {'AUTO': 1},
+                'bank': {'USD': Decimal("1000000")},
+                'investor': {'AUTO': Decimal("1")},
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -909,7 +910,7 @@ class TestTransact:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -989,18 +990,18 @@ class TestAutocallableContract:
             history = []
         return FakeView(
             balances={
-                'bank': {'USD': 1000000},
-                'investor': {'AUTO': 1},
+                'bank': {'USD': Decimal("1000000")},
+                'investor': {'AUTO': Decimal("1")},
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': obs_dates,
@@ -1009,7 +1010,7 @@ class TestAutocallableContract:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': history,
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': autocalled,
                     'autocall_date': None,
@@ -1025,7 +1026,7 @@ class TestAutocallableContract:
         result = autocallable_contract(
             view, 'AUTO',
             datetime(2024, 4, 15),
-            {'SPX': 80.0}
+            {'SPX': Decimal("80.0")}
         )
 
         assert len(result.moves) == 1
@@ -1035,14 +1036,14 @@ class TestAutocallableContract:
         """Contract processes maturity."""
         view = self._make_view(
             obs_dates=[datetime(2024, 4, 15)],
-            history=[{'date': datetime(2024, 4, 15), 'spot': 80.0, 'performance': 0.8,
-                      'autocalled': False, 'coupon_paid': 8000.0, 'memory_paid': 0.0,
+            history=[{'date': datetime(2024, 4, 15), 'spot': Decimal("80.0"), 'performance': Decimal("0.8"),
+                      'autocalled': False, 'coupon_paid': Decimal("8000.0"), 'memory_paid': Decimal("0.0"),
                       'put_knocked_in': False}]
         )
         result = autocallable_contract(
             view, 'AUTO',
             datetime(2025, 1, 15),
-            {'SPX': 90.0}
+            {'SPX': Decimal("90.0")}
         )
 
         assert len(result.moves) == 1
@@ -1054,19 +1055,19 @@ class TestAutocallableContract:
         result = autocallable_contract(
             view, 'AUTO',
             datetime(2024, 4, 15),
-            {'SPX': 100.0}
+            {'SPX': Decimal("100.0")}
         )
         assert result.is_empty()
 
-    def test_contract_missing_price_empty(self):
-        """Contract returns empty if underlying price missing."""
+    def test_contract_missing_price_raises(self):
+        """Contract raises ValueError if underlying price missing."""
         view = self._make_view()
-        result = autocallable_contract(
-            view, 'AUTO',
-            datetime(2024, 4, 15),
-            {'AAPL': 150.0}  # Wrong underlying
-        )
-        assert result.is_empty()
+        with pytest.raises(ValueError, match="Missing price for autocallable underlying"):
+            autocallable_contract(
+                view, 'AUTO',
+                datetime(2024, 4, 15),
+                {'AAPL': Decimal("150.0")}  # Wrong underlying
+            )
 
 
 # ============================================================================
@@ -1082,18 +1083,18 @@ class TestHelperFunctions:
             history = []
         return FakeView(
             balances={
-                'bank': {'USD': 1000000},
-                'investor': {'AUTO': 1},
+                'bank': {'USD': Decimal("1000000")},
+                'investor': {'AUTO': Decimal("1")},
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [
@@ -1133,8 +1134,8 @@ class TestHelperFunctions:
     def test_get_status_after_observation(self):
         """Get status after observation processed."""
         history = [
-            {'date': datetime(2024, 4, 15), 'spot': 80.0, 'performance': 0.8,
-             'autocalled': False, 'coupon_paid': 8000.0, 'memory_paid': 0.0,
+            {'date': datetime(2024, 4, 15), 'spot': Decimal("80.0"), 'performance': Decimal("0.8"),
+             'autocalled': False, 'coupon_paid': Decimal("8000.0"), 'memory_paid': Decimal("0.0"),
              'put_knocked_in': False}
         ]
         view = self._make_view(history=history)
@@ -1154,32 +1155,32 @@ class TestHelperFunctions:
     def test_get_total_coupons_paid(self):
         """Get total coupons paid."""
         history = [
-            {'date': datetime(2024, 4, 15), 'spot': 80.0, 'performance': 0.8,
-             'autocalled': False, 'coupon_paid': 8000.0, 'memory_paid': 0.0,
+            {'date': datetime(2024, 4, 15), 'spot': Decimal("80.0"), 'performance': Decimal("0.8"),
+             'autocalled': False, 'coupon_paid': Decimal("8000.0"), 'memory_paid': Decimal("0.0"),
              'put_knocked_in': False},
-            {'date': datetime(2024, 7, 15), 'spot': 75.0, 'performance': 0.75,
-             'autocalled': False, 'coupon_paid': 8000.0, 'memory_paid': 0.0,
+            {'date': datetime(2024, 7, 15), 'spot': Decimal("75.0"), 'performance': Decimal("0.75"),
+             'autocalled': False, 'coupon_paid': Decimal("8000.0"), 'memory_paid': Decimal("0.0"),
              'put_knocked_in': False},
         ]
         view = self._make_view(history=history)
         total = get_total_coupons_paid(view, 'AUTO')
 
-        assert total == 16000.0
+        assert total == Decimal("16000.0")
 
     def test_get_total_coupons_with_memory(self):
         """Get total coupons including memory payouts."""
         history = [
-            {'date': datetime(2024, 4, 15), 'spot': 60.0, 'performance': 0.6,
-             'autocalled': False, 'coupon_paid': 0.0, 'memory_paid': 0.0,
+            {'date': datetime(2024, 4, 15), 'spot': Decimal("60.0"), 'performance': Decimal("0.6"),
+             'autocalled': False, 'coupon_paid': Decimal("0.0"), 'memory_paid': Decimal("0.0"),
              'put_knocked_in': True},  # Missed
-            {'date': datetime(2024, 7, 15), 'spot': 80.0, 'performance': 0.8,
-             'autocalled': False, 'coupon_paid': 8000.0, 'memory_paid': 8000.0,
+            {'date': datetime(2024, 7, 15), 'spot': Decimal("80.0"), 'performance': Decimal("0.8"),
+             'autocalled': False, 'coupon_paid': Decimal("8000.0"), 'memory_paid': Decimal("8000.0"),
              'put_knocked_in': False},  # Paid with memory
         ]
         view = self._make_view(history=history)
         total = get_total_coupons_paid(view, 'AUTO')
 
-        assert total == 16000.0  # 8000 coupon + 8000 memory
+        assert total == Decimal("16000.0")  # 8000 coupon + 8000 memory
 
 
 # ============================================================================
@@ -1192,16 +1193,16 @@ class TestFullLifecycle:
     def test_lifecycle_autocall_first_observation(self):
         """Autocall on first observation."""
         view = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [
@@ -1215,7 +1216,7 @@ class TestFullLifecycle:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -1235,16 +1236,16 @@ class TestFullLifecycle:
         """Multiple coupon payments then maturity."""
         # First observation - coupon paid
         view1 = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [
@@ -1256,7 +1257,7 @@ class TestFullLifecycle:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -1271,7 +1272,7 @@ class TestFullLifecycle:
 
         # Second observation - coupon paid
         view2 = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={
                 'AUTO': {
                     **(next(d for d in result1.state_changes if d.unit == 'AUTO').new_state),
@@ -1285,7 +1286,7 @@ class TestFullLifecycle:
 
         # Maturity
         view3 = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={
                 'AUTO': {
                     **(next(d for d in result2.state_changes if d.unit == 'AUTO').new_state),
@@ -1301,16 +1302,16 @@ class TestFullLifecycle:
         """Miss coupons, accumulate memory, then pay all."""
         # First observation - missed (below coupon barrier)
         view1 = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [
@@ -1323,7 +1324,7 @@ class TestFullLifecycle:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -1339,7 +1340,7 @@ class TestFullLifecycle:
 
         # Second observation - also missed
         view2 = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={'AUTO': next(d for d in result1.state_changes if d.unit == 'AUTO').new_state},
             time=datetime(2024, 7, 15)
         )
@@ -1350,7 +1351,7 @@ class TestFullLifecycle:
 
         # Third observation - above coupon barrier, pay all memory
         view3 = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={'AUTO': next(d for d in result2.state_changes if d.unit == 'AUTO').new_state},
             time=datetime(2024, 10, 15)
         )
@@ -1364,16 +1365,16 @@ class TestFullLifecycle:
         """Put knocks in, then loss at maturity."""
         # First observation - knock in (spot at 55%, below coupon barrier too)
         view1 = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -1382,7 +1383,7 @@ class TestFullLifecycle:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -1399,7 +1400,7 @@ class TestFullLifecycle:
 
         # Maturity with loss
         view2 = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={'AUTO': next(d for d in result1.state_changes if d.unit == 'AUTO').new_state},
             time=datetime(2025, 1, 15)
         )
@@ -1421,19 +1422,19 @@ class TestPositionTransfer:
         # Create autocallable with alice as original holder
         view = FakeView(
             balances={
-                'bank': {'USD': 1000000},
+                'bank': {'USD': Decimal("1000000")},
                 'alice': {},  # alice no longer holds the autocallable
-                'bob': {'AUTO': 1},  # bob now holds it (transferred from alice)
+                'bob': {'AUTO': Decimal("1")},  # bob now holds it (transferred from alice)
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -1442,7 +1443,7 @@ class TestPositionTransfer:
                     'holder_wallet': 'alice',  # Original holder in state
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -1461,26 +1462,26 @@ class TestPositionTransfer:
         assert move.source == 'bank'
         assert move.dest == 'bob'  # Current holder gets payment
         assert move.unit_symbol == 'USD'
-        assert move.quantity == 8000.0  # 8% of 100000
+        assert move.quantity == Decimal("8000.0")  # 8% of 100000
 
     def test_autocall_redemption_to_current_holder_after_transfer(self):
         """Autocall redemption goes to current holder, not original holder_wallet."""
         # Create autocallable with alice as original holder, bob as current holder
         view = FakeView(
             balances={
-                'bank': {'USD': 1000000},
+                'bank': {'USD': Decimal("1000000")},
                 'alice': {},
-                'bob': {'AUTO': 1},  # bob holds it now
+                'bob': {'AUTO': Decimal("1")},  # bob holds it now
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -1489,7 +1490,7 @@ class TestPositionTransfer:
                     'holder_wallet': 'alice',  # Original holder
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -1508,26 +1509,26 @@ class TestPositionTransfer:
         assert move.source == 'bank'
         assert move.dest == 'bob'  # Current holder
         assert move.unit_symbol == 'USD'
-        assert move.quantity == 108000.0  # 100000 principal + 8000 coupon
+        assert move.quantity == Decimal("108000.0")  # 100000 principal + 8000 coupon
 
     def test_maturity_payoff_to_current_holder_after_transfer(self):
         """Maturity payoff goes to current holder, not original holder_wallet."""
         # Create autocallable with alice as original holder, bob as current holder
         view = FakeView(
             balances={
-                'bank': {'USD': 1000000},
+                'bank': {'USD': Decimal("1000000")},
                 'alice': {},
-                'bob': {'AUTO': 1},  # bob holds it now
+                'bob': {'AUTO': Decimal("1")},  # bob holds it now
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -1536,7 +1537,7 @@ class TestPositionTransfer:
                     'holder_wallet': 'alice',  # Original holder
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -1555,26 +1556,26 @@ class TestPositionTransfer:
         assert move.source == 'bank'
         assert move.dest == 'bob'  # Current holder
         assert move.unit_symbol == 'USD'
-        assert move.quantity == 100000.0  # Full principal (no knock-in)
+        assert move.quantity == Decimal("100000.0")  # Full principal (no knock-in)
 
     def test_multiple_holders_share_coupon_payment(self):
         """Multiple holders each receive proportional coupon payments."""
         # Create autocallable with alice and bob each holding 0.5 units
         view = FakeView(
             balances={
-                'bank': {'USD': 1000000},
-                'alice': {'AUTO': 0.5},
-                'bob': {'AUTO': 0.5},
+                'bank': {'USD': Decimal("1000000")},
+                'alice': {'AUTO': Decimal("0.5")},
+                'bob': {'AUTO': Decimal("0.5")},
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -1583,7 +1584,7 @@ class TestPositionTransfer:
                     'holder_wallet': 'alice',  # Original holder
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -1604,30 +1605,30 @@ class TestPositionTransfer:
         assert alice_move.source == 'bank'
         assert alice_move.dest == 'alice'
         assert alice_move.unit_symbol == 'USD'
-        assert alice_move.quantity == 4000.0  # 0.5 * 8000
+        assert alice_move.quantity == Decimal("4000.0")  # 0.5 * 8000
 
         bob_move = result.moves[1]
         assert bob_move.source == 'bank'
         assert bob_move.dest == 'bob'
         assert bob_move.unit_symbol == 'USD'
-        assert bob_move.quantity == 4000.0  # 0.5 * 8000
+        assert bob_move.quantity == Decimal("4000.0")  # 0.5 * 8000
 
     def test_issuer_holding_units_does_not_receive_payment(self):
         """Issuer holding autocallable units should not receive payment."""
         view = FakeView(
             balances={
-                'bank': {'USD': 1000000, 'AUTO': 0.3},  # bank holds some units
-                'alice': {'AUTO': 0.7},
+                'bank': {'USD': Decimal("1000000"), 'AUTO': Decimal("0.3")},  # bank holds some units
+                'alice': {'AUTO': Decimal("0.7")},
             },
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -1636,7 +1637,7 @@ class TestPositionTransfer:
                     'holder_wallet': 'alice',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -1653,7 +1654,7 @@ class TestPositionTransfer:
         assert len(result.moves) == 1
         move = result.moves[0]
         assert move.dest == 'alice'
-        assert move.quantity == 5600.0  # 0.7 * 8000
+        assert move.quantity == Decimal("5600.0")  # 0.7 * 8000
 
 
 class TestConservationLaws:
@@ -1662,16 +1663,16 @@ class TestConservationLaws:
     def test_coupon_payment_conservation(self):
         """Coupon moves from issuer to holder."""
         view = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -1680,7 +1681,7 @@ class TestConservationLaws:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -1701,16 +1702,16 @@ class TestConservationLaws:
     def test_autocall_total_equals_notional_plus_coupon(self):
         """Autocall payout equals notional + coupon."""
         view = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -1719,7 +1720,7 @@ class TestConservationLaws:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': False,
                     'autocalled': False,
                     'autocall_date': None,
@@ -1737,16 +1738,16 @@ class TestConservationLaws:
     def test_maturity_with_knockin_conserves_value(self):
         """Maturity payout with knock-in follows performance."""
         view = FakeView(
-            balances={'bank': {'USD': 1000000}, 'investor': {'AUTO': 1}},
+            balances={'bank': {'USD': Decimal("1000000")}, 'investor': {'AUTO': Decimal("1")}},
             states={
                 'AUTO': {
                     'underlying': 'SPX',
-                    'notional': 100000.0,
-                    'initial_spot': 100.0,
-                    'autocall_barrier': 1.0,
-                    'coupon_barrier': 0.7,
-                    'coupon_rate': 0.08,
-                    'put_barrier': 0.6,
+                    'notional': Decimal("100000.0"),
+                    'initial_spot': Decimal("100.0"),
+                    'autocall_barrier': Decimal("1.0"),
+                    'coupon_barrier': Decimal("0.7"),
+                    'coupon_rate': Decimal("0.08"),
+                    'put_barrier': Decimal("0.6"),
                     'issue_date': datetime(2024, 1, 15),
                     'maturity_date': datetime(2025, 1, 15),
                     'observation_schedule': [datetime(2024, 4, 15)],
@@ -1755,7 +1756,7 @@ class TestConservationLaws:
                     'holder_wallet': 'investor',
                     'memory_feature': True,
                     'observation_history': [],
-                    'coupon_memory': 0.0,
+                    'coupon_memory': Decimal("0.0"),
                     'put_knocked_in': True,
                     'autocalled': False,
                     'autocall_date': None,

@@ -14,11 +14,13 @@ Key responsibilities:
 
 from __future__ import annotations
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime
 from typing import Dict, List, Set, Optional, Tuple, Any
 import copy
 import hashlib
 import sys
+from decimal import Decimal
 
 from .core import (
     # Types
@@ -31,6 +33,8 @@ from .core import (
     # Exceptions
     LedgerError, InsufficientFunds, BalanceConstraintViolation,
     TransferRuleViolation, UnitNotRegistered, WalletNotRegistered,
+    # Helper functions
+    _freeze_state, _thaw_state,
 )
 
 
@@ -68,7 +72,8 @@ class Ledger:
         self,
         name: str,
         initial_time: Optional[datetime] = None,
-        verbose: bool = True
+        verbose: bool = True,
+        test_mode: bool = False
     ):
         """
         Create a ledger.
@@ -77,23 +82,25 @@ class Ledger:
             name: Ledger identifier
             initial_time: Starting time for the ledger (default: 1970-01-01)
             verbose: Enable debug output (default: True)
+            test_mode: Enable test mode to allow set_balance() calls (default: False)
         """
         self.name = name
-        self.balances: Dict[str, Dict[str, float]] = {}
+        self.balances: Dict[str, Dict[str, Decimal]] = {}
         self.units: Dict[str, Unit] = {}
         self.registered_wallets: Set[str] = set()
         self.seen_intent_ids: Set[str] = set()  # For idempotency (content-based)
         self.transaction_log: List[Transaction] = []
         self._current_time: datetime = initial_time or datetime(1970, 1, 1)
         self.verbose = verbose
+        self._test_mode = test_mode
         # Monotonic sequence counter for execution ordering
         self._next_sequence: int = 0
         # Inverted index mapping unit -> {wallet -> quantity} for O(1) position lookups
-        self._positions_by_unit: Dict[str, Dict[str, float]] = defaultdict(dict)
+        self._positions_by_unit: Dict[str, Dict[str, Decimal]] = defaultdict(dict)
 
         # Auto-register the system wallet (used for unit issuance/redemption)
         self.registered_wallets.add(SYSTEM_WALLET)
-        self.balances[SYSTEM_WALLET] = defaultdict(float)
+        self.balances[SYSTEM_WALLET] = defaultdict(lambda: Decimal("0"))
 
     # ========================================================================
     # LedgerView PROTOCOL IMPLEMENTATION (read-only methods)
@@ -104,7 +111,7 @@ class Ledger:
         """Current logical time of the ledger."""
         return self._current_time
 
-    def get_balance(self, wallet_id: str, unit_symbol: str) -> float:
+    def get_balance(self, wallet_id: str, unit_symbol: str) -> Decimal:
         """
         Get the balance of a specific unit in a wallet.
 
@@ -113,7 +120,7 @@ class Ledger:
             unit_symbol: Unit symbol
 
         Returns:
-            Current balance (0.0 if wallet has no balance for this unit)
+            Current balance (Decimal("0") if wallet has no balance for this unit)
 
         Raises:
             WalletNotRegistered: If wallet is not registered
@@ -123,7 +130,7 @@ class Ledger:
             raise WalletNotRegistered(f"Wallet {wallet_id} not registered")
         if unit_symbol not in self.units:
             raise UnitNotRegistered(f"Unit {unit_symbol} not registered")
-        return self.balances[wallet_id].get(unit_symbol, 0.0)
+        return self.balances[wallet_id].get(unit_symbol, Decimal("0"))
 
     def get_unit_state(self, unit_symbol: str) -> UnitState:
         """
@@ -144,7 +151,7 @@ class Ledger:
         if unit_symbol not in self.units:
             raise UnitNotRegistered(f"Unit {unit_symbol} not registered")
         unit_obj = self.units[unit_symbol]
-        return self._deep_copy_state(unit_obj._state) if unit_obj._state else {}
+        return self._deep_copy_state(unit_obj.state) if unit_obj.state else {}
 
     def get_positions(self, unit_symbol: str) -> Positions:
         """
@@ -180,11 +187,11 @@ class Ledger:
             raise WalletNotRegistered(f"Wallet {wallet_id} not registered")
         return dict(self.balances[wallet_id])
 
-    def total_supply(self, unit_symbol: str) -> float:
+    def total_supply(self, unit_symbol: str) -> Decimal:
         """
         Calculate total supply of a unit across all wallets.
 
-        Wallets are sorted before summation to ensure deterministic float
+        Wallets are sorted before summation to ensure deterministic
         accumulation order.
 
         Args:
@@ -198,12 +205,12 @@ class Ledger:
         """
         if unit_symbol not in self.units:
             raise UnitNotRegistered(f"Unit {unit_symbol} not registered")
-        return sum(self.balances[w].get(unit_symbol, 0.0) for w in sorted(self.registered_wallets))
+        return sum(self.balances[w].get(unit_symbol, Decimal("0")) for w in sorted(self.registered_wallets))
 
     def verify_double_entry(
         self,
-        expected_supplies: Dict[str, float] = None,
-        tolerance: float = 1e-9
+        expected_supplies: Dict[str, Decimal] = None,
+        tolerance: Decimal = Decimal("1e-9")
     ) -> Dict[str, Any]:
         """
         Verify that conservation laws hold for all units.
@@ -218,8 +225,8 @@ class Ledger:
         Args:
             expected_supplies: Optional dict mapping unit symbols to expected totals.
                               If provided, will check that current totals match.
-            tolerance: Maximum allowed difference for floating-point comparisons.
-                      Defaults to 1e-9.
+            tolerance: Maximum allowed difference for decimal comparisons.
+                      Defaults to Decimal("1e-9").
 
         Returns:
             Dict with keys:
@@ -264,7 +271,7 @@ class Ledger:
                     discrepancies.append({
                         'unit': unit_symbol,
                         'expected': expected,
-                        'actual': 0.0,
+                        'actual': Decimal("0"),
                         'difference': abs(expected),
                         'error': 'unit not registered',
                     })
@@ -321,7 +328,7 @@ class Ledger:
         if wallet_id in self.registered_wallets:
             raise ValueError(f"Wallet {wallet_id} already registered")
         self.registered_wallets.add(wallet_id)
-        self.balances[wallet_id] = defaultdict(float)
+        self.balances[wallet_id] = defaultdict(lambda: Decimal("0"))
         return wallet_id
 
     def register_unit(self, unit: Unit) -> None:
@@ -343,28 +350,35 @@ class Ledger:
             rule_str = f", rule={unit.transfer_rule.__name__}" if unit.transfer_rule else ""
             print(f"📝 Registered: {unit.symbol} ({unit.name}) [{unit.unit_type}]{rule_str}")
 
-    def set_balance(self, wallet_id: str, unit_symbol: str, quantity: float) -> None:
+    def set_balance(self, wallet_id: str, unit_symbol: str, quantity: Decimal) -> None:
         """
         Set a wallet's balance for a unit directly.
 
-        WARNING: This method bypasses double-entry accounting. It directly sets
-        a balance without a corresponding contra-entry. Use only for:
-        - Initial setup / seeding test scenarios
-        - External system integrations where the contra-entry is elsewhere
-        - Correcting errors (with proper audit trail)
-
-        For normal operations, use transactions via execute() which maintain
-        double-entry invariants (every credit has a corresponding debit).
+        WARNING: This method bypasses double-entry accounting and is only
+        available in test mode. For production use, use build_transaction()
+        and execute() instead.
 
         Args:
             wallet_id: Wallet identifier to update
             unit_symbol: Unit symbol
             quantity: New balance (overwrites existing)
+
+        Raises:
+            LedgerError: If called when test_mode is False
         """
+        if not self._test_mode:
+            raise LedgerError(
+                "set_balance() is disabled in production mode. "
+                "Use build_transaction() and execute() to modify balances. "
+                "Set test_mode=True when creating Ledger for testing."
+            )
         if wallet_id not in self.registered_wallets:
             raise WalletNotRegistered(f"Wallet {wallet_id} not registered")
         if unit_symbol not in self.units:
             raise UnitNotRegistered(f"Unit {unit_symbol} not registered")
+        # Convert to Decimal if needed
+        if not isinstance(quantity, Decimal):
+            quantity = Decimal(str(quantity))
         self.balances[wallet_id][unit_symbol] = quantity
         self._update_position_index(wallet_id, unit_symbol, quantity)
 
@@ -375,6 +389,9 @@ class Ledger:
         The state_updates are merged into the existing state. If the unit has
         no existing state, an empty state dictionary is created first.
 
+        Since Unit is frozen/immutable, this creates a new Unit instance with
+        the updated state and replaces the existing unit in the ledger.
+
         Args:
             unit_symbol: Unit symbol to update
             state_updates: Dictionary of state keys and values to update
@@ -384,10 +401,12 @@ class Ledger:
         """
         if unit_symbol not in self.units:
             raise UnitNotRegistered(f"Unit {unit_symbol} not registered")
-        unit_obj = self.units[unit_symbol]
-        if unit_obj._state is None:
-            unit_obj._state = {}
-        unit_obj._state.update(state_updates)
+        old_unit = self.units[unit_symbol]
+        # Merge existing state with updates
+        new_state = {**old_unit.state, **state_updates}
+        # Create new Unit instance with updated state (freeze the dict first)
+        new_unit = replace(old_unit, _frozen_state=_freeze_state(new_state))
+        self.units[unit_symbol] = new_unit
 
     # ========================================================================
     # TRANSACTION EXECUTION (Mutating)
@@ -485,11 +504,15 @@ class Ledger:
         self._execute_moves(tx.moves)
 
         # Apply state updates from state_changes
+        # Since Unit is frozen, we create new Unit instances with updated state
         for sc in tx.state_changes:
             if sc.unit in self.units:
-                self.units[sc.unit]._state = self._deep_copy_state(
+                old_unit = self.units[sc.unit]
+                new_state = self._deep_copy_state(
                     sc.new_state if isinstance(sc.new_state, dict) else {}
                 )
+                new_unit = replace(old_unit, _frozen_state=_freeze_state(new_state))
+                self.units[sc.unit] = new_unit
 
         # Log transaction (always - audit trail is mandatory)
         self.transaction_log.append(tx)
@@ -566,14 +589,14 @@ class Ledger:
                     return False, str(e)
 
         # Calculate net balance changes with proper rounding
-        net: Dict[Tuple[str, str], float] = {}
+        net: Dict[Tuple[str, str], Decimal] = {}
         for move in pending.moves:
             unit = self.units[move.unit_symbol]
             key_src = (move.source, move.unit_symbol)
             key_dst = (move.dest, move.unit_symbol)
             # Apply unit-specific rounding to match execution behavior
-            net[key_src] = unit.round(net.get(key_src, 0.0) - move.quantity)
-            net[key_dst] = unit.round(net.get(key_dst, 0.0) + move.quantity)
+            net[key_src] = unit.round(net.get(key_src, Decimal("0")) - move.quantity)
+            net[key_dst] = unit.round(net.get(key_dst, Decimal("0")) + move.quantity)
 
         # Check balance constraints
         # Note: SYSTEM_WALLET is exempt from balance validation - it can hold any balance
@@ -593,7 +616,7 @@ class Ledger:
 
         return True, ""
 
-    def _update_position_index(self, wallet_id: str, unit_symbol: str, quantity: float) -> None:
+    def _update_position_index(self, wallet_id: str, unit_symbol: str, quantity: Decimal) -> None:
         """
         Update the inverted position index after a balance change.
 
@@ -680,6 +703,7 @@ class Ledger:
         cloned.name = self.name
         cloned._current_time = self._current_time
         cloned.verbose = self.verbose
+        cloned._test_mode = self._test_mode
 
         # Deep copy units (including nested state)
         cloned.units = {}
@@ -692,7 +716,7 @@ class Ledger:
                 max_balance=unit.max_balance,
                 decimal_places=unit.decimal_places,
                 transfer_rule=unit.transfer_rule,
-                _state=self._deep_copy_state(unit._state)
+                _frozen_state=_freeze_state(self._deep_copy_state(unit.state))
             )
 
         # Copy collections
@@ -704,7 +728,7 @@ class Ledger:
         # Deep copy balances
         cloned.balances = {}
         for wallet, bals in self.balances.items():
-            cloned.balances[wallet] = defaultdict(float, bals)
+            cloned.balances[wallet] = defaultdict(lambda: Decimal("0"), bals)
 
         # Deep copy position index
         cloned._positions_by_unit = defaultdict(dict)
@@ -779,11 +803,15 @@ class Ledger:
                 cloned._update_position_index(move.dest, move.unit_symbol, new_dst)
 
             # Reverse state changes - restore old_state
+            # Since Unit is frozen, create new Unit instances with old state
             for sc in tx.state_changes:
                 if sc.unit in cloned.units:
-                    cloned.units[sc.unit]._state = self._deep_copy_state(
+                    old_unit = cloned.units[sc.unit]
+                    restored_state = self._deep_copy_state(
                         sc.old_state if isinstance(sc.old_state, dict) else {}
                     )
+                    new_unit = replace(old_unit, _frozen_state=_freeze_state(restored_state))
+                    cloned.units[sc.unit] = new_unit
 
             # Reverse units_to_create - remove units that were created in this transaction
             for unit in tx.units_to_create:
@@ -831,7 +859,8 @@ class Ledger:
         new_ledger = Ledger(
             name=f"{self.name}_replayed",
             initial_time=datetime(1970, 1, 1),
-            verbose=self.verbose
+            verbose=self.verbose,
+            test_mode=self._test_mode
         )
 
         # Identify units that will be created during replay
@@ -855,7 +884,7 @@ class Ledger:
                 max_balance=unit.max_balance,
                 decimal_places=unit.decimal_places,
                 transfer_rule=unit.transfer_rule,
-                _state={}
+                _frozen_state=_freeze_state({})
             )
 
         for wallet in self.registered_wallets:

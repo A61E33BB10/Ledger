@@ -9,11 +9,12 @@ State is minimal: just 'processed_dividends' list of dividend keys that have bee
 """
 import pytest
 from datetime import datetime
+from decimal import Decimal
 from dataclasses import dataclass
 from typing import Dict, Set
 
 from ledger.core import (
-    LedgerView, Unit, UnitState, UNIT_TYPE_STOCK, QUANTITY_EPSILON,
+    LedgerView, Unit, UnitState, UNIT_TYPE_STOCK, QUANTITY_EPSILON, _freeze_state,
 )
 from ledger.units.stock import (
     Dividend, process_dividends, compute_dividend_entitlements,
@@ -39,7 +40,7 @@ class FakeView:
         return self._current_time
 
     def get_balance(self, wallet_id: str, unit_symbol: str) -> float:
-        return self._positions.get(unit_symbol, {}).get(wallet_id, 0.0)
+        return self._positions.get(unit_symbol, {}).get(wallet_id, Decimal("0.0"))
 
     def get_unit_state(self, unit_symbol: str) -> UnitState:
         return dict(self._unit_states.get(unit_symbol, {}))
@@ -63,12 +64,12 @@ def make_stock_unit(symbol: str, issuer: str, currency: str, schedule=None) -> U
         symbol=symbol,
         name=f"{symbol} Stock",
         unit_type=UNIT_TYPE_STOCK,
-        _state={
+        _frozen_state=_freeze_state({
             'issuer': issuer,
             'currency': currency,
             'dividend_schedule': schedule or [],
             'processed_dividends': [],
-        }
+        })
     )
 
 
@@ -88,7 +89,7 @@ class TestDividend:
             currency="USD",
         )
         assert d.key == "2024-03-01"
-        assert d.amount_per_share == 0.50
+        assert d.amount_per_share == Decimal("0.50")
 
     def test_payment_before_ex_date_fails(self):
         """Payment date before ex_date is invalid."""
@@ -146,7 +147,7 @@ class TestComputeDividendEntitlements:
             amount_per_share=0.50,
             currency="USD",
         )
-        positions = {"alice": 100.0, "bob": 50.0}
+        positions = {"alice": Decimal("100.0"), "bob": Decimal("50.0")}
 
         entitlements, new_processed = compute_dividend_entitlements(
             div=div,
@@ -168,7 +169,7 @@ class TestComputeDividendEntitlements:
             amount_per_share=0.50,
             currency="USD",
         )
-        positions = {"alice": 100.0, "bob": 50.0}
+        positions = {"alice": Decimal("100.0"), "bob": Decimal("50.0")}
 
         entitlements, new_processed = compute_dividend_entitlements(
             div=div,
@@ -186,8 +187,8 @@ class TestComputeDividendEntitlements:
         alice_ent = next(e for e in entitlements if e.payee_wallet == "alice")
         bob_ent = next(e for e in entitlements if e.payee_wallet == "bob")
 
-        assert alice_ent.amount == 50.0  # 100 * 0.50
-        assert bob_ent.amount == 25.0   # 50 * 0.50
+        assert alice_ent.amount == Decimal("50.0")  # 100 * 0.50
+        assert bob_ent.amount == Decimal("25.0")   # 50 * 0.50
         assert alice_ent.currency == "USD"
         assert alice_ent.payer_wallet == "treasury"
 
@@ -199,7 +200,7 @@ class TestComputeDividendEntitlements:
             amount_per_share=0.50,
             currency="USD",
         )
-        positions = {"alice": 100.0}
+        positions = {"alice": Decimal("100.0")}
 
         entitlements, new_processed = compute_dividend_entitlements(
             div=div,
@@ -221,7 +222,7 @@ class TestComputeDividendEntitlements:
             amount_per_share=0.50,
             currency="USD",
         )
-        positions = {"treasury": 1000.0, "alice": 100.0}
+        positions = {"treasury": Decimal("1000.0"), "alice": Decimal("100.0")}
 
         entitlements, new_processed = compute_dividend_entitlements(
             div=div,
@@ -243,7 +244,7 @@ class TestComputeDividendEntitlements:
             amount_per_share=0.50,
             currency="USD",
         )
-        positions = {"alice": 0.0, "bob": 100.0}
+        positions = {"alice": Decimal("0.0"), "bob": Decimal("100.0")}
 
         entitlements, new_processed = compute_dividend_entitlements(
             div=div,
@@ -265,7 +266,7 @@ class TestComputeDividendEntitlements:
             amount_per_share=0.50,
             currency="GBP",  # HSBC pays GBP dividends
         )
-        positions = {"alice": 100.0}
+        positions = {"alice": Decimal("100.0")}
 
         entitlements, _ = compute_dividend_entitlements(
             div=div,
@@ -293,8 +294,8 @@ class TestProcessDividends:
         unit = make_stock_unit("AAPL", "treasury", "USD", schedule=[])
         view = FakeView(
             _current_time=datetime(2024, 3, 15),
-            _positions={"AAPL": {"alice": 100.0}},
-            _unit_states={"AAPL": unit._state},
+            _positions={"AAPL": {"alice": Decimal("100.0")}},
+            _unit_states={"AAPL": unit.state},
             _units={"AAPL": unit},
         )
 
@@ -312,8 +313,8 @@ class TestProcessDividends:
         unit = make_stock_unit("AAPL", "treasury", "USD", schedule=[div])
         view = FakeView(
             _current_time=datetime(2024, 3, 5),  # Before ex_date
-            _positions={"AAPL": {"alice": 100.0}},
-            _unit_states={"AAPL": unit._state},
+            _positions={"AAPL": {"alice": Decimal("100.0")}},
+            _unit_states={"AAPL": unit.state},
             _units={"AAPL": unit},
         )
 
@@ -331,8 +332,8 @@ class TestProcessDividends:
         unit = make_stock_unit("AAPL", "treasury", "USD", schedule=[div])
         view = FakeView(
             _current_time=datetime(2024, 3, 10),
-            _positions={"AAPL": {"alice": 100.0, "bob": 50.0}},
-            _unit_states={"AAPL": unit._state},
+            _positions={"AAPL": {"alice": Decimal("100.0"), "bob": Decimal("50.0")}},
+            _unit_states={"AAPL": unit.state},
             _units={"AAPL": unit},
         )
 
@@ -350,8 +351,8 @@ class TestProcessDividends:
         alice_dc = next(u for u in result.units_to_create if "alice" in u.symbol)
         bob_dc = next(u for u in result.units_to_create if "bob" in u.symbol)
 
-        assert alice_dc._state["amount"] == 50.0  # 100 * 0.50
-        assert bob_dc._state["amount"] == 25.0   # 50 * 0.50
+        assert alice_dc.state["amount"] == 50.0  # 100 * 0.50
+        assert bob_dc.state["amount"] == 25.0   # 50 * 0.50
 
     def test_idempotent_processing(self):
         """Re-processing ex_date doesn't create duplicate entitlements."""
@@ -368,10 +369,10 @@ class TestProcessDividends:
             'dividend_schedule': [div],
             'processed_dividends': ['2024-03-10'],
         }
-        unit = Unit(symbol="AAPL", name="Apple", unit_type=UNIT_TYPE_STOCK, _state=state)
+        unit = Unit(symbol="AAPL", name="Apple", unit_type=UNIT_TYPE_STOCK, _frozen_state=_freeze_state(state))
         view = FakeView(
             _current_time=datetime(2024, 3, 10),
-            _positions={"AAPL": {"alice": 100.0}},
+            _positions={"AAPL": {"alice": Decimal("100.0")}},
             _unit_states={"AAPL": state},
             _units={"AAPL": unit},
         )
@@ -393,10 +394,10 @@ class TestProcessDividends:
             'processed_dividends': [],
             # No issuer!
         }
-        unit = Unit(symbol="AAPL", name="Apple", unit_type=UNIT_TYPE_STOCK, _state=state)
+        unit = Unit(symbol="AAPL", name="Apple", unit_type=UNIT_TYPE_STOCK, _frozen_state=_freeze_state(state))
         view = FakeView(
             _current_time=datetime(2024, 3, 10),
-            _positions={"AAPL": {"alice": 100.0}},
+            _positions={"AAPL": {"alice": Decimal("100.0")}},
             _unit_states={"AAPL": state},
             _units={"AAPL": unit},
         )
@@ -421,8 +422,8 @@ class TestProcessDividends:
         unit = make_stock_unit("AAPL", "treasury", "USD", schedule=[div1, div2])
         view = FakeView(
             _current_time=datetime(2024, 7, 1),  # Way after both
-            _positions={"AAPL": {"alice": 100.0}},
-            _unit_states={"AAPL": unit._state},
+            _positions={"AAPL": {"alice": Decimal("100.0")}},
+            _unit_states={"AAPL": unit.state},
             _units={"AAPL": unit},
         )
 
@@ -430,8 +431,8 @@ class TestProcessDividends:
 
         # Both dividends should create entitlements
         assert len(result.units_to_create) == 2
-        total = sum(u._state["amount"] for u in result.units_to_create)
-        assert total == 55.0  # 100 * 0.25 + 100 * 0.30
+        total = sum(u.state["amount"] for u in result.units_to_create)
+        assert total == Decimal("55.0")  # 100 * 0.25 + 100 * 0.30
 
 
 # =============================================================================

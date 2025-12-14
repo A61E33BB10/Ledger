@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from typing import Dict, Any, List
+from decimal import Decimal
 
 from ..core import (
     LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
@@ -16,6 +17,7 @@ from ..core import (
     TransferRuleViolation,
     UNIT_TYPE_BILATERAL_FORWARD,
     build_transaction, empty_pending_transaction,
+    _freeze_state,
 )
 
 
@@ -23,9 +25,9 @@ def create_forward_unit(
     symbol: str,
     name: str,
     underlying: str,
-    forward_price: float,
+    forward_price: Decimal,
     delivery_date: datetime,
-    quantity: float,
+    quantity: Decimal,
     currency: str,
     long_wallet: str,
     short_wallet: str,
@@ -55,20 +57,24 @@ def create_forward_unit(
     Raises:
         ValueError: If forward_price or quantity is not positive.
     """
-    if forward_price <= 0:
+    # Convert to Decimal to handle float inputs
+    forward_price = Decimal(str(forward_price))
+    quantity = Decimal(str(quantity))
+
+    if forward_price <= Decimal("0"):
         raise ValueError(f"forward_price must be positive, got {forward_price}")
-    if quantity <= 0:
+    if quantity <= Decimal("0"):
         raise ValueError(f"quantity must be positive, got {quantity}")
 
     return Unit(
         symbol=symbol,
         name=name,
         unit_type=UNIT_TYPE_BILATERAL_FORWARD,
-        min_balance=-10_000.0,
-        max_balance=10_000.0,
+        min_balance=Decimal("-10000"),
+        max_balance=Decimal("10000"),
         decimal_places=2,
         transfer_rule=bilateral_transfer_rule,
-        _state={
+        _frozen_state=_freeze_state({
             'underlying': underlying,
             'forward_price': forward_price,
             'delivery_date': delivery_date,
@@ -77,7 +83,7 @@ def create_forward_unit(
             'long_wallet': long_wallet,
             'short_wallet': short_wallet,
             'settled': False,
-        }
+        })
     )
 
 
@@ -118,11 +124,12 @@ def compute_forward_settlement(
     short_wallet = state['short_wallet']
     long_position = view.get_balance(long_wallet, forward_symbol)
 
-    if long_position <= 0:
+    if long_position <= Decimal("0"):
         return empty_pending_transaction(view)
 
-    quantity = state['quantity']
-    forward_price = state['forward_price']
+    # Convert state values to Decimal to ensure type consistency
+    quantity = Decimal(str(state['quantity']))
+    forward_price = Decimal(str(state['forward_price']))
     currency = state['currency']
     underlying = state['underlying']
 
@@ -165,8 +172,8 @@ def compute_forward_settlement(
 def get_forward_value(
     view: LedgerView,
     forward_symbol: str,
-    spot_price: float,
-) -> float:
+    spot_price: Decimal,
+) -> Decimal:
     """
     Calculate the current mark-to-market value of one forward contract to the long party.
 
@@ -179,12 +186,15 @@ def get_forward_value(
         spot_price: Current market price of the underlying asset
 
     Returns:
-        float: Value per forward contract calculated as (spot_price - forward_price) × quantity.
+        Decimal: Value per forward contract calculated as (spot_price - forward_price) × quantity.
         Positive values indicate profit for the long party, negative values indicate loss.
     """
+    # Convert to Decimal to handle float inputs
+    spot_price = Decimal(str(spot_price))
+
     state = view.get_unit_state(forward_symbol)
-    forward_price = state['forward_price']
-    quantity = state['quantity']
+    forward_price = Decimal(str(state['forward_price']))
+    quantity = Decimal(str(state['quantity']))
     return (spot_price - forward_price) * quantity
 
 
@@ -210,8 +220,8 @@ def transact(
     symbol: str,
     seller: str,
     buyer: str,
-    qty: float,
-    price: float,
+    qty: Decimal,
+    price: Decimal,
 ) -> PendingTransaction:
     """
     Execute a secondary market trade (novation/assignment) for forward contracts.
@@ -243,19 +253,23 @@ def transact(
 
     Example:
         # Buyer pays seller 100 for 5 forward contracts
-        result = transact(view, "OIL_FWD_MAR25", "alice", "bob", 5.0, 100.0)
+        result = transact(view, "OIL_FWD_MAR25", "alice", "bob", Decimal("5"), Decimal("100"))
 
         # Seller pays buyer 50 (negative price) for 3 forward contracts
-        result = transact(view, "OIL_FWD_MAR25", "alice", "bob", 3.0, -50.0)
+        result = transact(view, "OIL_FWD_MAR25", "alice", "bob", Decimal("3"), Decimal("-50"))
     """
+    # Convert to Decimal to handle float inputs
+    qty = Decimal(str(qty))
+    price = Decimal(str(price))
+
     # Validation
-    if qty <= 0:
+    if qty <= Decimal("0"):
         raise ValueError(f"qty must be positive, got {qty}")
 
     if seller == buyer:
         raise ValueError(f"seller and buyer must be different, got {seller}")
 
-    if not math.isfinite(price):
+    if not price.is_finite():
         raise ValueError(f"price must be finite, got {price}")
 
     # Get forward contract state
@@ -307,7 +321,7 @@ def transact(
 
     # Add cash move based on price sign
     total_value = qty * abs(price)
-    if price > 0:
+    if price > Decimal("0"):
         # Buyer pays seller
         moves.append(
             Move(
@@ -318,7 +332,7 @@ def transact(
                 contract_id=f'forward_trade_{symbol}_value',
             )
         )
-    elif price < 0:
+    elif price < Decimal("0"):
         # Seller pays buyer
         moves.append(
             Move(
@@ -338,7 +352,7 @@ def forward_contract(
     view: LedgerView,
     symbol: str,
     timestamp: datetime,
-    prices: Dict[str, float]
+    prices: Dict[str, Decimal]
 ) -> PendingTransaction:
     """
     SmartContract function for automatic settlement of bilateral forward contracts.

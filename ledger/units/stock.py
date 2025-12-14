@@ -4,10 +4,10 @@ stock.py - Stock Unit with Dividend Processing
 === DIVIDEND MODEL ===
 
 A Dividend has:
-    ex_date: datetime       - When entitlements are computed
-    payment_date: datetime  - When cash is paid (via DeferredCash)
-    amount_per_share: float - Dividend amount
-    currency: str           - Payment currency
+    ex_date: datetime          - When entitlements are computed
+    payment_date: datetime     - When cash is paid (via DeferredCash)
+    amount_per_share: Decimal  - Dividend amount
+    currency: str              - Payment currency
 
 On ex_date:
     - Compute entitlement for each holder: shares * amount_per_share
@@ -33,13 +33,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, date
 from typing import Dict, FrozenSet, List, Mapping, Optional, Tuple
-import math
+from decimal import Decimal
 
 from ..core import (
     LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     build_transaction, empty_pending_transaction,
     STOCK_DECIMAL_PLACES, DEFAULT_STOCK_SHORT_MIN_BALANCE,
     UNIT_TYPE_STOCK, QUANTITY_EPSILON, SYSTEM_WALLET,
+    _freeze_state,
 )
 from .deferred_cash import create_deferred_cash_unit
 
@@ -49,13 +50,17 @@ class Dividend:
     """A scheduled dividend payment."""
     ex_date: datetime
     payment_date: datetime
-    amount_per_share: float
+    amount_per_share: Decimal
     currency: str
 
     def __post_init__(self):
+        # Convert amount_per_share to Decimal if it's not already
+        if not isinstance(self.amount_per_share, Decimal):
+            object.__setattr__(self, 'amount_per_share', Decimal(str(self.amount_per_share)))
+
         if self.payment_date < self.ex_date:
             raise ValueError("payment_date must be >= ex_date")
-        if self.amount_per_share <= 0:
+        if self.amount_per_share <= Decimal("0"):
             raise ValueError("amount_per_share must be positive")
 
     @property
@@ -73,7 +78,7 @@ class DividendEntitlement:
     The orchestrator handles actual unit creation.
     """
     symbol: str           # e.g., "DIV_AAPL_2024-03-15_alice"
-    amount: float         # shares * amount_per_share
+    amount: Decimal       # shares * amount_per_share
     currency: str
     payment_date: datetime
     payer_wallet: str     # issuer
@@ -89,17 +94,17 @@ class SplitAdjustment:
     For shorts: adjustment is negative (owe more shares back)
     """
     wallet: str
-    old_quantity: float
-    new_quantity: float
-    adjustment: float  # new_quantity - old_quantity
+    old_quantity: Decimal
+    new_quantity: Decimal
+    adjustment: Decimal  # new_quantity - old_quantity
 
 
 @dataclass(frozen=True, slots=True)
 class BorrowSplitAdjustment:
     """Instruction to adjust a BorrowRecord quantity for a stock split."""
     borrow_symbol: str
-    old_quantity: float
-    new_quantity: float
+    old_quantity: Decimal
+    new_quantity: Decimal
 
 
 # =============================================================================
@@ -107,9 +112,9 @@ class BorrowSplitAdjustment:
 # =============================================================================
 
 def compute_split_adjustments(
-    ratio: float,
-    positions: Mapping[str, float],
-    borrow_records: Mapping[str, float],
+    ratio: Decimal,
+    positions: Mapping[str, Decimal],
+    borrow_records: Mapping[str, Decimal],
     issuer: str,
     decimal_places: int = STOCK_DECIMAL_PLACES,
 ) -> Tuple[List[SplitAdjustment], List[BorrowSplitAdjustment]]:
@@ -141,6 +146,10 @@ def compute_split_adjustments(
         - Borrow obligations scale by ratio
         - Fractional shares rounded to decimal_places
     """
+    # Ensure ratio is a Decimal
+    if not isinstance(ratio, Decimal):
+        ratio = Decimal(str(ratio))
+
     position_adjustments: List[SplitAdjustment] = []
     borrow_adjustments: List[BorrowSplitAdjustment] = []
 
@@ -152,7 +161,7 @@ def compute_split_adjustments(
             continue
 
         # Calculate new quantity with rounding
-        new_shares = round(shares * ratio, decimal_places)
+        new_shares = (shares * ratio).quantize(Decimal(10) ** -decimal_places)
         adjustment = new_shares - shares
 
         if abs(adjustment) > QUANTITY_EPSILON:
@@ -168,7 +177,7 @@ def compute_split_adjustments(
         if quantity < QUANTITY_EPSILON:
             continue
 
-        new_quantity = round(quantity * ratio, decimal_places)
+        new_quantity = (quantity * ratio).quantize(Decimal(10) ** -decimal_places)
         if abs(new_quantity - quantity) > QUANTITY_EPSILON:
             borrow_adjustments.append(BorrowSplitAdjustment(
                 borrow_symbol=borrow_symbol,
@@ -182,7 +191,7 @@ def compute_split_adjustments(
 def compute_dividend_entitlements(
     div: Dividend,
     today: date,
-    positions: Mapping[str, float],
+    positions: Mapping[str, Decimal],
     processed: FrozenSet[str],
     issuer: str,
     stock_symbol: str,
@@ -307,7 +316,7 @@ def process_dividends(
 
         # Move entitlement from system to payee
         moves.append(Move(
-            quantity=1.0,
+            quantity=Decimal("1"),
             unit_symbol=ent.symbol,
             source=SYSTEM_WALLET,
             dest=ent.payee_wallet,
@@ -351,16 +360,16 @@ def create_stock_unit(
         symbol=symbol,
         name=name,
         unit_type=UNIT_TYPE_STOCK,
-        min_balance=DEFAULT_STOCK_SHORT_MIN_BALANCE if shortable else 0.0,
-        max_balance=float('inf'),
+        min_balance=DEFAULT_STOCK_SHORT_MIN_BALANCE if shortable else Decimal("0"),
+        max_balance=Decimal("Infinity"),
         decimal_places=STOCK_DECIMAL_PLACES,
-        _state={
+        _frozen_state=_freeze_state({
             'issuer': issuer,
             'currency': currency,
             'shortable': shortable,
             'dividend_schedule': dividend_schedule or [],
             'processed_dividends': [],
-        }
+        })
     )
 
 
@@ -371,7 +380,7 @@ def create_stock_unit(
 def compute_stock_split(
     view: LedgerView,
     symbol: str,
-    ratio: float,
+    ratio: Decimal,
     split_date: Optional[datetime] = None,
 ) -> PendingTransaction:
     """
@@ -395,7 +404,11 @@ def compute_stock_split(
         Alice owns 100 AAPL -> Move(100, AAPL, issuer, alice) -> 200 shares
         Bob borrowed 50 from Carol -> BorrowRecord quantity: 50 -> 100
     """
-    if ratio <= 0:
+    # Ensure ratio is a Decimal
+    if not isinstance(ratio, Decimal):
+        ratio = Decimal(str(ratio))
+
+    if ratio <= Decimal("0"):
         raise ValueError(f"Split ratio must be positive, got {ratio}")
 
     state = view.get_unit_state(symbol)
@@ -407,7 +420,7 @@ def compute_stock_split(
     positions = view.get_positions(symbol)
 
     # Get active borrow records for this stock
-    borrow_records: Dict[str, float] = {}
+    borrow_records: Dict[str, Decimal] = {}
     if hasattr(view, 'list_units'):
         prefix = f"BORROW_{symbol}_"
         for unit_symbol in view.list_units():
@@ -417,7 +430,10 @@ def compute_stock_split(
             # Skip closed borrows
             if borrow_state.get('status') in ('returned', 'bought_in'):
                 continue
-            borrow_records[unit_symbol] = borrow_state.get('quantity', 0.0)
+            quantity = borrow_state.get('quantity', Decimal("0"))
+            if not isinstance(quantity, Decimal):
+                quantity = Decimal(str(quantity))
+            borrow_records[unit_symbol] = quantity
 
     # Get unit for decimal places
     unit = view.get_unit(symbol)
@@ -495,8 +511,8 @@ def transact(
     symbol: str,
     seller: str,
     buyer: str,
-    qty: float,
-    price: float,
+    qty: Decimal,
+    price: Decimal,
 ) -> PendingTransaction:
     """
     Execute a stock trade (DVP settlement).
@@ -505,9 +521,15 @@ def transact(
     1. Stock: seller -> buyer
     2. Cash: buyer -> seller
     """
-    if qty <= 0:
+    # Ensure qty and price are Decimals
+    if not isinstance(qty, Decimal):
+        qty = Decimal(str(qty))
+    if not isinstance(price, Decimal):
+        price = Decimal(str(price))
+
+    if qty <= Decimal("0"):
         raise ValueError(f"qty must be positive, got {qty}")
-    if not math.isfinite(price) or price <= 0:
+    if not price.is_finite() or price <= Decimal("0"):
         raise ValueError(f"price must be positive and finite, got {price}")
     if seller == buyer:
         raise ValueError("seller and buyer must be different")
@@ -531,7 +553,7 @@ def stock_contract(
     view: LedgerView,
     symbol: str,
     timestamp: datetime,
-    prices: Dict[str, float],
+    prices: Dict[str, Decimal],
 ) -> PendingTransaction:
     """SmartContract for LifecycleEngine: process dividends."""
     return process_dividends(view, symbol, timestamp)

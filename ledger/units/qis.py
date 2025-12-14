@@ -26,12 +26,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Callable, Any
 import math
+from decimal import Decimal
 
 from ..core import (
     LedgerView, Move, PendingTransaction, Unit, UnitStateChange,
     QUANTITY_EPSILON,
     build_transaction, empty_pending_transaction,
     TransactionOrigin, OriginType,
+    _freeze_state,
 )
 
 
@@ -42,7 +44,7 @@ from ..core import (
 UNIT_TYPE_QIS = "QIS"
 
 # Days per year for financing calculations
-DAYS_PER_YEAR = 365.0
+DAYS_PER_YEAR = Decimal('365')
 
 
 # ============================================================================
@@ -53,8 +55,8 @@ DAYS_PER_YEAR = 365.0
 # - nav: current portfolio NAV
 # - prices: dict of asset prices
 # - state: QIS state dict (for access to params, history, etc.)
-# Returns: Dict[str, float] mapping asset symbols to target quantities
-Strategy = Callable[[float, Dict[str, float], Dict[str, Any]], Dict[str, float]]
+# Returns: Dict[str, Decimal] mapping asset symbols to target quantities
+Strategy = Callable[[Decimal, Dict[str, Decimal], Dict[str, Any]], Dict[str, Decimal]]
 
 
 # ============================================================================
@@ -62,10 +64,10 @@ Strategy = Callable[[float, Dict[str, float], Dict[str, Any]], Dict[str, float]]
 # ============================================================================
 
 def compute_nav(
-    holdings: Dict[str, float],
-    cash: float,
-    prices: Dict[str, float],
-) -> float:
+    holdings: Dict[str, Decimal],
+    cash: Decimal,
+    prices: Dict[str, Decimal],
+) -> Decimal:
     """
     Compute NAV of the hypothetical portfolio.
 
@@ -78,19 +80,28 @@ def compute_nav(
 
     Returns:
         Net Asset Value
+
+    Raises:
+        ValueError: if any holding has no price
     """
-    risky_value = sum(
-        qty * prices.get(symbol, 0.0)
-        for symbol, qty in holdings.items()
-    )
+    # Convert inputs to Decimal
+    cash = Decimal(str(cash)) if not isinstance(cash, Decimal) else cash
+    holdings = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in holdings.items()}
+    prices = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in prices.items()}
+
+    risky_value = Decimal('0')
+    for symbol, qty in holdings.items():
+        if symbol not in prices:
+            raise ValueError(f"Missing price for symbol '{symbol}' in NAV calculation")
+        risky_value += qty * prices[symbol]
     return risky_value + cash
 
 
 def accrue_financing(
-    cash: float,
-    rate: float,
-    days: float,
-) -> float:
+    cash: Decimal,
+    rate: Decimal,
+    days: Decimal,
+) -> Decimal:
     """
     Apply financing cost to cash balance using continuous compounding.
 
@@ -107,19 +118,24 @@ def accrue_financing(
     Returns:
         Updated cash balance after financing
     """
+    # Convert inputs to Decimal
+    cash = Decimal(str(cash)) if not isinstance(cash, Decimal) else cash
+    rate = Decimal(str(rate)) if not isinstance(rate, Decimal) else rate
+    days = Decimal(str(days)) if not isinstance(days, Decimal) else days
+
     if days <= 0 or abs(rate) < QUANTITY_EPSILON:
         return cash
 
     year_fraction = days / DAYS_PER_YEAR
-    return cash * math.exp(rate * year_fraction)
+    return cash * Decimal(str(math.exp(float(rate * year_fraction))))
 
 
 def compute_rebalance(
-    current_holdings: Dict[str, float],
-    current_cash: float,
-    target_holdings: Dict[str, float],
-    prices: Dict[str, float],
-) -> tuple[Dict[str, float], float]:
+    current_holdings: Dict[str, Decimal],
+    current_cash: Decimal,
+    target_holdings: Dict[str, Decimal],
+    prices: Dict[str, Decimal],
+) -> tuple[Dict[str, Decimal], Decimal]:
     """
     Execute a self-financing rebalance.
 
@@ -139,18 +155,26 @@ def compute_rebalance(
     - Buy delta shares -> cash decreases by delta * price
     - Sell delta shares -> cash increases by delta * price
     """
+    # Convert inputs to Decimal
+    current_cash = Decimal(str(current_cash)) if not isinstance(current_cash, Decimal) else current_cash
+    current_holdings = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in current_holdings.items()}
+    target_holdings = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in target_holdings.items()}
+    prices = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in prices.items()}
+
     # Compute NAV before
     nav_before = compute_nav(current_holdings, current_cash, prices)
 
     # Compute cash delta from trades
     all_symbols = set(current_holdings.keys()) | set(target_holdings.keys())
-    cash_delta = 0.0
+    cash_delta = Decimal('0')
 
     for symbol in all_symbols:
-        old_qty = current_holdings.get(symbol, 0.0)
-        new_qty = target_holdings.get(symbol, 0.0)
+        old_qty = current_holdings.get(symbol, Decimal('0'))
+        new_qty = target_holdings.get(symbol, Decimal('0'))
         delta = new_qty - old_qty
-        price = prices.get(symbol, 0.0)
+        if symbol not in prices:
+            raise ValueError(f"Missing price for symbol '{symbol}' in rebalance")
+        price = prices[symbol]
         # Buying (delta > 0) costs cash, selling recovers cash
         cash_delta -= delta * price
 
@@ -161,7 +185,7 @@ def compute_rebalance(
 
     # Verify self-financing (defense in depth)
     nav_after = compute_nav(new_holdings, new_cash, prices)
-    if abs(nav_after - nav_before) > 0.01:  # 1 cent tolerance
+    if abs(nav_after - nav_before) > Decimal('0.01'):  # 1 cent tolerance
         raise ValueError(
             f"Self-financing violated: NAV changed from {nav_before:.4f} to {nav_after:.4f}"
         )
@@ -170,10 +194,10 @@ def compute_rebalance(
 
 
 def compute_payoff(
-    final_nav: float,
-    initial_nav: float,
-    notional: float,
-) -> float:
+    final_nav: Decimal,
+    initial_nav: Decimal,
+    notional: Decimal,
+) -> Decimal:
     """
     Compute QIS payoff at maturity.
 
@@ -182,10 +206,15 @@ def compute_payoff(
     Positive: strategy made money, dealer pays investor
     Negative: strategy lost money, investor pays dealer
     """
+    # Convert inputs to Decimal
+    final_nav = Decimal(str(final_nav)) if not isinstance(final_nav, Decimal) else final_nav
+    initial_nav = Decimal(str(initial_nav)) if not isinstance(initial_nav, Decimal) else initial_nav
+    notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
+
     if initial_nav <= 0:
         raise ValueError(f"initial_nav must be positive, got {initial_nav}")
 
-    total_return = (final_nav / initial_nav) - 1.0
+    total_return = (final_nav / initial_nav) - Decimal('1')
     return notional * total_return
 
 
@@ -196,9 +225,9 @@ def compute_payoff(
 def create_qis(
     symbol: str,
     name: str,
-    notional: float,
-    initial_nav: float,
-    funding_rate: float,
+    notional: Decimal,
+    initial_nav: Decimal,
+    funding_rate: Decimal,
     payer_wallet: str,
     receiver_wallet: str,
     currency: str,
@@ -242,6 +271,11 @@ def create_qis(
             maturity_date=datetime(2025, 12, 31),
         )
     """
+    # Convert inputs to Decimal
+    notional = Decimal(str(notional)) if not isinstance(notional, Decimal) else notional
+    initial_nav = Decimal(str(initial_nav)) if not isinstance(initial_nav, Decimal) else initial_nav
+    funding_rate = Decimal(str(funding_rate)) if not isinstance(funding_rate, Decimal) else funding_rate
+
     # Validation
     if notional <= 0:
         raise ValueError(f"notional must be positive, got {notional}")
@@ -267,7 +301,7 @@ def create_qis(
         max_balance=1.0,
         decimal_places=0,
         transfer_rule=None,
-        _state={
+        _frozen_state=_freeze_state({
             # Term sheet (immutable)
             'notional': notional,
             'initial_nav': initial_nav,
@@ -292,7 +326,7 @@ def create_qis(
             'terminated': False,
             'final_nav': None,
             'final_return': None,
-        }
+        })
     )
 
 
@@ -304,7 +338,7 @@ def compute_qis_rebalance(
     view: LedgerView,
     symbol: str,
     strategy: Strategy,
-    prices: Dict[str, float],
+    prices: Dict[str, Decimal],
 ) -> PendingTransaction:
     """
     Execute a rebalancing of the QIS hypothetical portfolio.
@@ -318,6 +352,9 @@ def compute_qis_rebalance(
 
     No real moves occur - this is all within the hypothetical portfolio.
     """
+    # Convert prices to Decimal
+    prices = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in prices.items()}
+
     state = view.get_unit_state(symbol)
 
     if state.get('terminated'):
@@ -325,7 +362,7 @@ def compute_qis_rebalance(
 
     # Accrue financing
     last_date = state['last_rebalance_date']
-    days_elapsed = (view.current_time - last_date).total_seconds() / 86400.0
+    days_elapsed = Decimal(str((view.current_time - last_date).total_seconds() / 86400.0))
 
     current_cash = state['cash']
     cash_after_financing = accrue_financing(current_cash, state['funding_rate'], days_elapsed)
@@ -366,7 +403,7 @@ def compute_qis_rebalance(
 def compute_qis_settlement(
     view: LedgerView,
     symbol: str,
-    prices: Dict[str, float],
+    prices: Dict[str, Decimal],
 ) -> PendingTransaction:
     """
     Compute final settlement of the QIS at maturity.
@@ -376,6 +413,9 @@ def compute_qis_settlement(
     Positive payoff: dealer pays investor
     Negative payoff: investor pays dealer
     """
+    # Convert prices to Decimal
+    prices = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in prices.items()}
+
     state = view.get_unit_state(symbol)
 
     if state.get('terminated'):
@@ -383,7 +423,7 @@ def compute_qis_settlement(
 
     # Accrue final financing
     last_date = state['last_rebalance_date']
-    days_elapsed = (view.current_time - last_date).total_seconds() / 86400.0
+    days_elapsed = Decimal(str((view.current_time - last_date).total_seconds() / 86400.0))
 
     cash_after_financing = accrue_financing(state['cash'], state['funding_rate'], days_elapsed)
 
@@ -395,7 +435,7 @@ def compute_qis_settlement(
     initial_nav = state['initial_nav']
     notional = state['notional']
     payoff = compute_payoff(final_nav, initial_nav, notional)
-    total_return = (final_nav / initial_nav) - 1.0
+    total_return = (final_nav / initial_nav) - Decimal('1')
 
     # Generate settlement move
     payer = state['payer_wallet']
@@ -427,7 +467,7 @@ def compute_qis_settlement(
     new_state = {
         **state,
         'holdings': {},
-        'cash': 0.0,
+        'cash': Decimal('0'),
         'nav': final_nav,
         'terminated': True,
         'final_nav': final_nav,
@@ -445,7 +485,7 @@ def compute_qis_settlement(
 
 def qis_contract(
     strategy: Strategy,
-) -> Callable[[LedgerView, str, datetime, Dict[str, float]], PendingTransaction]:
+) -> Callable[[LedgerView, str, datetime, Dict[str, Decimal]], PendingTransaction]:
     """
     Create a QIS smart contract bound to a specific strategy.
 
@@ -468,8 +508,11 @@ def qis_contract(
         view: LedgerView,
         symbol: str,
         timestamp: datetime,
-        prices: Dict[str, float],
+        prices: Dict[str, Decimal],
     ) -> PendingTransaction:
+        # Convert prices to Decimal
+        prices = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in prices.items()}
+
         state = view.get_unit_state(symbol)
 
         if state.get('terminated'):
@@ -499,7 +542,7 @@ def qis_contract(
 # BUILT-IN STRATEGIES
 # ============================================================================
 
-def leveraged_strategy(underlying: str, leverage: float) -> Strategy:
+def leveraged_strategy(underlying: str, leverage: Decimal) -> Strategy:
     """
     Create a leveraged strategy for a single underlying.
 
@@ -508,19 +551,28 @@ def leveraged_strategy(underlying: str, leverage: float) -> Strategy:
 
     Args:
         underlying: Asset symbol to hold
-        leverage: Target leverage (e.g., 2.0 for 2x)
+        leverage: Target leverage (e.g., Decimal('2') for 2x)
 
     Returns:
         Strategy function
 
     Example:
         # 2x leveraged SPX
-        strategy = leveraged_strategy("SPX", 2.0)
+        strategy = leveraged_strategy("SPX", Decimal('2'))
     """
-    def strategy_fn(nav: float, prices: Dict[str, float], state: Dict[str, Any]) -> Dict[str, float]:
-        price = prices.get(underlying)
-        if not price or price <= 0:
-            return {}  # Can't trade without price
+    # Convert leverage to Decimal at strategy creation time
+    leverage = Decimal(str(leverage)) if not isinstance(leverage, Decimal) else leverage
+
+    def strategy_fn(nav: Decimal, prices: Dict[str, Decimal], state: Dict[str, Any]) -> Dict[str, Decimal]:
+        # Convert inputs to Decimal
+        nav = Decimal(str(nav)) if not isinstance(nav, Decimal) else nav
+        prices = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in prices.items()}
+
+        if underlying not in prices:
+            raise ValueError(f"Missing price for underlying '{underlying}' in leveraged strategy")
+        price = prices[underlying]
+        if price <= 0:
+            raise ValueError(f"Invalid price {price} for underlying '{underlying}'")
 
         target_value = leverage * nav
         target_qty = target_value / price
@@ -530,29 +582,39 @@ def leveraged_strategy(underlying: str, leverage: float) -> Strategy:
     return strategy_fn
 
 
-def fixed_weight_strategy(weights: Dict[str, float]) -> Strategy:
+def fixed_weight_strategy(weights: Dict[str, Decimal]) -> Strategy:
     """
     Create a fixed-weight allocation strategy.
 
     Maintains constant portfolio weights across assets.
 
     Args:
-        weights: Asset symbol -> target weight (should sum to <= 1.0)
+        weights: Asset symbol -> target weight (should sum to <= 1)
 
     Returns:
         Strategy function
 
     Example:
         # 60/40 equity/bond
-        strategy = fixed_weight_strategy({"SPX": 0.6, "TLT": 0.4})
+        strategy = fixed_weight_strategy({"SPX": Decimal('0.6'), "TLT": Decimal('0.4')})
     """
-    def strategy_fn(nav: float, prices: Dict[str, float], state: Dict[str, Any]) -> Dict[str, float]:
+    # Convert weights to Decimal at strategy creation time
+    weights = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in weights.items()}
+
+    def strategy_fn(nav: Decimal, prices: Dict[str, Decimal], state: Dict[str, Any]) -> Dict[str, Decimal]:
+        # Convert inputs to Decimal
+        nav = Decimal(str(nav)) if not isinstance(nav, Decimal) else nav
+        prices = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in prices.items()}
+
         holdings = {}
         for symbol, weight in weights.items():
-            price = prices.get(symbol)
-            if price and price > 0:
-                target_value = weight * nav
-                holdings[symbol] = target_value / price
+            if symbol not in prices:
+                raise ValueError(f"Missing price for symbol '{symbol}' in fixed weight strategy")
+            price = prices[symbol]
+            if price <= 0:
+                raise ValueError(f"Invalid price {price} for symbol '{symbol}'")
+            target_value = weight * nav
+            holdings[symbol] = target_value / price
         return holdings
 
     return strategy_fn
@@ -562,30 +624,40 @@ def fixed_weight_strategy(weights: Dict[str, float]) -> Strategy:
 # QUERY FUNCTIONS
 # ============================================================================
 
-def get_qis_nav(view: LedgerView, symbol: str, prices: Dict[str, float]) -> float:
+def get_qis_nav(view: LedgerView, symbol: str, prices: Dict[str, Decimal]) -> Decimal:
     """Get current NAV of a QIS given prices."""
+    # Convert prices to Decimal
+    prices = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in prices.items()}
     state = view.get_unit_state(symbol)
     return compute_nav(state['holdings'], state['cash'], prices)
 
 
-def get_qis_return(view: LedgerView, symbol: str, prices: Dict[str, float]) -> float:
+def get_qis_return(view: LedgerView, symbol: str, prices: Dict[str, Decimal]) -> Decimal:
     """Get current total return of a QIS."""
+    # Convert prices to Decimal
+    prices = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in prices.items()}
     state = view.get_unit_state(symbol)
     current_nav = compute_nav(state['holdings'], state['cash'], prices)
     initial_nav = state['initial_nav']
-    return (current_nav / initial_nav) - 1.0
+    return (current_nav / initial_nav) - Decimal('1')
 
 
-def get_qis_leverage(view: LedgerView, symbol: str, prices: Dict[str, float]) -> float:
+def get_qis_leverage(view: LedgerView, symbol: str, prices: Dict[str, Decimal]) -> Decimal:
     """Get current leverage ratio of a QIS."""
+    # Convert prices to Decimal
+    prices = {k: (Decimal(str(v)) if not isinstance(v, Decimal) else v) for k, v in prices.items()}
     state = view.get_unit_state(symbol)
     holdings = state['holdings']
     cash = state['cash']
 
-    risky_value = sum(qty * prices.get(s, 0) for s, qty in holdings.items())
+    risky_value = Decimal('0')
+    for s, qty in holdings.items():
+        if s not in prices:
+            raise ValueError(f"Missing price for symbol '{s}' in leverage calculation")
+        risky_value += qty * prices[s]
     nav = risky_value + cash
 
     if abs(nav) < QUANTITY_EPSILON:
-        return float('inf')
+        return Decimal('Infinity')
 
     return risky_value / nav

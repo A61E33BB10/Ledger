@@ -14,11 +14,14 @@ Tests cover:
 import pytest
 import math
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from ledger import (
     Ledger, cash, SYSTEM_WALLET, Move, build_transaction,
     UNIT_TYPE_QIS,
 )
+from ledger.core import _freeze_state
+from dataclasses import replace
 from ledger.units.qis import (
     compute_nav,
     accrue_financing,
@@ -35,7 +38,7 @@ from ledger.units.qis import (
     get_qis_leverage,
     DAYS_PER_YEAR,
 )
-from ledger.enhanced_lifecycle import LifecycleEngine
+from ledger.lifecycle_engine import LifecycleEngine
 
 
 # ============================================================================
@@ -48,37 +51,37 @@ class TestComputeNav:
     def test_cash_only(self):
         """NAV of cash-only portfolio equals cash."""
         nav = compute_nav({}, 1000.0, {})
-        assert nav == 1000.0
+        assert nav == Decimal("1000.0")
 
     def test_single_holding(self):
         """NAV = quantity * price + cash."""
-        holdings = {"SPX": 10.0}
-        prices = {"SPX": 100.0}
+        holdings = {"SPX": Decimal("10.0")}
+        prices = {"SPX": Decimal("100.0")}
         nav = compute_nav(holdings, 0.0, prices)
-        assert nav == 1000.0
+        assert nav == Decimal("1000.0")
 
     def test_multiple_holdings(self):
         """NAV = sum of all holdings + cash."""
-        holdings = {"SPX": 10.0, "TLT": 20.0}
-        prices = {"SPX": 100.0, "TLT": 50.0}
+        holdings = {"SPX": Decimal("10.0"), "TLT": Decimal("20.0")}
+        prices = {"SPX": Decimal("100.0"), "TLT": Decimal("50.0")}
         # 10*100 + 20*50 = 1000 + 1000 = 2000
         nav = compute_nav(holdings, 500.0, prices)
-        assert nav == 2500.0
+        assert nav == Decimal("2500.0")
 
     def test_negative_cash_leverage(self):
         """Leveraged portfolio: holdings > NAV, cash < 0."""
         # 2x leverage: $200 in stock, -$100 cash, NAV = $100
-        holdings = {"SPX": 2.0}
-        prices = {"SPX": 100.0}
+        holdings = {"SPX": Decimal("2.0")}
+        prices = {"SPX": Decimal("100.0")}
         nav = compute_nav(holdings, -100.0, prices)
-        assert nav == 100.0
+        assert nav == Decimal("100.0")
 
-    def test_missing_price_treated_as_zero(self):
-        """Missing prices are treated as 0."""
-        holdings = {"SPX": 10.0, "UNKNOWN": 5.0}
-        prices = {"SPX": 100.0}  # UNKNOWN not in prices
-        nav = compute_nav(holdings, 0.0, prices)
-        assert nav == 1000.0  # UNKNOWN contributes 0
+    def test_missing_price_raises_error(self):
+        """Missing prices raise ValueError."""
+        holdings = {"SPX": Decimal("10.0"), "UNKNOWN": Decimal("5.0")}
+        prices = {"SPX": Decimal("100.0")}  # UNKNOWN not in prices
+        with pytest.raises(ValueError, match="Missing price for symbol 'UNKNOWN'"):
+            compute_nav(holdings, 0.0, prices)
 
 
 class TestAccrueFinancing:
@@ -87,33 +90,33 @@ class TestAccrueFinancing:
     def test_zero_days_no_change(self):
         """Zero days means no financing accrual."""
         result = accrue_financing(1000.0, 0.05, 0)
-        assert result == 1000.0
+        assert result == Decimal("1000.0")
 
     def test_positive_cash_earns_interest(self):
         """Positive cash earns interest."""
         # $1000 at 5% for 365 days = $1000 * e^0.05 ≈ $1051.27
         result = accrue_financing(1000.0, 0.05, 365)
         expected = 1000.0 * math.exp(0.05)
-        assert abs(result - expected) < 0.01
+        assert float(result) == pytest.approx(expected, abs=0.01)
 
     def test_negative_cash_accrues_cost(self):
         """Negative cash (borrowing) becomes more negative."""
         # -$1000 at 5% for 365 days = -$1000 * e^0.05 ≈ -$1051.27
         result = accrue_financing(-1000.0, 0.05, 365)
         expected = -1000.0 * math.exp(0.05)
-        assert abs(result - expected) < 0.01
-        assert result < -1000.0  # More negative
+        assert float(result) == pytest.approx(expected, abs=0.01)
+        assert result < Decimal("-1000.0")  # More negative
 
     def test_zero_rate_no_change(self):
         """Zero rate means no financing."""
         result = accrue_financing(1000.0, 0.0, 365)
-        assert result == 1000.0
+        assert result == Decimal("1000.0")
 
     def test_daily_financing(self):
         """Single day financing."""
         result = accrue_financing(1000.0, 0.05, 1)
         expected = 1000.0 * math.exp(0.05 / 365)
-        assert abs(result - expected) < 0.0001
+        assert float(result) == pytest.approx(expected, abs=0.0001)
 
 
 class TestComputeRebalance:
@@ -122,30 +125,30 @@ class TestComputeRebalance:
     def test_buy_decreases_cash(self):
         """Buying shares decreases cash."""
         current = {}
-        target = {"SPX": 10.0}
-        prices = {"SPX": 100.0}
+        target = {"SPX": Decimal("10.0")}
+        prices = {"SPX": Decimal("100.0")}
 
         new_holdings, new_cash = compute_rebalance(current, 1000.0, target, prices)
 
-        assert new_holdings == {"SPX": 10.0}
-        assert new_cash == 0.0  # 1000 - 10*100 = 0
+        assert new_holdings == {"SPX": Decimal("10.0")}
+        assert new_cash == Decimal("0.0")  # 1000 - 10*100 = 0
 
     def test_sell_increases_cash(self):
         """Selling shares increases cash."""
-        current = {"SPX": 10.0}
+        current = {"SPX": Decimal("10.0")}
         target = {}
-        prices = {"SPX": 100.0}
+        prices = {"SPX": Decimal("100.0")}
 
         new_holdings, new_cash = compute_rebalance(current, 0.0, target, prices)
 
         assert new_holdings == {}
-        assert new_cash == 1000.0  # 0 + 10*100 = 1000
+        assert new_cash == Decimal("1000.0")  # 0 + 10*100 = 1000
 
     def test_self_financing_preserved(self):
         """NAV before = NAV after (self-financing constraint)."""
-        current = {"SPX": 10.0, "TLT": 20.0}
-        target = {"SPX": 15.0, "TLT": 10.0}
-        prices = {"SPX": 100.0, "TLT": 50.0}
+        current = {"SPX": Decimal("10.0"), "TLT": Decimal("20.0")}
+        target = {"SPX": Decimal("15.0"), "TLT": Decimal("10.0")}
+        prices = {"SPX": Decimal("100.0"), "TLT": Decimal("50.0")}
         initial_cash = 500.0
 
         # NAV before: 10*100 + 20*50 + 500 = 2500
@@ -161,19 +164,19 @@ class TestComputeRebalance:
         """Leverage creates negative cash balance."""
         # Start with $100 cash, want $200 in stock (2x leverage)
         current = {}
-        target = {"SPX": 2.0}
-        prices = {"SPX": 100.0}
+        target = {"SPX": Decimal("2.0")}
+        prices = {"SPX": Decimal("100.0")}
 
         new_holdings, new_cash = compute_rebalance(current, 100.0, target, prices)
 
-        assert new_holdings == {"SPX": 2.0}
-        assert new_cash == -100.0  # 100 - 2*100 = -100 (borrowed)
+        assert new_holdings == {"SPX": Decimal("2.0")}
+        assert new_cash == Decimal("-100.0")  # 100 - 2*100 = -100 (borrowed)
 
     def test_zero_holdings_cleaned_up(self):
         """Near-zero holdings are removed."""
-        current = {"SPX": 10.0}
-        target = {"SPX": 0.0}
-        prices = {"SPX": 100.0}
+        current = {"SPX": Decimal("10.0")}
+        target = {"SPX": Decimal("0.0")}
+        prices = {"SPX": Decimal("100.0")}
 
         new_holdings, new_cash = compute_rebalance(current, 0.0, target, prices)
 
@@ -188,19 +191,19 @@ class TestComputePayoff:
         # V_T = 120, V_0 = 100, N = 1000
         # Payoff = 1000 * (120/100 - 1) = 1000 * 0.2 = 200
         payoff = compute_payoff(120.0, 100.0, 1000.0)
-        assert abs(payoff - 200.0) < 0.01
+        assert float(payoff) == pytest.approx(200.0, abs=0.01)
 
     def test_negative_return(self):
         """Negative return = negative payoff."""
         # V_T = 80, V_0 = 100, N = 1000
         # Payoff = 1000 * (80/100 - 1) = 1000 * -0.2 = -200
         payoff = compute_payoff(80.0, 100.0, 1000.0)
-        assert abs(payoff - (-200.0)) < 0.01
+        assert float(payoff) == pytest.approx(-200.0, abs=0.01)
 
     def test_zero_return(self):
         """Zero return = zero payoff."""
         payoff = compute_payoff(100.0, 100.0, 1000.0)
-        assert abs(payoff) < 0.01
+        assert float(payoff) == pytest.approx(0.0, abs=0.01)
 
     def test_invalid_initial_nav(self):
         """Initial NAV must be positive."""
@@ -233,11 +236,11 @@ class TestCreateQIS:
 
         assert qis.symbol == "QIS_TEST"
         assert qis.unit_type == UNIT_TYPE_QIS
-        assert qis._state['notional'] == 1_000_000
-        assert qis._state['initial_nav'] == 100.0
-        assert qis._state['cash'] == 100.0  # Starts in cash
-        assert qis._state['holdings'] == {}
-        assert qis._state['terminated'] == False
+        assert qis.state['notional'] == 1_000_000
+        assert qis.state['initial_nav'] == 100.0
+        assert qis.state['cash'] == 100.0  # Starts in cash
+        assert qis.state['holdings'] == {}
+        assert qis.state['terminated'] == False
 
     def test_validation_notional_positive(self):
         """Notional must be positive."""
@@ -273,34 +276,33 @@ class TestLeveragedStrategy:
 
     def test_2x_leverage(self):
         """2x leverage targets 200% exposure."""
-        strategy = leveraged_strategy("SPX", 2.0)
+        strategy = leveraged_strategy("SPX", Decimal("2.0"))
         nav = 100.0
-        prices = {"SPX": 50.0}
+        prices = {"SPX": Decimal("50.0")}
 
         target = strategy(nav, prices, {})
 
         # Target value = 2 * 100 = 200
         # Target qty = 200 / 50 = 4
-        assert abs(target["SPX"] - 4.0) < 0.01
+        assert float(target["SPX"]) == pytest.approx(4.0, abs=0.01)
 
     def test_1x_no_leverage(self):
         """1x leverage = fully invested, no borrowing."""
-        strategy = leveraged_strategy("SPX", 1.0)
+        strategy = leveraged_strategy("SPX", Decimal("1.0"))
         nav = 100.0
-        prices = {"SPX": 50.0}
+        prices = {"SPX": Decimal("50.0")}
 
         target = strategy(nav, prices, {})
 
         # Target value = 1 * 100 = 100
         # Target qty = 100 / 50 = 2
-        assert abs(target["SPX"] - 2.0) < 0.01
+        assert float(target["SPX"]) == pytest.approx(2.0, abs=0.01)
 
-    def test_missing_price_returns_empty(self):
-        """Missing price returns empty holdings."""
-        strategy = leveraged_strategy("SPX", 2.0)
-        target = strategy(100.0, {}, {})  # No prices
-
-        assert target == {}
+    def test_missing_price_raises_error(self):
+        """Missing price raises ValueError."""
+        strategy = leveraged_strategy("SPX", Decimal("2.0"))
+        with pytest.raises(ValueError, match="Missing price for underlying 'SPX'"):
+            strategy(100.0, {}, {})  # No prices
 
 
 class TestFixedWeightStrategy:
@@ -308,16 +310,16 @@ class TestFixedWeightStrategy:
 
     def test_60_40_allocation(self):
         """60/40 allocation between two assets."""
-        strategy = fixed_weight_strategy({"SPX": 0.6, "TLT": 0.4})
+        strategy = fixed_weight_strategy({"SPX": Decimal("0.6"), "TLT": Decimal("0.4")})
         nav = 1000.0
-        prices = {"SPX": 100.0, "TLT": 50.0}
+        prices = {"SPX": Decimal("100.0"), "TLT": Decimal("50.0")}
 
         target = strategy(nav, prices, {})
 
         # SPX: 0.6 * 1000 / 100 = 6 shares
         # TLT: 0.4 * 1000 / 50 = 8 shares
-        assert abs(target["SPX"] - 6.0) < 0.01
-        assert abs(target["TLT"] - 8.0) < 0.01
+        assert float(target["SPX"]) == pytest.approx(6.0, abs=0.01)
+        assert float(target["TLT"]) == pytest.approx(8.0, abs=0.01)
 
 
 # ============================================================================
@@ -330,7 +332,7 @@ class TestQISLifecycle:
     @pytest.fixture
     def ledger(self):
         """Create a ledger with QIS setup."""
-        ledger = Ledger("qis_test", initial_time=datetime(2025, 1, 1))
+        ledger = Ledger("qis_test", initial_time=datetime(2025, 1, 1), test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("dealer")
         ledger.register_wallet("investor")
@@ -338,8 +340,8 @@ class TestQISLifecycle:
 
         # Fund wallets
         fund = build_transaction(ledger, [
-            Move(10_000_000.0, "USD", SYSTEM_WALLET, "dealer", "fund_dealer"),
-            Move(1_000_000.0, "USD", SYSTEM_WALLET, "investor", "fund_investor"),
+            Move(Decimal("10000000"), "USD", SYSTEM_WALLET, "dealer", "fund_dealer"),
+            Move(Decimal("1000000"), "USD", SYSTEM_WALLET, "investor", "fund_investor"),
         ])
         ledger.execute(fund)
 
@@ -367,8 +369,8 @@ class TestQISLifecycle:
         ledger.advance_time(datetime(2025, 1, 15))
 
         # Define strategy
-        strategy = leveraged_strategy("SPX", 2.0)
-        prices = {"SPX": 50.0}
+        strategy = leveraged_strategy("SPX", Decimal("2.0"))
+        prices = {"SPX": Decimal("50.0")}
 
         # Rebalance
         tx = compute_qis_rebalance(ledger, "QIS_TEST", strategy, prices)
@@ -378,7 +380,7 @@ class TestQISLifecycle:
         state = ledger.get_unit_state("QIS_TEST")
         assert "SPX" in state['holdings']
         assert state['holdings']["SPX"] == 4.0  # 2*100/50 = 4
-        assert state['cash'] == -100.0  # 100 - 4*50 = -100
+        assert state['cash'] == Decimal("-100.0")  # 100 - 4*50 = -100
 
     def test_settlement_positive_return(self, ledger):
         """Settlement with positive return: dealer pays investor."""
@@ -400,9 +402,11 @@ class TestQISLifecycle:
 
         # Set initial holdings manually for test
         state = ledger.get_unit_state("QIS_TEST")
-        state['holdings'] = {"SPX": 1.0}
+        state['holdings'] = {"SPX": Decimal("1.0")}
         state['cash'] = 0.0
-        ledger.units["QIS_TEST"]._state = state
+        old_unit = ledger.units["QIS_TEST"]
+        new_unit = replace(old_unit, _frozen_state=_freeze_state(state))
+        ledger.units["QIS_TEST"] = new_unit
 
         ledger.advance_time(datetime(2025, 12, 31))
 
@@ -410,7 +414,7 @@ class TestQISLifecycle:
         initial_balance_dealer = ledger.get_balance("dealer", "USD")
         initial_balance_investor = ledger.get_balance("investor", "USD")
 
-        prices = {"SPX": 120.0}
+        prices = {"SPX": Decimal("120.0")}
         tx = compute_qis_settlement(ledger, "QIS_TEST", prices)
         ledger.execute(tx)
 
@@ -418,7 +422,7 @@ class TestQISLifecycle:
         # Payoff = 1_000_000 * 0.20 = 200_000
         final_state = ledger.get_unit_state("QIS_TEST")
         assert final_state['terminated'] == True
-        assert abs(final_state['final_return'] - 0.2) < 0.01
+        assert float(final_state['final_return']) == pytest.approx(0.2, abs=0.01)
 
         # Dealer paid investor
         assert ledger.get_balance("dealer", "USD") < initial_balance_dealer
@@ -435,15 +439,15 @@ class TestQISContract:
     @pytest.fixture
     def ledger(self):
         """Create a ledger with QIS setup."""
-        ledger = Ledger("qis_test", initial_time=datetime(2025, 1, 1))
+        ledger = Ledger("qis_test", initial_time=datetime(2025, 1, 1), test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("dealer")
         ledger.register_wallet("investor")
         # SYSTEM_WALLET is auto-registered
 
         fund = build_transaction(ledger, [
-            Move(10_000_000.0, "USD", SYSTEM_WALLET, "dealer", "fund_dealer"),
-            Move(1_000_000.0, "USD", SYSTEM_WALLET, "investor", "fund_investor"),
+            Move(Decimal("10000000"), "USD", SYSTEM_WALLET, "dealer", "fund_dealer"),
+            Move(Decimal("1000000"), "USD", SYSTEM_WALLET, "investor", "fund_investor"),
         ])
         ledger.execute(fund)
 
@@ -467,16 +471,16 @@ class TestQISContract:
         )
         ledger.register_unit(qis)
 
-        strategy = leveraged_strategy("SPX", 2.0)
+        strategy = leveraged_strategy("SPX", Decimal("2.0"))
         contract = qis_contract(strategy)
 
         # Before rebalance date - no action
-        tx = contract(ledger, "QIS_TEST", datetime(2025, 1, 10), {"SPX": 50.0})
+        tx = contract(ledger, "QIS_TEST", datetime(2025, 1, 10), {"SPX": Decimal("50.0")})
         assert tx.is_empty()
 
         # On rebalance date - triggers
         ledger.advance_time(datetime(2025, 1, 15))
-        tx = contract(ledger, "QIS_TEST", datetime(2025, 1, 15), {"SPX": 50.0})
+        tx = contract(ledger, "QIS_TEST", datetime(2025, 1, 15), {"SPX": Decimal("50.0")})
         assert not tx.is_empty()
 
     def test_contract_triggers_settlement_at_maturity(self, ledger):
@@ -497,20 +501,22 @@ class TestQISContract:
         )
         ledger.register_unit(qis)
 
-        strategy = leveraged_strategy("SPX", 1.0)
+        strategy = leveraged_strategy("SPX", Decimal("1.0"))
         contract = qis_contract(strategy)
 
         # Set up holdings
         state = ledger.get_unit_state("QIS_TEST")
-        state['holdings'] = {"SPX": 1.0}
+        state['holdings'] = {"SPX": Decimal("1.0")}
         state['cash'] = 0.0
         state['next_rebalance_idx'] = 1  # Skip rebalance
-        ledger.units["QIS_TEST"]._state = state
+        old_unit = ledger.units["QIS_TEST"]
+        new_unit = replace(old_unit, _frozen_state=_freeze_state(state))
+        ledger.units["QIS_TEST"] = new_unit
 
         ledger.advance_time(datetime(2025, 3, 1))
 
         # At maturity - triggers settlement
-        tx = contract(ledger, "QIS_TEST", datetime(2025, 3, 1), {"SPX": 110.0})
+        tx = contract(ledger, "QIS_TEST", datetime(2025, 3, 1), {"SPX": Decimal("110.0")})
         assert not tx.is_empty()
         assert len(tx.moves) == 1  # Settlement payment
 
@@ -541,7 +547,7 @@ class TestLeveraged2xETFDemo:
         """
         # Setup
         inception = datetime(2025, 1, 1)
-        ledger = Ledger("2x_etf", initial_time=inception)
+        ledger = Ledger("2x_etf", initial_time=inception, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("dealer")
         ledger.register_wallet("investor")
@@ -549,8 +555,8 @@ class TestLeveraged2xETFDemo:
 
         # Fund wallets
         fund = build_transaction(ledger, [
-            Move(1_000_000.0, "USD", SYSTEM_WALLET, "dealer", "fund"),
-            Move(100_000.0, "USD", SYSTEM_WALLET, "investor", "fund"),
+            Move(Decimal("1000000"), "USD", SYSTEM_WALLET, "dealer", "fund"),
+            Move(Decimal("100000"), "USD", SYSTEM_WALLET, "investor", "fund"),
         ])
         ledger.execute(fund)
 
@@ -578,7 +584,7 @@ class TestLeveraged2xETFDemo:
         )
         ledger.register_unit(qis)
 
-        strategy = leveraged_strategy("SPX", 2.0)
+        strategy = leveraged_strategy("SPX", Decimal("2.0"))
         contract = qis_contract(strategy)
 
         # Price path: 100 -> 102 -> 99 -> 101
@@ -627,14 +633,14 @@ class TestConservationLaws:
 
     def test_self_financing_throughout_lifecycle(self):
         """Self-financing constraint holds for all rebalances."""
-        ledger = Ledger("conservation", initial_time=datetime(2025, 1, 1))
+        ledger = Ledger("conservation", initial_time=datetime(2025, 1, 1), test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("dealer")
         ledger.register_wallet("investor")
         # SYSTEM_WALLET is auto-registered
 
         fund = build_transaction(ledger, [
-            Move(1_000_000.0, "USD", SYSTEM_WALLET, "dealer", "fund"),
+            Move(Decimal("1000000"), "USD", SYSTEM_WALLET, "dealer", "fund"),
         ])
         ledger.execute(fund)
 
@@ -659,18 +665,18 @@ class TestConservationLaws:
 
         # Varying allocation strategy
         def varying_strategy(nav, prices, state):
-            count = state.get('rebalance_count', 0)
+            count = state.get('rebalance_count', Decimal("0"))
             if count == 0:
                 return {"SPX": nav / prices["SPX"]}  # 100% SPX
             elif count == 1:
                 return {
-                    "SPX": 0.5 * nav / prices["SPX"],
-                    "TLT": 0.5 * nav / prices["TLT"],
+                    "SPX": Decimal("0.5") * nav / prices["SPX"],
+                    "TLT": Decimal("0.5") * nav / prices["TLT"],
                 }  # 50/50
             else:
                 return {"TLT": nav / prices["TLT"]}  # 100% TLT
 
-        prices = {"SPX": 100.0, "TLT": 50.0}
+        prices = {"SPX": Decimal("100.0"), "TLT": Decimal("50.0")}
 
         for i, date in enumerate([datetime(2025, 1, 1), datetime(2025, 1, 2), datetime(2025, 1, 3)]):
             ledger.advance_time(date)
@@ -686,15 +692,15 @@ class TestConservationLaws:
 
     def test_settlement_conserves_cash(self):
         """Settlement is a pure transfer between wallets."""
-        ledger = Ledger("settlement_cons", initial_time=datetime(2025, 1, 1))
+        ledger = Ledger("settlement_cons", initial_time=datetime(2025, 1, 1), test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("dealer")
         ledger.register_wallet("investor")
         # SYSTEM_WALLET is auto-registered
 
         fund = build_transaction(ledger, [
-            Move(1_000_000.0, "USD", SYSTEM_WALLET, "dealer", "fund"),
-            Move(100_000.0, "USD", SYSTEM_WALLET, "investor", "fund"),
+            Move(Decimal("1000000"), "USD", SYSTEM_WALLET, "dealer", "fund"),
+            Move(Decimal("100000"), "USD", SYSTEM_WALLET, "investor", "fund"),
         ])
         ledger.execute(fund)
 
@@ -715,10 +721,12 @@ class TestConservationLaws:
 
         # Set up a position
         state = ledger.get_unit_state("QIS_SETT")
-        state['holdings'] = {"SPX": 1.0}
+        state['holdings'] = {"SPX": Decimal("1.0")}
         state['cash'] = 0.0
         state['next_rebalance_idx'] = 1
-        ledger.units["QIS_SETT"]._state = state
+        old_unit = ledger.units["QIS_SETT"]
+        new_unit = replace(old_unit, _frozen_state=_freeze_state(state))
+        ledger.units["QIS_SETT"] = new_unit
 
         # Get total USD before settlement
         total_before = (
@@ -727,7 +735,7 @@ class TestConservationLaws:
         )
 
         ledger.advance_time(datetime(2025, 1, 2))
-        tx = compute_qis_settlement(ledger, "QIS_SETT", {"SPX": 110.0})
+        tx = compute_qis_settlement(ledger, "QIS_SETT", {"SPX": Decimal("110.0")})
         ledger.execute(tx)
 
         # Total USD after settlement (between dealer and investor only)
@@ -750,7 +758,7 @@ class TestQueryFunctions:
     @pytest.fixture
     def ledger_with_qis(self):
         """Create a ledger with a QIS that has positions."""
-        ledger = Ledger("query_test", initial_time=datetime(2025, 1, 1))
+        ledger = Ledger("query_test", initial_time=datetime(2025, 1, 1), test_mode=True)
         qis = create_qis(
             symbol="QIS_QUERY",
             name="Query Test",
@@ -768,35 +776,37 @@ class TestQueryFunctions:
 
         # Set up 2x leveraged position
         state = ledger.get_unit_state("QIS_QUERY")
-        state['holdings'] = {"SPX": 2.0}  # 2 shares at $100 = $200
-        state['cash'] = -100.0  # Borrowed $100
-        ledger.units["QIS_QUERY"]._state = state
+        state['holdings'] = {"SPX": Decimal("2.0")}  # 2 shares at $100 = $200
+        state['cash'] = Decimal("-100.0")  # Borrowed $100
+        old_unit = ledger.units["QIS_QUERY"]
+        new_unit = replace(old_unit, _frozen_state=_freeze_state(state))
+        ledger.units["QIS_QUERY"] = new_unit
 
         return ledger
 
     def test_get_qis_nav(self, ledger_with_qis):
         """get_qis_nav returns current NAV."""
-        prices = {"SPX": 100.0}
+        prices = {"SPX": Decimal("100.0")}
         nav = get_qis_nav(ledger_with_qis, "QIS_QUERY", prices)
         # 2*100 - 100 = 100
-        assert abs(nav - 100.0) < 0.01
+        assert abs(nav - Decimal("100.0")) < Decimal("0.01")
 
     def test_get_qis_return(self, ledger_with_qis):
         """get_qis_return returns current total return."""
         # Price unchanged, NAV unchanged, return = 0
-        prices = {"SPX": 100.0}
+        prices = {"SPX": Decimal("100.0")}
         ret = get_qis_return(ledger_with_qis, "QIS_QUERY", prices)
-        assert abs(ret) < 0.01
+        assert float(ret) == pytest.approx(0.0, abs=0.01)
 
         # Price up 10%, NAV should be up ~20% (2x leverage)
-        prices = {"SPX": 110.0}
+        prices = {"SPX": Decimal("110.0")}
         ret = get_qis_return(ledger_with_qis, "QIS_QUERY", prices)
         # NAV = 2*110 - 100 = 120, return = 20%
-        assert abs(ret - 0.20) < 0.01
+        assert float(ret) == pytest.approx(0.20, abs=0.01)
 
     def test_get_qis_leverage(self, ledger_with_qis):
         """get_qis_leverage returns current leverage ratio."""
-        prices = {"SPX": 100.0}
+        prices = {"SPX": Decimal("100.0")}
         leverage = get_qis_leverage(ledger_with_qis, "QIS_QUERY", prices)
         # Risky value = 200, NAV = 100, leverage = 2.0
-        assert abs(leverage - 2.0) < 0.01
+        assert float(leverage) == pytest.approx(2.0, abs=0.01)

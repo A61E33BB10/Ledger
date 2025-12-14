@@ -17,6 +17,7 @@ Reproducibility is critical for:
 
 import pytest
 from datetime import datetime, timedelta
+from decimal import Decimal
 from ledger import (
     Ledger, Move, cash, UnitStateChange, build_transaction,
     create_stock_unit,
@@ -45,16 +46,16 @@ class TestTransactionIdDeterminism:
 
     def test_same_moves_same_id(self):
         """Same moves should produce same transaction ID."""
-        ledger1 = Ledger("test")
-        ledger2 = Ledger("test")
+        ledger1 = Ledger("test", test_mode=True)
+        ledger2 = Ledger("test", test_mode=True)
 
         for ledger in [ledger1, ledger2]:
             ledger.register_unit(cash("USD", "US Dollar"))
             ledger.register_wallet("alice")
             ledger.register_wallet("bob")
-            ledger.set_balance("alice", "USD", 1000)
+            ledger.set_balance("alice", "USD", Decimal("1000"))
 
-        move = Move(100.0, "USD", "alice", "bob", "payment_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "payment_001")
 
         tx1 = build_transaction(ledger1, [move])
         tx2 = build_transaction(ledger2, [move])
@@ -64,42 +65,42 @@ class TestTransactionIdDeterminism:
 
     def test_different_moves_different_intent_id(self):
         """Different moves should produce different intent_ids."""
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.set_balance("alice", "USD", 1000)
+        ledger.set_balance("alice", "USD", Decimal("1000"))
 
         tx1 = build_transaction(ledger, [
-            Move(100.0, "USD", "alice", "bob", "payment_001")
+            Move(Decimal("100.0"), "USD", "alice", "bob", "payment_001")
         ])
         tx2 = build_transaction(ledger, [
-            Move(200.0, "USD", "alice", "bob", "payment_002")
+            Move(Decimal("200.0"), "USD", "alice", "bob", "payment_002")
         ])
 
         assert tx1.intent_id != tx2.intent_id
 
     def test_move_order_does_not_affect_intent_id(self):
         """Move order should NOT affect intent_id (moves are sorted before hashing)."""
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
         ledger.register_wallet("charlie")
-        ledger.set_balance("alice", "USD", 1000)
+        ledger.set_balance("alice", "USD", Decimal("1000"))
 
-        move1 = Move(50.0, "USD", "alice", "bob", "p1")
-        move2 = Move(50.0, "USD", "alice", "charlie", "p2")
+        move1 = Move(Decimal("50.0"), "USD", "alice", "bob", "p1")
+        move2 = Move(Decimal("50.0"), "USD", "alice", "charlie", "p2")
 
         tx1 = build_transaction(ledger, [move1, move2])
 
         # Reset and do in different order
-        ledger2 = Ledger("test")
+        ledger2 = Ledger("test", test_mode=True)
         ledger2.register_unit(cash("USD", "US Dollar"))
         ledger2.register_wallet("alice")
         ledger2.register_wallet("bob")
         ledger2.register_wallet("charlie")
-        ledger2.set_balance("alice", "USD", 1000)
+        ledger2.set_balance("alice", "USD", Decimal("1000"))
 
         tx2 = build_transaction(ledger2, [move2, move1])
 
@@ -108,16 +109,16 @@ class TestTransactionIdDeterminism:
 
     def test_timestamp_does_not_affect_intent_id(self):
         """Different timestamps should NOT affect intent_id (content-based hash)."""
-        ledger1 = Ledger("test", initial_time=datetime(2025, 1, 1))
-        ledger2 = Ledger("test", initial_time=datetime(2025, 1, 2))
+        ledger1 = Ledger("test", initial_time=datetime(2025, 1, 1), test_mode=True)
+        ledger2 = Ledger("test", initial_time=datetime(2025, 1, 2), test_mode=True)
 
         for ledger in [ledger1, ledger2]:
             ledger.register_unit(cash("USD", "US Dollar"))
             ledger.register_wallet("alice")
             ledger.register_wallet("bob")
-            ledger.set_balance("alice", "USD", 1000)
+            ledger.set_balance("alice", "USD", Decimal("1000"))
 
-        move = Move(100.0, "USD", "alice", "bob", "payment_001")
+        move = Move(Decimal("100.0"), "USD", "alice", "bob", "payment_001")
 
         tx1 = build_transaction(ledger1, [move])
         tx2 = build_transaction(ledger2, [move])
@@ -131,20 +132,20 @@ class TestCloneReproducibility:
 
     def test_clone_produces_identical_state(self):
         """Cloning a ledger produces identical state."""
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(_stock("AAPL", "Apple Inc", "aapl_issuer"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.set_balance("alice", "USD", 10000)
-        ledger.set_balance("alice", "AAPL", 100)
+        ledger.set_balance("alice", "USD", Decimal("10000"))
+        ledger.set_balance("alice", "AAPL", Decimal("100"))
 
         # Execute some transactions
         ledger.execute(build_transaction(ledger, [
-            Move(500.0, "USD", "alice", "bob", "tx1")
+            Move(Decimal("500.0"), "USD", "alice", "bob", "tx1")
         ]))
         ledger.execute(build_transaction(ledger, [
-            Move(10.0, "AAPL", "alice", "bob", "tx2")
+            Move(Decimal("10.0"), "AAPL", "alice", "bob", "tx2")
         ]))
 
         # Clone
@@ -158,18 +159,18 @@ class TestCloneReproducibility:
 
     def test_clone_is_independent(self):
         """Changes to clone don't affect original."""
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.set_balance("alice", "USD", 1000)
+        ledger.set_balance("alice", "USD", Decimal("1000"))
 
         clone = ledger.clone()
         original_balance = ledger.get_balance("alice", "USD")
 
         # Modify clone
         clone.execute(build_transaction(clone, [
-            Move(500.0, "USD", "alice", "bob", "tx1")
+            Move(Decimal("500.0"), "USD", "alice", "bob", "tx1")
         ]))
 
         # Original unchanged
@@ -177,14 +178,14 @@ class TestCloneReproducibility:
 
     def test_multiple_clones_identical(self):
         """Multiple clones are identical."""
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.set_balance("alice", "USD", 1000)
+        ledger.set_balance("alice", "USD", Decimal("1000"))
 
         ledger.execute(build_transaction(ledger, [
-            Move(100.0, "USD", "alice", "bob", "tx1")
+            Move(Decimal("100.0"), "USD", "alice", "bob", "tx1")
         ]))
 
         clone1 = ledger.clone()
@@ -208,17 +209,17 @@ class TestReplayReproducibility:
         1. replay() produces the same result each time
         2. The transaction effects (deltas) are correctly applied
         """
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(_stock("AAPL", "Apple Inc", "issuer"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.set_balance("alice", "USD", 10000)
-        ledger.set_balance("bob", "USD", 5000)
+        ledger.set_balance("alice", "USD", Decimal("10000"))
+        ledger.set_balance("bob", "USD", Decimal("5000"))
 
         # Execute transactions
-        tx1 = build_transaction(ledger, [Move(100.0, "USD", "alice", "bob", "p1")])
-        tx2 = build_transaction(ledger, [Move(50.0, "USD", "bob", "alice", "p2")])
+        tx1 = build_transaction(ledger, [Move(Decimal("100.0"), "USD", "alice", "bob", "p1")])
+        tx2 = build_transaction(ledger, [Move(Decimal("50.0"), "USD", "bob", "alice", "p2")])
         ledger.execute(tx1)
         ledger.execute(tx2)
 
@@ -233,19 +234,19 @@ class TestReplayReproducibility:
         assert replayed1.get_balance("bob", "USD") == replayed2.get_balance("bob", "USD")
 
         # Verify the expected deltas were applied
-        assert replayed1.get_balance("alice", "USD") == -50.0  # 0 - 100 + 50
-        assert replayed1.get_balance("bob", "USD") == 50.0     # 0 + 100 - 50
+        assert replayed1.get_balance("alice", "USD") == Decimal("-50.0")  # 0 - 100 + 50
+        assert replayed1.get_balance("bob", "USD") == Decimal("50.0")     # 0 + 100 - 50
 
     def test_multiple_replays_identical(self):
         """Multiple replays produce identical states."""
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.set_balance("alice", "USD", 1000)
+        ledger.set_balance("alice", "USD", Decimal("1000"))
 
         ledger.execute(build_transaction(ledger, [
-            Move(100.0, "USD", "alice", "bob", "p1")
+            Move(Decimal("100.0"), "USD", "alice", "bob", "p1")
         ]))
 
         replay1 = ledger.replay()
@@ -262,9 +263,9 @@ class TestIterationOrderReproducibility:
         """Dividend payments are processed in deterministic order."""
         # Create schedule with a single dividend using new API
         ex_date = datetime(2024, 3, 15)
-        schedule = [Dividend(ex_date, ex_date, 1.0, "USD")]
+        schedule = [Dividend(ex_date, ex_date, Decimal("1.0"), "USD")]
 
-        ledger = Ledger("test", initial_time=datetime(2024, 3, 15))
+        ledger = Ledger("test", initial_time=datetime(2024, 3, 15), test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit(
             symbol="AAPL",
@@ -283,10 +284,10 @@ class TestIterationOrderReproducibility:
         # Distribute shares
         for i, w in enumerate(wallets):
             if i > 0:  # Skip first
-                ledger.set_balance(w, "AAPL", 100)
+                ledger.set_balance(w, "AAPL", Decimal("100"))
 
         ledger.register_wallet("issuer")
-        ledger.set_balance("issuer", "USD", 1000000)
+        ledger.set_balance("issuer", "USD", Decimal("1000000"))
 
         # Compute dividend twice
         result1 = process_dividends(ledger, "AAPL", datetime(2024, 3, 15))
@@ -309,17 +310,17 @@ class TestEngineReproducibility:
         t0 = datetime(2025, 1, 1)
 
         def setup_ledger():
-            ledger = Ledger("test", initial_time=t0)
+            ledger = Ledger("test", initial_time=t0, test_mode=True)
             ledger.register_unit(cash("USD", "US Dollar"))
             ledger.register_unit(_stock("AAPL", "Apple Inc", "issuer", shortable=True))
             ledger.register_wallet("alice")
             ledger.register_wallet("bob")
             ledger.register_wallet("market")
-            ledger.set_balance("alice", "USD", 1000000)
-            ledger.set_balance("bob", "USD", 1000000)
-            ledger.set_balance("bob", "AAPL", 10000)
-            ledger.set_balance("market", "USD", 10000000)
-            ledger.set_balance("market", "AAPL", 100000)
+            ledger.set_balance("alice", "USD", Decimal("1000000"))
+            ledger.set_balance("bob", "USD", Decimal("1000000"))
+            ledger.set_balance("bob", "AAPL", Decimal("10000"))
+            ledger.set_balance("market", "USD", Decimal("10000000"))
+            ledger.set_balance("market", "AAPL", Decimal("100000"))
 
             # Create multiple options
             for i in range(5):
@@ -327,16 +328,16 @@ class TestEngineReproducibility:
                     symbol=f"OPT_{i}",
                     name=f"Option {i}",
                     underlying="AAPL",
-                    strike=150.0 + i * 10,
+                    strike=Decimal("150.0") + i * 10,
                     maturity=maturity,
                     option_type="call",
-                    quantity=100,
+                    quantity=Decimal("100"),
                     currency="USD",
                     long_wallet="alice",
                     short_wallet="bob",
                 )
                 ledger.register_unit(opt_unit)
-                ledger.set_balance("alice", opt_unit.symbol, 1)
+                ledger.set_balance("alice", opt_unit.symbol, Decimal("1"))
                 ledger.set_balance("bob", opt_unit.symbol, -1)
 
             return ledger
@@ -345,7 +346,7 @@ class TestEngineReproducibility:
         ledger1 = setup_ledger()
         ledger2 = setup_ledger()
 
-        prices = {"AAPL": 175.0}
+        prices = {"AAPL": Decimal("175.0")}
 
         engine1 = LifecycleEngine(ledger1)
         engine1.register("BILATERAL_OPTION", option_contract)
@@ -369,34 +370,34 @@ class TestFloatingPointReproducibility:
 
     def test_balance_accumulation_consistent(self):
         """Many small transactions produce consistent final balance."""
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.set_balance("alice", "USD", 100000)
+        ledger.set_balance("alice", "USD", Decimal("100000"))
 
         # Many small transactions
         for i in range(100):
             ledger.execute(build_transaction(ledger, [
-                Move(0.01, "USD", "alice", "bob", f"micro_tx_{i}")
+                Move(Decimal("0.01"), "USD", "alice", "bob", f"micro_tx_{i}")
             ]))
 
         alice_balance = ledger.get_balance("alice", "USD")
         bob_balance = ledger.get_balance("bob", "USD")
 
         # Proper rounding applied
-        assert alice_balance == 99999.00
-        assert bob_balance == 1.00
+        assert alice_balance == Decimal("99999.00")
+        assert bob_balance == Decimal("1.00")
 
     def test_total_supply_consistent(self):
         """Total supply calculation is consistent regardless of wallet order."""
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         # Create many wallets with varied balances
         for i in range(50):
             ledger.register_wallet(f"wallet_{i}")
-            ledger.set_balance(f"wallet_{i}", "USD", 100.0 + i * 0.01)
+            ledger.set_balance(f"wallet_{i}", "USD", Decimal("100.0") + Decimal(i) * Decimal("0.01"))
 
         supply1 = ledger.total_supply("USD")
         supply2 = ledger.total_supply("USD")
@@ -406,20 +407,20 @@ class TestFloatingPointReproducibility:
     def test_repeated_execution_consistent(self):
         """Repeated execution of same transactions is consistent."""
         def run_scenario():
-            ledger = Ledger("test")
+            ledger = Ledger("test", test_mode=True)
             ledger.register_unit(cash("USD", "US Dollar"))
             ledger.register_wallet("alice")
             ledger.register_wallet("bob")
             ledger.register_wallet("charlie")
-            ledger.set_balance("alice", "USD", 10000)
+            ledger.set_balance("alice", "USD", Decimal("10000"))
 
             # Execute a sequence of transactions
             for i in range(10):
                 ledger.execute(build_transaction(ledger, [
-                    Move(100.0, "USD", "alice", "bob", f"tx_ab_{i}")
+                    Move(Decimal("100.0"), "USD", "alice", "bob", f"tx_ab_{i}")
                 ]))
                 ledger.execute(build_transaction(ledger, [
-                    Move(50.0, "USD", "bob", "charlie", f"tx_bc_{i}")
+                    Move(Decimal("50.0"), "USD", "bob", "charlie", f"tx_bc_{i}")
                 ]))
 
             return (
@@ -439,11 +440,11 @@ class TestCloneAtReproducibility:
 
     def test_clone_at_same_timestamp_identical(self):
         """Cloning at the same timestamp produces identical state."""
-        ledger = Ledger("test")
+        ledger = Ledger("test", test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.set_balance("alice", "USD", 1000)
+        ledger.set_balance("alice", "USD", Decimal("1000"))
 
         # Execute transactions with timestamps
         t1 = datetime(2025, 1, 1, 10, 0, 0)
@@ -452,17 +453,17 @@ class TestCloneAtReproducibility:
 
         ledger.advance_time(t1)
         ledger.execute(build_transaction(ledger, [
-            Move(100.0, "USD", "alice", "bob", "tx1")
+            Move(Decimal("100.0"), "USD", "alice", "bob", "tx1")
         ]))
 
         ledger.advance_time(t2)
         ledger.execute(build_transaction(ledger, [
-            Move(100.0, "USD", "alice", "bob", "tx2")
+            Move(Decimal("100.0"), "USD", "alice", "bob", "tx2")
         ]))
 
         ledger.advance_time(t3)
         ledger.execute(build_transaction(ledger, [
-            Move(100.0, "USD", "alice", "bob", "tx3")
+            Move(Decimal("100.0"), "USD", "alice", "bob", "tx3")
         ]))
 
         # Clone at t2 multiple times
@@ -490,35 +491,35 @@ class TestSimulationReproducibility:
 
             # Generate price path
             prices = []
-            price = 100.0
+            price = Decimal("100.0")
             t = t0
             while t <= maturity:
                 prices.append((t, price))
-                price *= (1 + random.gauss(0, 0.02))
+                price *= (Decimal("1") + Decimal(str(random.gauss(0, 0.02))))
                 t += timedelta(days=1)
 
             pricer = TimeSeriesPricingSource({"AAPL": prices})
 
             # Setup ledger
-            ledger = Ledger("sim", initial_time=t0)
+            ledger = Ledger("sim", initial_time=t0, test_mode=True)
             ledger.register_unit(cash("USD", "US Dollar"))
             ledger.register_unit(_stock("AAPL", "Apple Inc", "issuer", shortable=True))
             ledger.register_wallet("trader")
             ledger.register_wallet("market")
-            ledger.set_balance("trader", "USD", 100000)
-            ledger.set_balance("market", "USD", 1000000)
-            ledger.set_balance("market", "AAPL", 100000)
+            ledger.set_balance("trader", "USD", Decimal("100000"))
+            ledger.set_balance("market", "USD", Decimal("1000000"))
+            ledger.set_balance("market", "AAPL", Decimal("100000"))
 
             # Create delta hedge
             hedge_unit = create_delta_hedge_unit(
                 symbol="HEDGE",
                 name="Delta Hedge",
                 underlying="AAPL",
-                strike=100.0,
+                strike=Decimal("100.0"),
                 maturity=maturity,
-                volatility=0.20,
-                num_options=10,
-                option_multiplier=100,
+                volatility=Decimal("0.20"),
+                num_options=Decimal("10"),
+                option_multiplier=Decimal("100"),
                 currency="USD",
                 strategy_wallet="trader",
                 market_wallet="market",
@@ -552,21 +553,21 @@ class TestSimulationReproducibility:
 
             # Historical prices
             prices = [
-                (t0, 100.0),
-                (t0 + timedelta(days=1), 102.0),
-                (t0 + timedelta(days=2), 101.0),
-                (t0 + timedelta(days=3), 103.0),
-                (t0 + timedelta(days=4), 105.0),
+                (t0, Decimal("100.0")),
+                (t0 + timedelta(days=1), Decimal("102.0")),
+                (t0 + timedelta(days=2), Decimal("101.0")),
+                (t0 + timedelta(days=3), Decimal("103.0")),
+                (t0 + timedelta(days=4), Decimal("105.0")),
             ]
             pricer = TimeSeriesPricingSource({"STOCK": prices})
 
-            ledger = Ledger("backtest", initial_time=t0)
+            ledger = Ledger("backtest", initial_time=t0, test_mode=True)
             ledger.register_unit(cash("USD", "US Dollar"))
             ledger.register_unit(_stock("STOCK", "Test Stock", "issuer"))
             ledger.register_wallet("trader")
             ledger.register_wallet("market")
-            ledger.set_balance("trader", "USD", 10000)
-            ledger.set_balance("market", "STOCK", 10000)
+            ledger.set_balance("trader", "USD", Decimal("10000"))
+            ledger.set_balance("market", "STOCK", Decimal("10000"))
 
             # Simple momentum strategy
             prev_price = None
@@ -575,8 +576,8 @@ class TestSimulationReproducibility:
                 if prev_price and price > prev_price:
                     try:
                         ledger.execute(build_transaction(ledger, [
-                            Move(100.0, "USD", "trader", "market", f"buy_{t}"),
-                            Move(100.0 / price, "STOCK", "market", "trader", f"buy_{t}_stock")
+                            Move(Decimal("100.0"), "USD", "trader", "market", f"buy_{t}"),
+                            Move(Decimal("100.0") / price, "STOCK", "market", "trader", f"buy_{t}_stock")
                         ]))
                     except Exception:
                         pass
@@ -625,37 +626,37 @@ class TestUnwindAlgorithm:
         t1 = datetime(2025, 1, 2)
         t2 = datetime(2025, 1, 3)
 
-        ledger = Ledger("test", initial_time=t0)
+        ledger = Ledger("test", initial_time=t0, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
 
         # Set initial balance (NOT logged)
-        ledger.set_balance("alice", "USD", 10000)
+        ledger.set_balance("alice", "USD", Decimal("10000"))
 
         # Execute transaction (logged)
         ledger.advance_time(t1)
         ledger.execute(build_transaction(ledger, [
-            Move(1000.0, "USD", "alice", "bob", "tx1")
+            Move(Decimal("1000.0"), "USD", "alice", "bob", "tx1")
         ]))
 
         # Execute another transaction
         ledger.advance_time(t2)
         ledger.execute(build_transaction(ledger, [
-            Move(500.0, "USD", "alice", "bob", "tx2")
+            Move(Decimal("500.0"), "USD", "alice", "bob", "tx2")
         ]))
 
         # Clone at t0 (before any transactions)
         clone_t0 = ledger.clone_at(t0)
 
         # Initial balance should be preserved!
-        assert clone_t0.get_balance("alice", "USD") == 10000
-        assert clone_t0.get_balance("bob", "USD") == 0
+        assert clone_t0.get_balance("alice", "USD") == Decimal("10000")
+        assert clone_t0.get_balance("bob", "USD") == Decimal("0")
 
         # Clone at t1 (after first transaction)
         clone_t1 = ledger.clone_at(t1)
-        assert clone_t1.get_balance("alice", "USD") == 9000
-        assert clone_t1.get_balance("bob", "USD") == 1000
+        assert clone_t1.get_balance("alice", "USD") == Decimal("9000")
+        assert clone_t1.get_balance("bob", "USD") == Decimal("1000")
 
     def test_clone_at_preserves_unit_state(self):
         """
@@ -666,7 +667,7 @@ class TestUnwindAlgorithm:
         t0 = datetime(2025, 1, 1)
         maturity = datetime(2025, 6, 1)
 
-        ledger = Ledger("test", initial_time=t0, verbose=False)
+        ledger = Ledger("test", initial_time=t0, verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(_stock("AAPL", "Apple Inc", "treasury", shortable=True))
         ledger.register_wallet("alice")
@@ -678,10 +679,10 @@ class TestUnwindAlgorithm:
             symbol="OPT",
             name="Test Option",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=maturity,
             option_type="call",
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob",
@@ -689,10 +690,10 @@ class TestUnwindAlgorithm:
         ledger.register_unit(option_unit)
 
         # Setup positions
-        ledger.set_balance("alice", "OPT", 5)
+        ledger.set_balance("alice", "OPT", Decimal("5"))
         ledger.set_balance("bob", "OPT", -5)
-        ledger.set_balance("alice", "USD", 100000)
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("alice", "USD", Decimal("100000"))
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
         # Checkpoint BEFORE settlement
         state_before = ledger.get_unit_state("OPT")
@@ -702,7 +703,7 @@ class TestUnwindAlgorithm:
         ledger.advance_time(maturity)
         engine = LifecycleEngine(ledger)
         engine.register("BILATERAL_OPTION", option_contract)
-        engine.step(maturity, {"AAPL": 170.0})
+        engine.step(maturity, {"AAPL": Decimal("170.0")})
 
         # Verify settled
         state_after = ledger.get_unit_state("OPT")
@@ -723,7 +724,7 @@ class TestUnwindAlgorithm:
         t2 = datetime(2025, 1, 3)
         maturity = datetime(2025, 6, 1)
 
-        ledger = Ledger("test", initial_time=t0, verbose=False)
+        ledger = Ledger("test", initial_time=t0, verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(_stock("AAPL", "Apple Inc", "treasury", shortable=True))
         ledger.register_wallet("trader")
@@ -735,11 +736,11 @@ class TestUnwindAlgorithm:
             symbol="HEDGE",
             name="Test Hedge",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=maturity,
-            volatility=0.20,
-            num_options=10,
-            option_multiplier=100,
+            volatility=Decimal("0.20"),
+            num_options=Decimal("10"),
+            option_multiplier=Decimal("100"),
             currency="USD",
             strategy_wallet="trader",
             market_wallet="market",
@@ -747,32 +748,32 @@ class TestUnwindAlgorithm:
         ledger.register_unit(hedge_unit)
 
         # Setup balances
-        ledger.set_balance("trader", "USD", 1000000)
-        ledger.set_balance("market", "AAPL", 100000)
-        ledger.set_balance("market", "USD", 1000000)
+        ledger.set_balance("trader", "USD", Decimal("1000000"))
+        ledger.set_balance("market", "AAPL", Decimal("100000"))
+        ledger.set_balance("market", "USD", Decimal("1000000"))
 
         # Get initial state
         initial_state = ledger.get_unit_state("HEDGE")
-        initial_rebalance_count = initial_state.get('rebalance_count', 0)
+        initial_rebalance_count = initial_state.get('rebalance_count', Decimal("0"))
 
         # Run engine for several steps (each step may update state)
         engine = LifecycleEngine(ledger)
         engine.register("DELTA_HEDGE_STRATEGY", delta_hedge_contract(min_trade_size=0.01))
 
         ledger.advance_time(t1)
-        engine.step(t1, {"AAPL": 155.0})
+        engine.step(t1, {"AAPL": Decimal("155.0")})
 
         ledger.advance_time(t2)
-        engine.step(t2, {"AAPL": 160.0})
+        engine.step(t2, {"AAPL": Decimal("160.0")})
 
         # Verify state has changed
         current_state = ledger.get_unit_state("HEDGE")
-        assert current_state.get('rebalance_count', 0) > initial_rebalance_count
+        assert current_state.get('rebalance_count', Decimal("0")) > initial_rebalance_count
 
         # Clone at t0 - should have initial state
         clone_t0 = ledger.clone_at(t0)
         restored_state = clone_t0.get_unit_state("HEDGE")
-        assert restored_state.get('rebalance_count', 0) == initial_rebalance_count
+        assert restored_state.get('rebalance_count', Decimal("0")) == initial_rebalance_count
 
 
 class TestReplayWithUnitStateChanges:
@@ -800,7 +801,7 @@ class TestReplayWithUnitStateChanges:
         t0 = datetime(2025, 1, 1)
         maturity = datetime(2025, 6, 1)
 
-        ledger = Ledger("test", initial_time=t0, verbose=False)
+        ledger = Ledger("test", initial_time=t0, verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(_stock("AAPL", "Apple Inc", "treasury", shortable=True))
         ledger.register_wallet("alice")
@@ -812,10 +813,10 @@ class TestReplayWithUnitStateChanges:
             symbol="OPT",
             name="Test Option",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=maturity,
             option_type="call",
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob",
@@ -823,16 +824,16 @@ class TestReplayWithUnitStateChanges:
         ledger.register_unit(option_unit)
 
         # Setup positions
-        ledger.set_balance("alice", "OPT", 5)
+        ledger.set_balance("alice", "OPT", Decimal("5"))
         ledger.set_balance("bob", "OPT", -5)
-        ledger.set_balance("alice", "USD", 100000)
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("alice", "USD", Decimal("100000"))
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
         # Settle the option
         ledger.advance_time(maturity)
         engine = LifecycleEngine(ledger)
         engine.register("BILATERAL_OPTION", option_contract)
-        engine.step(maturity, {"AAPL": 170.0})
+        engine.step(maturity, {"AAPL": Decimal("170.0")})
 
         # Verify settled
         assert ledger.get_unit_state("OPT").get('settled') is True
@@ -845,7 +846,7 @@ class TestReplayWithUnitStateChanges:
         assert cloned_state.get('settled') is True, \
             "clone() failed to preserve state_changes - option not marked as settled"
         assert cloned_state.get('exercised') is True
-        assert cloned_state.get('settlement_price') == 170.0
+        assert cloned_state.get('settlement_price') == Decimal("170.0")
 
         # Verify that state_changes are actually in the transaction log
         assert len(ledger.transaction_log) > 0
@@ -872,15 +873,15 @@ class TestUnitStateChangeImmutability:
 
         If we store references, subsequent mutations would corrupt the log.
         """
-        ledger = Ledger("test", verbose=False)
+        ledger = Ledger("test", verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.set_balance("alice", "USD", 1000)
+        ledger.set_balance("alice", "USD", Decimal("1000"))
 
         # Create a transaction with state deltas containing a nested dict
-        nested_data = {'nested': {'value': 100}}
-        moves = [Move(100.0, "USD", "alice", "bob", "test")]
+        nested_data = {'nested': {'value': Decimal("100")}}
+        moves = [Move(Decimal("100.0"), "USD", "alice", "bob", "test")]
         old_state = ledger.get_unit_state("USD")
         new_state = {**old_state, 'extra_data': nested_data}
         pending = build_transaction(ledger, moves, state_changes=[
@@ -898,7 +899,7 @@ class TestUnitStateChangeImmutability:
         for sc in tx.state_changes:
             if sc.unit == "USD":
                 logged_value = sc.new_state.get('extra_data', {}).get('nested', {}).get('value')
-                assert logged_value == 100, \
+                assert logged_value == Decimal("100"), \
                     f"UnitStateChange was corrupted by mutation: expected 100, got {logged_value}"
 
 
@@ -921,7 +922,7 @@ class TestCloneAtCheckpointVerification:
         t1 = datetime(2025, 1, 2)
         t2 = datetime(2025, 1, 3)
 
-        ledger = Ledger("test", initial_time=t0, verbose=False)
+        ledger = Ledger("test", initial_time=t0, verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(_stock("AAPL", "Apple Inc", "treasury"))
         ledger.register_wallet("alice")
@@ -929,9 +930,9 @@ class TestCloneAtCheckpointVerification:
         ledger.register_wallet("treasury")
 
         # Set initial state
-        ledger.set_balance("alice", "USD", 100000)
-        ledger.set_balance("alice", "AAPL", 500)
-        ledger.set_balance("bob", "USD", 50000)
+        ledger.set_balance("alice", "USD", Decimal("100000"))
+        ledger.set_balance("alice", "AAPL", Decimal("500"))
+        ledger.set_balance("bob", "USD", Decimal("50000"))
 
         # CHECKPOINT at T0
         checkpoint = ledger.clone()
@@ -939,14 +940,14 @@ class TestCloneAtCheckpointVerification:
         # Execute transactions
         ledger.advance_time(t1)
         ledger.execute(build_transaction(ledger, [
-            Move(10000.0, "USD", "alice", "bob", "trade1_cash"),
-            Move(100.0, "AAPL", "bob", "alice", "trade1_stock")
+            Move(Decimal("10000.0"), "USD", "alice", "bob", "trade1_cash"),
+            Move(Decimal("100.0"), "AAPL", "bob", "alice", "trade1_stock")
         ]))
 
         ledger.advance_time(t2)
         ledger.execute(build_transaction(ledger, [
-            Move(5000.0, "USD", "alice", "bob", "trade2_cash"),
-            Move(50.0, "AAPL", "bob", "alice", "trade2_stock")
+            Move(Decimal("5000.0"), "USD", "alice", "bob", "trade2_cash"),
+            Move(Decimal("50.0"), "AAPL", "bob", "alice", "trade2_stock")
         ]))
 
         # RECONSTRUCT at T0
@@ -965,7 +966,7 @@ class TestCloneAtCheckpointVerification:
         t0 = datetime(2025, 1, 1)
         maturity = datetime(2025, 6, 1)
 
-        ledger = Ledger("test", initial_time=t0, verbose=False)
+        ledger = Ledger("test", initial_time=t0, verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(_stock("AAPL", "Apple Inc", "treasury", shortable=True))
         ledger.register_wallet("alice")
@@ -977,10 +978,10 @@ class TestCloneAtCheckpointVerification:
             symbol="OPT",
             name="Test Option",
             underlying="AAPL",
-            strike=150.0,
+            strike=Decimal("150.0"),
             maturity=maturity,
             option_type="call",
-            quantity=100,
+            quantity=Decimal("100"),
             currency="USD",
             long_wallet="alice",
             short_wallet="bob",
@@ -988,10 +989,10 @@ class TestCloneAtCheckpointVerification:
         ledger.register_unit(option_unit)
 
         # Setup positions
-        ledger.set_balance("alice", "OPT", 5)
+        ledger.set_balance("alice", "OPT", Decimal("5"))
         ledger.set_balance("bob", "OPT", -5)
-        ledger.set_balance("alice", "USD", 100000)
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("alice", "USD", Decimal("100000"))
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
         # CHECKPOINT
         checkpoint = ledger.clone()
@@ -1000,7 +1001,7 @@ class TestCloneAtCheckpointVerification:
         ledger.advance_time(maturity)
         engine = LifecycleEngine(ledger)
         engine.register("BILATERAL_OPTION", option_contract)
-        engine.step(maturity, {"AAPL": 170.0})
+        engine.step(maturity, {"AAPL": Decimal("170.0")})
 
         # RECONSTRUCT
         reconstructed = ledger.clone_at(t0)
@@ -1026,15 +1027,15 @@ class TestExecutionTimeVsTimestamp:
         t1 = datetime(2025, 1, 2)
         t2 = datetime(2025, 1, 3)
 
-        ledger = Ledger("test", initial_time=t0, verbose=False)
+        ledger = Ledger("test", initial_time=t0, verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_wallet("alice")
         ledger.register_wallet("bob")
-        ledger.set_balance("alice", "USD", 1000)
+        ledger.set_balance("alice", "USD", Decimal("1000"))
 
         # Create transaction at t0 (timestamp = t0)
         tx = build_transaction(ledger, [
-            Move(100.0, "USD", "alice", "bob", "delayed_tx")
+            Move(Decimal("100.0"), "USD", "alice", "bob", "delayed_tx")
         ])
         assert tx.timestamp == t0
 
@@ -1051,5 +1052,5 @@ class TestExecutionTimeVsTimestamp:
         clone = ledger.clone_at(t1)
 
         # Transaction was executed at t2, so at t1 alice should still have 1000
-        assert clone.get_balance("alice", "USD") == 1000
-        assert clone.get_balance("bob", "USD") == 0
+        assert clone.get_balance("alice", "USD") == Decimal("1000")
+        assert clone.get_balance("bob", "USD") == Decimal("0")

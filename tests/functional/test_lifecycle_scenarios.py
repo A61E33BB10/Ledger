@@ -12,6 +12,7 @@ Tests complete instrument lifecycles:
 
 import pytest
 from datetime import datetime, timedelta
+from decimal import Decimal
 from ledger import (
     Ledger, Move, build_transaction,
     cash,
@@ -46,7 +47,7 @@ class TestDividendLifecycle:
             Dividend(datetime(2025, 12, 15), datetime(2025, 12, 15), 0.25, "USD"),
         ]
 
-        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit(
             "AAPL", "Apple", "treasury", "USD",
@@ -57,9 +58,9 @@ class TestDividendLifecycle:
         ledger.register_wallet("bob")
         ledger.register_wallet("treasury")
 
-        ledger.set_balance("alice", "AAPL", 1000)  # $250/quarter
-        ledger.set_balance("bob", "AAPL", 500)     # $125/quarter
-        ledger.set_balance("treasury", "USD", 10000000)
+        ledger.set_balance("alice", "AAPL", Decimal("1000"))  # $250/quarter
+        ledger.set_balance("bob", "AAPL", Decimal("500"))     # $125/quarter
+        ledger.set_balance("treasury", "USD", Decimal("10000000"))
 
         alice_initial = ledger.get_balance("alice", "USD")
         bob_initial = ledger.get_balance("bob", "USD")
@@ -72,19 +73,19 @@ class TestDividendLifecycle:
         for date in [datetime(2025, 3, 15), datetime(2025, 6, 15),
                      datetime(2025, 9, 15), datetime(2025, 12, 15)]:
             ledger.advance_time(date)
-            engine.step(date, {"AAPL": 150.0})
+            engine.step(date, {"AAPL": Decimal("150.0")})
 
         # Verify total dividends received
         # alice: 1000 shares × $0.25 × 4 = $1000
         # bob: 500 shares × $0.25 × 4 = $500
-        assert ledger.get_balance("alice", "USD") == alice_initial + 1000.0
-        assert ledger.get_balance("bob", "USD") == bob_initial + 500.0
+        assert ledger.get_balance("alice", "USD") == alice_initial + Decimal("1000.0")
+        assert ledger.get_balance("bob", "USD") == bob_initial + Decimal("500.0")
 
     def test_dividend_proportional_to_shares(self):
         """Dividend amount proportional to share holdings."""
         schedule = [Dividend(datetime(2025, 3, 15), datetime(2025, 3, 15), 1.0, "USD")]  # $1 dividend
 
-        ledger = Ledger("test", datetime(2025, 3, 15), verbose=False)
+        ledger = Ledger("test", datetime(2025, 3, 15), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit(
             "AAPL", "Apple", "treasury", "USD",
@@ -97,19 +98,19 @@ class TestDividendLifecycle:
         ledger.register_wallet("treasury")
 
         # Different holdings
-        ledger.set_balance("alice", "AAPL", 100)
-        ledger.set_balance("bob", "AAPL", 200)
-        ledger.set_balance("charlie", "AAPL", 300)
-        ledger.set_balance("treasury", "USD", 10000000)
+        ledger.set_balance("alice", "AAPL", Decimal("100"))
+        ledger.set_balance("bob", "AAPL", Decimal("200"))
+        ledger.set_balance("charlie", "AAPL", Decimal("300"))
+        ledger.set_balance("treasury", "USD", Decimal("10000000"))
 
         engine = LifecycleEngine(ledger)
         engine.register("STOCK", stock_contract)
         engine.register("DEFERRED_CASH", deferred_cash_contract)
-        engine.step(datetime(2025, 3, 15), {"AAPL": 150.0})
+        engine.step(datetime(2025, 3, 15), {"AAPL": Decimal("150.0")})
 
-        assert ledger.get_balance("alice", "USD") == 100.0
-        assert ledger.get_balance("bob", "USD") == 200.0
-        assert ledger.get_balance("charlie", "USD") == 300.0
+        assert ledger.get_balance("alice", "USD") == Decimal("100.0")
+        assert ledger.get_balance("bob", "USD") == Decimal("200.0")
+        assert ledger.get_balance("charlie", "USD") == Decimal("300.0")
 
 
 class TestOptionLifecycle:
@@ -119,7 +120,7 @@ class TestOptionLifecycle:
         """Call option: trade -> hold -> exercise ITM."""
         maturity = datetime(2025, 6, 20)
 
-        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True))
 
@@ -134,19 +135,19 @@ class TestOptionLifecycle:
         ledger.register_wallet("treasury")
 
         # Initial positions
-        ledger.set_balance("alice", "USD", 100000)
-        ledger.set_balance("bob", "AAPL", 1000)
-        ledger.set_balance("bob", "USD", 50000)
+        ledger.set_balance("alice", "USD", Decimal("100000"))
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
+        ledger.set_balance("bob", "USD", Decimal("50000"))
 
         # Trade: alice buys 5 contracts from bob
         # Premium: let's say $500 per contract = $2500 total
         tx = build_transaction(ledger, [
-            Move(2500.0, "USD", "alice", "bob", "premium"),
+            Move(Decimal("2500.0"), "USD", "alice", "bob", "premium"),
         ])
         ledger.execute(tx)
 
         # Set option positions
-        ledger.set_balance("alice", "AAPL_C150", 5)
+        ledger.set_balance("alice", "AAPL_C150", Decimal("5"))
         ledger.set_balance("bob", "AAPL_C150", -5)
 
         # Record balances before settlement
@@ -157,7 +158,7 @@ class TestOptionLifecycle:
         ledger.advance_time(maturity)
         engine = LifecycleEngine(ledger)
         engine.register("BILATERAL_OPTION", option_contract)
-        engine.step(maturity, {"AAPL": 170.0})
+        engine.step(maturity, {"AAPL": Decimal("170.0")})
 
         # Verify settlement
         state = ledger.get_unit_state("AAPL_C150")
@@ -166,14 +167,14 @@ class TestOptionLifecycle:
 
         # alice should have received 500 AAPL (5 contracts × 100 shares)
         # alice should have paid 5 × 100 × $150 = $75,000
-        assert ledger.get_balance("alice", "AAPL") == 500
+        assert ledger.get_balance("alice", "AAPL") == Decimal("500")
         assert ledger.get_balance("alice", "USD") == alice_usd_before - 75000
 
     def test_call_option_otm_lifecycle(self):
         """Call option: trade -> hold -> expire worthless OTM."""
         maturity = datetime(2025, 6, 20)
 
-        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True))
 
@@ -187,10 +188,10 @@ class TestOptionLifecycle:
         ledger.register_wallet("bob")
         ledger.register_wallet("treasury")
 
-        ledger.set_balance("alice", "AAPL_C150", 5)
+        ledger.set_balance("alice", "AAPL_C150", Decimal("5"))
         ledger.set_balance("bob", "AAPL_C150", -5)
-        ledger.set_balance("alice", "USD", 100000)
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("alice", "USD", Decimal("100000"))
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
         alice_usd_before = ledger.get_balance("alice", "USD")
 
@@ -198,7 +199,7 @@ class TestOptionLifecycle:
         ledger.advance_time(maturity)
         engine = LifecycleEngine(ledger)
         engine.register("BILATERAL_OPTION", option_contract)
-        engine.step(maturity, {"AAPL": 140.0})
+        engine.step(maturity, {"AAPL": Decimal("140.0")})
 
         # Verify expired worthless
         state = ledger.get_unit_state("AAPL_C150")
@@ -212,7 +213,7 @@ class TestOptionLifecycle:
         """Put option: exercise ITM."""
         maturity = datetime(2025, 6, 20)
 
-        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True))
 
@@ -226,10 +227,10 @@ class TestOptionLifecycle:
         ledger.register_wallet("bob")
         ledger.register_wallet("treasury")
 
-        ledger.set_balance("alice", "AAPL_P150", 5)
+        ledger.set_balance("alice", "AAPL_P150", Decimal("5"))
         ledger.set_balance("bob", "AAPL_P150", -5)
-        ledger.set_balance("alice", "AAPL", 1000)  # alice has shares to deliver
-        ledger.set_balance("bob", "USD", 100000)   # bob has cash to pay
+        ledger.set_balance("alice", "AAPL", Decimal("1000"))  # alice has shares to deliver
+        ledger.set_balance("bob", "USD", Decimal("100000"))   # bob has cash to pay
 
         alice_aapl_before = ledger.get_balance("alice", "AAPL")
 
@@ -237,13 +238,13 @@ class TestOptionLifecycle:
         ledger.advance_time(maturity)
         engine = LifecycleEngine(ledger)
         engine.register("BILATERAL_OPTION", option_contract)
-        engine.step(maturity, {"AAPL": 130.0})
+        engine.step(maturity, {"AAPL": Decimal("130.0")})
 
         # alice delivers shares, receives cash
         # 5 contracts × 100 shares = 500 shares delivered
         # Receives 5 × 100 × $150 = $75,000
         assert ledger.get_balance("alice", "AAPL") == alice_aapl_before - 500
-        assert ledger.get_balance("alice", "USD") == 75000
+        assert ledger.get_balance("alice", "USD") == Decimal("75000")
 
 
 class TestForwardLifecycle:
@@ -253,7 +254,7 @@ class TestForwardLifecycle:
         """Forward: trade -> hold -> delivery."""
         delivery = datetime(2025, 6, 20)
 
-        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True))
 
@@ -267,10 +268,10 @@ class TestForwardLifecycle:
         ledger.register_wallet("bob")
         ledger.register_wallet("treasury")
 
-        ledger.set_balance("alice", "AAPL_FWD", 5)
+        ledger.set_balance("alice", "AAPL_FWD", Decimal("5"))
         ledger.set_balance("bob", "AAPL_FWD", -5)
-        ledger.set_balance("alice", "USD", 100000)
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("alice", "USD", Decimal("100000"))
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
         alice_usd_before = ledger.get_balance("alice", "USD")
 
@@ -278,12 +279,12 @@ class TestForwardLifecycle:
         ledger.advance_time(delivery)
         engine = LifecycleEngine(ledger)
         engine.register("BILATERAL_FORWARD", forward_contract)
-        engine.step(delivery, {"AAPL": 170.0})
+        engine.step(delivery, {"AAPL": Decimal("170.0")})
 
         # alice pays 5 × 100 × $160 = $80,000
         # alice receives 500 shares
         assert ledger.get_balance("alice", "USD") == alice_usd_before - 80000
-        assert ledger.get_balance("alice", "AAPL") == 500
+        assert ledger.get_balance("alice", "AAPL") == Decimal("500")
 
         # Verify settled
         state = ledger.get_unit_state("AAPL_FWD")
@@ -298,7 +299,7 @@ class TestDeltaHedgeLifecycle:
         maturity = datetime(2025, 6, 20)
         start = datetime(2025, 1, 1)
 
-        ledger = Ledger("test", start, verbose=False)
+        ledger = Ledger("test", start, verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True))
 
@@ -314,8 +315,8 @@ class TestDeltaHedgeLifecycle:
 
         initial_trader_usd = 500000.0
         ledger.set_balance("trader", "USD", initial_trader_usd)
-        ledger.set_balance("market", "USD", 10000000)
-        ledger.set_balance("market", "AAPL", 100000)
+        ledger.set_balance("market", "USD", Decimal("10000000"))
+        ledger.set_balance("market", "AAPL", Decimal("100000"))
 
         # Generate price path to maturity
         days = (maturity - start).days
@@ -362,7 +363,7 @@ class TestMixedInstrumentsLifecycle:
         option_maturity = datetime(2025, 6, 20)
         forward_delivery = datetime(2025, 9, 20)
 
-        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
 
         # Stock with dividends
@@ -392,17 +393,17 @@ class TestMixedInstrumentsLifecycle:
         ledger.register_wallet("treasury")
 
         # Setup positions
-        ledger.set_balance("alice", "AAPL", 1000)
-        ledger.set_balance("alice", "AAPL_C150", 5)
-        ledger.set_balance("alice", "AAPL_FWD", 3)
-        ledger.set_balance("alice", "USD", 500000)
+        ledger.set_balance("alice", "AAPL", Decimal("1000"))
+        ledger.set_balance("alice", "AAPL_C150", Decimal("5"))
+        ledger.set_balance("alice", "AAPL_FWD", Decimal("3"))
+        ledger.set_balance("alice", "USD", Decimal("500000"))
 
-        ledger.set_balance("bob", "AAPL", 2000)
+        ledger.set_balance("bob", "AAPL", Decimal("2000"))
         ledger.set_balance("bob", "AAPL_C150", -5)
         ledger.set_balance("bob", "AAPL_FWD", -3)
-        ledger.set_balance("bob", "USD", 500000)
+        ledger.set_balance("bob", "USD", Decimal("500000"))
 
-        ledger.set_balance("treasury", "USD", 10000000)
+        ledger.set_balance("treasury", "USD", Decimal("10000000"))
 
         # Setup engine
         engine = LifecycleEngine(ledger)
@@ -413,7 +414,7 @@ class TestMixedInstrumentsLifecycle:
 
         # Process dividend
         ledger.advance_time(datetime(2025, 3, 15))
-        engine.step(datetime(2025, 3, 15), {"AAPL": 150.0})
+        engine.step(datetime(2025, 3, 15), {"AAPL": Decimal("150.0")})
 
         # Verify dividend paid
         # alice: 1000 × $0.25 = $250
@@ -422,14 +423,14 @@ class TestMixedInstrumentsLifecycle:
 
         # Process option maturity
         ledger.advance_time(option_maturity)
-        engine.step(option_maturity, {"AAPL": 170.0})
+        engine.step(option_maturity, {"AAPL": Decimal("170.0")})
 
         # Verify option settled
         assert ledger.get_unit_state("AAPL_C150")["settled"] is True
 
         # Process forward delivery
         ledger.advance_time(forward_delivery)
-        engine.step(forward_delivery, {"AAPL": 180.0})
+        engine.step(forward_delivery, {"AAPL": Decimal("180.0")})
 
         # Verify forward settled
         assert ledger.get_unit_state("AAPL_FWD")["settled"] is True
@@ -442,7 +443,7 @@ class TestCloneAtWithLifecycle:
         """clone_at before settlement shows unsettled state."""
         maturity = datetime(2025, 6, 20)
 
-        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True))
 
@@ -456,10 +457,10 @@ class TestCloneAtWithLifecycle:
         ledger.register_wallet("bob")
         ledger.register_wallet("treasury")
 
-        ledger.set_balance("alice", "OPT", 5)
+        ledger.set_balance("alice", "OPT", Decimal("5"))
         ledger.set_balance("bob", "OPT", -5)
-        ledger.set_balance("alice", "USD", 100000)
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("alice", "USD", Decimal("100000"))
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
         # Checkpoint before settlement
         checkpoint_time = datetime(2025, 6, 1)
@@ -469,7 +470,7 @@ class TestCloneAtWithLifecycle:
         ledger.advance_time(maturity)
         engine = LifecycleEngine(ledger)
         engine.register("BILATERAL_OPTION", option_contract)
-        engine.step(maturity, {"AAPL": 170.0})
+        engine.step(maturity, {"AAPL": Decimal("170.0")})
 
         # Verify current state is settled
         assert ledger.get_unit_state("OPT")["settled"] is True
@@ -477,13 +478,13 @@ class TestCloneAtWithLifecycle:
         # Clone at checkpoint - should be unsettled
         past = ledger.clone_at(checkpoint_time)
         assert past.get_unit_state("OPT")["settled"] is False
-        assert past.get_balance("alice", "OPT") == 5
+        assert past.get_balance("alice", "OPT") == Decimal("5")
 
     def test_clone_at_divergent_scenarios(self):
         """clone_at enables divergent scenario analysis."""
         maturity = datetime(2025, 6, 20)
 
-        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False)
+        ledger = Ledger("test", datetime(2025, 1, 1), verbose=False, test_mode=True)
         ledger.register_unit(cash("USD", "US Dollar"))
         ledger.register_unit(create_stock_unit("AAPL", "Apple", "treasury", "USD", shortable=True))
 
@@ -497,10 +498,10 @@ class TestCloneAtWithLifecycle:
         ledger.register_wallet("bob")
         ledger.register_wallet("treasury")
 
-        ledger.set_balance("alice", "OPT", 5)
+        ledger.set_balance("alice", "OPT", Decimal("5"))
         ledger.set_balance("bob", "OPT", -5)
-        ledger.set_balance("alice", "USD", 100000)
-        ledger.set_balance("bob", "AAPL", 1000)
+        ledger.set_balance("alice", "USD", Decimal("100000"))
+        ledger.set_balance("bob", "AAPL", Decimal("1000"))
 
         # Checkpoint at start
         start = datetime(2025, 1, 1)
@@ -509,7 +510,7 @@ class TestCloneAtWithLifecycle:
         ledger.advance_time(maturity)
         engine = LifecycleEngine(ledger)
         engine.register("BILATERAL_OPTION", option_contract)
-        engine.step(maturity, {"AAPL": 170.0})
+        engine.step(maturity, {"AAPL": Decimal("170.0")})
 
         # Create divergent timeline from start
         divergent = ledger.clone_at(start)
@@ -518,7 +519,7 @@ class TestCloneAtWithLifecycle:
         divergent.advance_time(maturity)
         divergent_engine = LifecycleEngine(divergent)
         divergent_engine.register("BILATERAL_OPTION", option_contract)
-        divergent_engine.step(maturity, {"AAPL": 130.0})
+        divergent_engine.step(maturity, {"AAPL": Decimal("130.0")})
 
         # Original: exercised
         assert ledger.get_unit_state("OPT")["exercised"] is True

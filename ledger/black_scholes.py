@@ -24,6 +24,7 @@ import math
 import numpy as np
 from typing import Union
 from scipy.special import erf as scipy_erf
+from decimal import Decimal, ROUND_HALF_EVEN
 
 
 # Type alias for scalar or array inputs
@@ -101,9 +102,9 @@ def d2(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
 # OPTION PRICES
 # ============================================================================
 
-def call(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def _call_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Black-Scholes call option price (zero-rate).
+    Black-Scholes call option price (zero-rate). Internal float implementation.
 
     C = S*N(d1) - K*N(d2)
     """
@@ -112,9 +113,15 @@ def call(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     return s * normal_cdf(d1_val) - k * normal_cdf(d2_val)
 
 
-def put(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def call(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Black-Scholes call option price with Decimal interface."""
+    result = _call_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _put_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Black-Scholes put option price (zero-rate).
+    Black-Scholes put option price (zero-rate). Internal float implementation.
 
     P = K*N(-d2) - S*N(-d1)
     """
@@ -123,23 +130,41 @@ def put(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     return k * normal_cdf(-d2_val) - s * normal_cdf(-d1_val)
 
 
+def put(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Black-Scholes put option price with Decimal interface."""
+    result = _put_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
 # ============================================================================
 # CALL GREEKS - FIRST ORDER
 # ============================================================================
 
-def call_s(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
-    """Call delta: ∂C/∂S = N(d1)"""
+def _call_s_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+    """Call delta: ∂C/∂S = N(d1). Internal float implementation."""
     return normal_cdf(d1(s, k, t_in_days, v))
 
 
-def call_k(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
-    """Call sensitivity to strike: ∂C/∂K = -N(d2)"""
+def call_s(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Call delta with Decimal interface."""
+    result = _call_s_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _call_k_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+    """Call sensitivity to strike: ∂C/∂K = -N(d2). Internal float implementation."""
     return -normal_cdf(d2(s, k, t_in_days, v))
 
 
-def call_t(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def call_k(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Call sensitivity to strike with Decimal interface."""
+    result = _call_k_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _call_t_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Call theta: ∂C/∂t per trading day
+    Call theta: ∂C/∂t per trading day. Internal float implementation.
 
     Returns positive value representing the daily time decay cost.
     θ = S*σ*n(d1) / (2*√t)
@@ -148,23 +173,35 @@ def call_t(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     return s * v * normal_pdf(d1(s, k, t_in_days, v)) / (2.0 * math.sqrt(t))
 
 
-def call_v(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def call_t(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Call theta with Decimal interface."""
+    result = _call_t_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _call_v_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Call vega: ∂C/∂σ
+    Call vega: ∂C/∂σ. Internal float implementation.
 
     ν = S*n(d1)*√t
     """
     t = t_in_days / TRADING_DAYS_PER_YEAR
     return s * normal_pdf(d1(s, k, t_in_days, v)) * math.sqrt(t)
+
+
+def call_v(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Call vega with Decimal interface."""
+    result = _call_v_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
 
 
 # ============================================================================
 # CALL GREEKS - SECOND ORDER
 # ============================================================================
 
-def call_ss(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def _call_ss_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Call gamma: ∂²C/∂S²
+    Call gamma: ∂²C/∂S². Internal float implementation.
 
     Γ = n(d1) / (S*σ*√t)
     """
@@ -172,62 +209,110 @@ def call_ss(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     return normal_pdf(d1(s, k, t_in_days, v)) / (s * v * math.sqrt(t))
 
 
-def call_kk(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
-    """∂²C/∂K² = n(d2) / (K*σ*√t)"""
+def call_ss(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Call gamma with Decimal interface."""
+    result = _call_ss_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _call_kk_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+    """∂²C/∂K² = n(d2) / (K*σ*√t). Internal float implementation."""
     t = t_in_days / TRADING_DAYS_PER_YEAR
     return normal_pdf(d2(s, k, t_in_days, v)) / (k * v * math.sqrt(t))
 
 
-def call_vv(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def call_kk(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Call strike gamma with Decimal interface."""
+    result = _call_kk_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _call_vv_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Call volga (vomma): ∂²C/∂σ²
+    Call volga (vomma): ∂²C/∂σ². Internal float implementation.
 
     Volga = vega * d1 * d2 / σ
     """
-    return call_v(s, k, t_in_days, v) * d1(s, k, t_in_days, v) * d2(s, k, t_in_days, v) / v
+    return _call_v_float(s, k, t_in_days, v) * d1(s, k, t_in_days, v) * d2(s, k, t_in_days, v) / v
+
+
+def call_vv(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Call volga with Decimal interface."""
+    result = _call_vv_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
 
 
 # ============================================================================
 # CALL GREEKS - CROSS DERIVATIVES
 # ============================================================================
 
-def call_st(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
-    """Call charm: ∂²C/∂S∂t = -n(d1)*d2 / (2*t)"""
+def _call_st_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+    """Call charm: ∂²C/∂S∂t = -n(d1)*d2 / (2*t). Internal float implementation."""
     t = t_in_days / TRADING_DAYS_PER_YEAR
     return -normal_pdf(d1(s, k, t_in_days, v)) * d2(s, k, t_in_days, v) / (2.0 * t)
 
 
-def call_sv(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def call_st(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Call charm with Decimal interface."""
+    result = _call_st_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _call_sv_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Call vanna: ∂²C/∂S∂σ
+    Call vanna: ∂²C/∂S∂σ. Internal float implementation.
 
     Vanna = -n(d1)*d2 / σ
     """
     return -normal_pdf(d1(s, k, t_in_days, v)) * d2(s, k, t_in_days, v) / v
 
 
-def call_kv(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
-    """∂²C/∂K∂σ = n(d2)*d1 / σ"""
+def call_sv(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Call vanna with Decimal interface."""
+    result = _call_sv_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _call_kv_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+    """∂²C/∂K∂σ = n(d2)*d1 / σ. Internal float implementation."""
     return normal_pdf(d2(s, k, t_in_days, v)) * d1(s, k, t_in_days, v) / v
+
+
+def call_kv(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Call strike-vol cross derivative with Decimal interface."""
+    result = _call_kv_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
 
 
 # ============================================================================
 # PUT GREEKS - FIRST ORDER
 # ============================================================================
 
-def put_s(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
-    """Put delta: ∂P/∂S = -N(-d1) = N(d1) - 1"""
+def _put_s_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+    """Put delta: ∂P/∂S = -N(-d1) = N(d1) - 1. Internal float implementation."""
     return -normal_cdf(-d1(s, k, t_in_days, v))
 
 
-def put_k(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
-    """Put sensitivity to strike: ∂P/∂K = N(-d2)"""
+def put_s(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Put delta with Decimal interface."""
+    result = _put_s_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _put_k_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+    """Put sensitivity to strike: ∂P/∂K = N(-d2). Internal float implementation."""
     return normal_cdf(-d2(s, k, t_in_days, v))
 
 
-def put_t(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def put_k(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Put sensitivity to strike with Decimal interface."""
+    result = _put_k_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _put_t_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Put theta: ∂P/∂t per trading day
+    Put theta: ∂P/∂t per trading day. Internal float implementation.
 
     Returns positive value representing the daily time decay cost.
     θ = S*σ*n(d1) / (2*√t)
@@ -236,9 +321,15 @@ def put_t(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     return s * v * normal_pdf(d1(s, k, t_in_days, v)) / (2.0 * math.sqrt(t))
 
 
-def put_v(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def put_t(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Put theta with Decimal interface."""
+    result = _put_t_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _put_v_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Put vega: ∂P/∂σ
+    Put vega: ∂P/∂σ. Internal float implementation.
 
     ν = S*n(d1)*√t
     """
@@ -246,13 +337,19 @@ def put_v(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     return s * normal_pdf(d1(s, k, t_in_days, v)) * math.sqrt(t)
 
 
+def put_v(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Put vega with Decimal interface."""
+    result = _put_v_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
 # ============================================================================
 # PUT GREEKS - SECOND ORDER
 # ============================================================================
 
-def put_ss(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def _put_ss_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Put gamma: ∂²P/∂S²
+    Put gamma: ∂²P/∂S². Internal float implementation.
 
     Γ = n(d1) / (S*σ*√t)
     """
@@ -260,57 +357,93 @@ def put_ss(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     return normal_pdf(d1(s, k, t_in_days, v)) / (s * v * math.sqrt(t))
 
 
-def put_kk(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
-    """∂²P/∂K²"""
+def put_ss(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Put gamma with Decimal interface."""
+    result = _put_ss_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _put_kk_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+    """∂²P/∂K². Internal float implementation."""
     t = t_in_days / TRADING_DAYS_PER_YEAR
     return normal_pdf(d2(s, k, t_in_days, v)) / (k * v * math.sqrt(t))
 
 
-def put_vv(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def put_kk(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Put strike gamma with Decimal interface."""
+    result = _put_kk_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _put_vv_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Put volga (vomma): ∂²P/∂σ²
+    Put volga (vomma): ∂²P/∂σ². Internal float implementation.
 
     Volga = vega * d1 * d2 / σ
     """
-    return put_v(s, k, t_in_days, v) * d1(s, k, t_in_days, v) * d2(s, k, t_in_days, v) / v
+    return _put_v_float(s, k, t_in_days, v) * d1(s, k, t_in_days, v) * d2(s, k, t_in_days, v) / v
+
+
+def put_vv(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Put volga with Decimal interface."""
+    result = _put_vv_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
 
 
 # ============================================================================
 # PUT GREEKS - CROSS DERIVATIVES
 # ============================================================================
 
-def put_st(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
-    """Put charm: ∂²P/∂S∂t"""
+def _put_st_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+    """Put charm: ∂²P/∂S∂t. Internal float implementation."""
     t = t_in_days / TRADING_DAYS_PER_YEAR
     return -normal_pdf(d1(s, k, t_in_days, v)) * d2(s, k, t_in_days, v) / (2.0 * t)
 
 
-def put_sv(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+def put_st(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Put charm with Decimal interface."""
+    result = _put_st_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _put_sv_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
     """
-    Put vanna: ∂²P/∂S∂σ
+    Put vanna: ∂²P/∂S∂σ. Internal float implementation.
 
     Vanna = -n(d1)*d2 / σ
     """
     return -normal_pdf(d1(s, k, t_in_days, v)) * d2(s, k, t_in_days, v) / v
 
 
-def put_kv(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
-    """∂²P/∂K∂σ"""
+def put_sv(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Put vanna with Decimal interface."""
+    result = _put_sv_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _put_kv_float(s: Numeric, k: Numeric, t_in_days: Numeric, v: Numeric) -> Numeric:
+    """∂²P/∂K∂σ. Internal float implementation."""
     return normal_pdf(d2(s, k, t_in_days, v)) * d1(s, k, t_in_days, v) / v
+
+
+def put_kv(s: Decimal, k: Decimal, t_in_days: Decimal, v: Decimal) -> Decimal:
+    """Put strike-vol cross derivative with Decimal interface."""
+    result = _put_kv_float(float(s), float(k), float(t_in_days), float(v))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
 
 
 # ============================================================================
 # IMPLIED VOLATILITY
 # ============================================================================
 
-def call_impvol(
+def _call_impvol_float(
     s: float,
     k: Union[float, np.ndarray],
     t_in_days: float,
     p: Union[float, np.ndarray]
 ) -> Union[float, np.ndarray]:
     """
-    Calculate implied volatility for call options using binary search.
+    Calculate implied volatility for call options using binary search. Internal float implementation.
 
     Vectorized implementation that handles arrays of strikes and prices.
 
@@ -333,7 +466,7 @@ def call_impvol(
 
     # Initial midpoint guess
     v_m = (v_d + v_u) / 2.0
-    call_m = call(s, k_arr, t_in_days, v_m)
+    call_m = _call_float(s, k_arr, t_in_days, v_m)
 
     # Binary search iteration
     for _ in range(25):  # 25 iterations gives ~1e-8 precision
@@ -347,7 +480,7 @@ def call_impvol(
 
         # New midpoint
         v_m = (v_d + v_u) / 2.0
-        call_m = call(s, k_arr, t_in_days, v_m)
+        call_m = _call_float(s, k_arr, t_in_days, v_m)
 
     # Return scalar if input was scalar
     if np.isscalar(k) and np.isscalar(p):
@@ -355,14 +488,25 @@ def call_impvol(
     return v_m
 
 
-def put_impvol(
+def call_impvol(
+    s: Decimal,
+    k: Decimal,
+    t_in_days: Decimal,
+    p: Decimal
+) -> Decimal:
+    """Call implied volatility with Decimal interface."""
+    result = _call_impvol_float(float(s), float(k), float(t_in_days), float(p))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+
+
+def _put_impvol_float(
     s: float,
     k: Union[float, np.ndarray],
     t_in_days: float,
     p: Union[float, np.ndarray]
 ) -> Union[float, np.ndarray]:
     """
-    Calculate implied volatility for put options using binary search.
+    Calculate implied volatility for put options using binary search. Internal float implementation.
 
     Vectorized implementation that handles arrays of strikes and prices.
 
@@ -385,7 +529,7 @@ def put_impvol(
 
     # Initial midpoint guess
     v_m = (v_d + v_u) / 2.0
-    put_m = put(s, k_arr, t_in_days, v_m)
+    put_m = _put_float(s, k_arr, t_in_days, v_m)
 
     # Binary search iteration
     for _ in range(25):  # 25 iterations gives ~1e-8 precision
@@ -399,12 +543,23 @@ def put_impvol(
 
         # New midpoint
         v_m = (v_d + v_u) / 2.0
-        put_m = put(s, k_arr, t_in_days, v_m)
+        put_m = _put_float(s, k_arr, t_in_days, v_m)
 
     # Return scalar if input was scalar
     if np.isscalar(k) and np.isscalar(p):
         return float(v_m[0])
     return v_m
+
+
+def put_impvol(
+    s: Decimal,
+    k: Decimal,
+    t_in_days: Decimal,
+    p: Decimal
+) -> Decimal:
+    """Put implied volatility with Decimal interface."""
+    result = _put_impvol_float(float(s), float(k), float(t_in_days), float(p))
+    return Decimal(str(result)).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
 
 
 # ============================================================================
@@ -437,20 +592,20 @@ volga = call_vv
 
 
 if __name__ == "__main__":
-    # Simple test cases
-    S = 100.0  # Underlying price
-    K = 100.0  # Strike price
-    t = 252.0  # Time to expiry in days (1 year)
-    sigma = 0.2  # Volatility (20%)
+    # Simple test cases with Decimal
+    S = Decimal("100")  # Underlying price
+    K = Decimal("100")  # Strike price
+    t = Decimal("252")  # Time to expiry in days (1 year)
+    sigma = Decimal("0.2")  # Volatility (20%)
 
     call_price = call(S, K, t, sigma)
     put_price = put(S, K, t, sigma)
 
-    print(f"Call Price: {call_price:.4f}")
-    print(f"Put Price: {put_price:.4f}")
+    print(f"Call Price: {call_price}")
+    print(f"Put Price: {put_price}")
 
     call_iv = call_impvol(S, K, t, call_price)
     put_iv = put_impvol(S, K, t, put_price)
 
-    print(f"Call Implied Volatility: {call_iv:.4f}")
-    print(f"Put Implied Volatility: {put_iv:.4f}")
+    print(f"Call Implied Volatility: {call_iv}")
+    print(f"Put Implied Volatility: {put_iv}")

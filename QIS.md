@@ -1,383 +1,330 @@
-# QIS Implementation Proposals
+# Strategy Methodology
 
-Four experts reviewed the QIS (Quantitative Investment Strategy) specification independently. Below are their proposals.
-
----
-
-## Expert 1: Jane Street CTO Review
-
-### Summary
-A QIS is economically a **total return swap on a leveraged virtual portfolio**. The key insight is that the QIS maintains a *hypothetical ledger* that is internal to the QIS unit state - similar to how futures use virtual cash.
-
-### Proposed Data Structures
-
-```python
-@dataclass(frozen=True, slots=True)
-class QISTerms:
-    """Immutable term sheet - set at creation, never changes."""
-    symbol: str
-    notional: float
-    initial_nav: float
-    inception_date: datetime
-    maturity_date: datetime
-    financing_rate_spread: float
-    payer_wallet: str
-    receiver_wallet: str
-    settlement_currency: str
-    rebalance_schedule: Tuple[datetime, ...]
-    eligible_assets: Tuple[str, ...]
-    leverage_limit: Optional[float]
-    strategy_id: str
-
-@dataclass(frozen=True, slots=True)
-class PortfolioHolding:
-    """Single asset position: phi_t^i"""
-    asset: str
-    quantity: float
-
-@dataclass(frozen=True, slots=True)
-class PortfolioState:
-    """Complete hypothetical portfolio state."""
-    holdings: Tuple[PortfolioHolding, ...]
-    cash_balance: float  # C_t - can be negative
-    last_rebalance_time: Optional[datetime]
-    last_nav: float
-    accumulated_financing: float
-    rebalance_count: int
-
-@dataclass(frozen=True, slots=True)
-class QISState:
-    """Complete QIS lifecycle state."""
-    portfolio: PortfolioState
-    current_nav: float
-    inception_nav: float
-    terminated: bool
-    settlement_history: Tuple[dict, ...]
-    final_return: Optional[float]
-```
-
-### Strategy Protocol
-
-```python
-@runtime_checkable
-class QISStrategy(Protocol):
-    def compute_holdings(
-        self,
-        timestamp: datetime,
-        current_holdings: Tuple[PortfolioHolding, ...],
-        current_cash: float,
-        current_nav: float,
-        prices: Mapping[str, float],
-        external_signals: Optional[Mapping[str, float]] = None,
-    ) -> Tuple[PortfolioHolding, ...]:
-        """Compute target holdings. Cash computed to maintain self-financing."""
-        ...
-```
-
-### Pure Calculation Functions
-
-```python
-def calculate_nav(holdings, cash_balance, prices) -> NAVCalculationResult
-def calculate_financing(cash_balance, rate, days) -> float
-def calculate_total_return(nav_terminal, nav_initial) -> float
-def calculate_payoff(total_return, notional) -> float
-def verify_self_financing(old_holdings, old_cash, new_holdings, new_cash, prices) -> bool
-def compute_cash_for_self_financing(target_holdings, nav, prices) -> float
-```
-
-### Key Architectural Concerns
-1. **Pricing consistency**: All pure functions take prices as explicit input
-2. **Self-financing verification**: Called on every rebalance
-3. **Leverage constraints**: Validated at rebalance time
-4. **State reconstruction**: Uses UnitStateChange with complete snapshots
-5. **Negative cash**: Explicitly supported for leveraged positions
+This document defines how to create, validate, and integrate new strategies into the Ledger system without breaking correctness guarantees.
 
 ---
 
-## Expert 2: FinOps Architect Review
+## 1. Conceptual Model
 
-### Summary
-QIS fits naturally into existing architecture but requires careful attention to financial precision, financing accrual conventions, and audit trail requirements.
+### 1.1 What is a Strategy?
 
-### Financial Precision: Decimal vs Float
-
-**Recommendation**: Use `Decimal` internally, `float` at interface boundary.
+A strategy is a **pure function** that computes target holdings given the current state:
 
 ```python
-from decimal import Decimal, ROUND_HALF_EVEN
-
-CASH_PRECISION = Decimal("0.01")      # 2 decimal places
-RATE_PRECISION = Decimal("0.00000001") # 8 decimal places
-QTY_PRECISION = Decimal("0.000001")   # 6 decimal places
-
-def round_cash(amount: Decimal) -> Decimal:
-    return amount.quantize(CASH_PRECISION, rounding=ROUND_HALF_EVEN)
+Strategy = Callable[[Decimal, Dict[str, Decimal], Dict[str, Any]], Dict[str, Decimal]]
+#                    ↑       ↑                    ↑                 ↑
+#                    NAV     prices               state             target_holdings
 ```
 
-**Rationale**: Float errors compound over 252 trading days. On $1T AUM across 1000 strategies, this creates $250 annual reconciliation errors.
+The strategy does not execute trades. It returns a **target portfolio**. The system computes the required rebalancing trades to reach that target.
 
-### Financing: Daily Compounding (Industry Standard)
+### 1.2 The QIS Framework
 
-```python
-def accrue_financing_daily_compound(cash: Decimal, rate: Decimal, days: int) -> Decimal:
-    """Daily compounding: C * (1 + r/365)^days"""
-    daily_rate = rate / Decimal("365")
-    return cash * (Decimal("1") + daily_rate) ** days
+A Quantitative Investment Strategy (QIS) wraps a strategy function with:
+
+1. **NAV tracking**: The hypothetical portfolio's net asset value
+2. **Self-financing constraint**: Rebalancing preserves NAV
+3. **Financing costs**: Cash accrues interest (positive or negative)
+4. **Settlement**: Payoff calculation at maturity
+
+**Core equations:**
+
 ```
-
-**Why not continuous?** Daily compounding is industry standard, deterministic, and creates distinct audit events.
-
-### Self-Financing Constraint Verification
-
-```python
-def verify_self_financing(
-    old_holdings, old_cash, new_holdings, new_cash, prices, tolerance=Decimal("0.01")
-) -> Tuple[bool, Decimal]:
-    """Verify NAV unchanged by rebalancing."""
-    nav_before = compute_qis_nav(old_holdings, old_cash, prices)
-    nav_after = compute_qis_nav(new_holdings, new_cash, prices)
-    discrepancy = nav_after - nav_before
-    return abs(discrepancy) <= tolerance, discrepancy
-```
-
-### Audit Trail Requirements
-
-| Event Type | Required Fields |
-|------------|-----------------|
-| QIS_INCEPTION | initial_nav, notional, strategy_id |
-| QIS_REBALANCE | pre/post holdings, trades, prices, nav_discrepancy |
-| QIS_FINANCING | cash_before, cash_after, rate, days |
-| QIS_MATURITY | terminal_nav, total_return, settlement_amount |
-
-### Edge Cases
-
-1. **Negative NAV**: Log event, continue tracking, consider termination trigger
-2. **Extreme leverage**: Validate against `MAX_LEVERAGE` at rebalance
-3. **Corporate actions**: Stock splits multiply quantity, dividends add cash or reinvest
-
-```python
-def apply_stock_split(holdings: Dict, symbol: str, ratio: Decimal) -> Dict:
-    """Self-financing preserved: qty increases, price decreases proportionally."""
-    new_holdings = dict(holdings)
-    new_holdings[symbol] = holdings[symbol] * ratio
-    return new_holdings
+NAV:          V_t = Σ(holdings × prices) + cash
+Financing:    cash_{t+dt} = cash_t × e^{r×dt}
+Self-finance: NAV_before_rebalance = NAV_after_rebalance
+Payoff:       Payoff_T = Notional × (V_T / V_0 - 1)
 ```
 
 ---
 
-## Expert 3: Chris Lattner Review (API Design)
+## 2. Required Properties
 
-### Summary
-Focus on **progressive disclosure of complexity**. Simple strategies should be simple to define. The Strategy Protocol is the key abstraction.
+### 2.1 Purity
 
-### The Strategy Protocol (Progressive Disclosure)
+A strategy function must be **pure**:
 
-```python
-@dataclass(frozen=True)
-class InformationSet:
-    """All information available to strategy at time t_k."""
-    timestamp: datetime
-    prices: Dict[str, float]
-    current_holdings: PortfolioState
-    current_cash: float
-    nav: float
-    financing_rate: float
-    historical_prices: Optional[Dict[str, List[float]]] = None
-    custom_data: Optional[Dict[str, Any]] = None
-
-@dataclass(frozen=True)
-class RebalanceDecision:
-    """Strategy output: target holdings."""
-    target_holdings: Dict[str, float]
-    metadata: Optional[Dict[str, Any]] = None
-
-@runtime_checkable
-class Strategy(Protocol):
-    @property
-    def name(self) -> str: ...
-
-    def rebalance(self, info: InformationSet) -> RebalanceDecision: ...
+```
+∀ nav, prices, state: strategy(nav, prices, state) = strategy(nav, prices, state)
 ```
 
-### Simple Strategy: Fixed Weights (~25 lines)
+**Forbidden:**
+- Reading global variables
+- Calling `datetime.now()`, `random.random()`, or any non-deterministic function
+- Network I/O, file I/O, or any external state access
+- Mutating any input argument
 
-```python
-@dataclass
-class FixedWeightStrategy(BaseStrategy):
-    weights: Dict[str, float]  # Must sum to 1.0
+**Allowed:**
+- Mathematical computations using inputs
+- Accessing constants defined at module level
+- Creating new data structures from inputs
 
-    @property
-    def name(self) -> str:
-        return "FixedWeight"
+### 2.2 Determinism
 
-    def rebalance(self, info: InformationSet) -> RebalanceDecision:
-        target_holdings = {}
-        for symbol, weight in self.weights.items():
-            price = info.prices.get(symbol, 0)
-            if price > 0:
-                target_holdings[symbol] = (weight * info.nav) / price
-        return RebalanceDecision(target_holdings=target_holdings)
+Given identical inputs, the strategy must produce identical outputs. This is a consequence of purity, but deserves explicit emphasis:
+
+```
+# FORBIDDEN: Non-deterministic behavior
+def bad_strategy(nav, prices, state):
+    import random
+    if random.random() > 0.5:  # ❌ Non-deterministic
+        return {"AAPL": nav / prices["AAPL"]}
+    return {}
+
+# ALLOWED: Deterministic behavior
+def good_strategy(nav, prices, state):
+    target_weight = Decimal("0.6")
+    return {"AAPL": (nav * target_weight) / prices["AAPL"]}
 ```
 
-### Strategy Combinator: Leverage Wrapper
+### 2.3 Totality
 
-```python
-@dataclass
-class LeveragedStrategy(BaseStrategy):
-    base_strategy: BaseStrategy
-    leverage: float = 2.0
+A strategy must be **total**: defined for all valid inputs within its domain.
 
-    def rebalance(self, info: InformationSet) -> RebalanceDecision:
-        base = self.base_strategy.rebalance(info)
-        return RebalanceDecision(
-            target_holdings={s: q * self.leverage for s, q in base.target_holdings.items()},
-            metadata={'leverage': self.leverage, 'base': self.base_strategy.name}
-        )
+```
+# FORBIDDEN: Partial function
+def partial_strategy(nav, prices, state):
+    return {"AAPL": nav / prices["AAPL"]}  # ❌ Fails if "AAPL" not in prices
+
+# ALLOWED: Total function with explicit domain
+def total_strategy(nav, prices, state):
+    required = {"AAPL", "GOOG"}
+    if not required.issubset(prices.keys()):
+        raise ValueError(f"Missing required prices: {required - prices.keys()}")
+    return {"AAPL": nav / prices["AAPL"]}
 ```
 
-### Design Principles
+### 2.4 Decimal Arithmetic
 
-1. **Library over Language**: Strategy protocol is just Python - no magic
-2. **Progressive Disclosure**: Simple case = implement `rebalance()`. Advanced = add validation, historical data
-3. **Meet users where they are**: Interface looks like every backtesting framework's signal generator
+All quantities must use `Decimal`, not `float`:
 
-### Long-Term Evolution Path
+```python
+from decimal import Decimal
 
-- **Phase 1**: Strategy protocol, basic implementations, lifecycle integration
-- **Phase 2**: Strategy combinators (leveraged, hedged, blended)
-- **Phase 3**: Multi-currency, path-dependent strategies, backtesting integration
-- **Phase 4**: Strategy versioning, real-time NAV streaming, performance attribution
+# FORBIDDEN
+def float_strategy(nav, prices, state):
+    return {"AAPL": float(nav) * 0.6 / float(prices["AAPL"])}  # ❌ float
+
+# ALLOWED
+def decimal_strategy(nav, prices, state):
+    weight = Decimal("0.6")
+    return {"AAPL": (nav * weight) / prices["AAPL"]}
+```
 
 ---
 
-## Expert 4: Karpathy Review (Radical Simplicity)
+## 3. Strategy Creation Process
 
-### Summary
-QIS is just **Portfolio Swap + Strategy Function**. The complexity is in the mathematics, not the software. One file, ~250-300 lines.
+### Step 1: Define the Mathematical Model
 
-### Key Insight
+Write out the strategy as equations:
 
 ```
-QIS = NAV tracking + Self-financing rebalancing + Financing costs + Settlement
+target_weight(asset) = w_i           (constant weights)
+target_holdings(asset) = NAV × w_i / price_i
 ```
 
-All of this already exists in `portfolio_swap.py`. The only new thing is the **strategy function**.
-
-### The Simplest Possible Strategy Type
+### Step 2: Implement as a Pure Function
 
 ```python
-# A strategy is just a function
-Strategy = Callable[[float, float, dict], float]  # (nav, price, state) -> target_holdings
+from decimal import Decimal
+from typing import Dict, Any
+
+def fixed_weight_strategy(
+    nav: Decimal,
+    prices: Dict[str, Decimal],
+    state: Dict[str, Any],
+) -> Dict[str, Decimal]:
+    """
+    Fixed-weight strategy: maintain constant portfolio weights.
+
+    Required state keys:
+        target_weights: Dict[str, Decimal] mapping asset → weight
+
+    Returns:
+        Dict[str, Decimal] mapping asset → target quantity
+    """
+    weights = state.get("target_weights", {})
+    target = {}
+
+    for asset, weight in weights.items():
+        if asset not in prices:
+            raise ValueError(f"Missing price for {asset}")
+        target[asset] = (nav * weight) / prices[asset]
+
+    return target
 ```
 
-### 2x Leveraged SPX in 10 Lines
+### Step 3: Write Unit Tests
+
+Test the function in isolation, verifying:
+
+1. **Correctness**: Outputs match expected values
+2. **Determinism**: Same inputs produce same outputs
+3. **Edge cases**: Zero NAV, missing prices, extreme values
 
 ```python
-def leveraged_2x(nav: float, price: float, state: dict) -> float:
-    """Target holdings for 2x leveraged exposure."""
-    return (2.0 * nav) / price
+def test_fixed_weight_strategy():
+    nav = Decimal("1000000")
+    prices = {"AAPL": Decimal("150"), "GOOG": Decimal("2500")}
+    state = {"target_weights": {"AAPL": Decimal("0.6"), "GOOG": Decimal("0.4")}}
+
+    result = fixed_weight_strategy(nav, prices, state)
+
+    # Verify weights
+    assert result["AAPL"] == Decimal("600000") / Decimal("150")  # 4000 shares
+    assert result["GOOG"] == Decimal("400000") / Decimal("2500")  # 160 shares
+
+    # Verify determinism
+    assert fixed_weight_strategy(nav, prices, state) == result
+```
+
+### Step 4: Create the QIS Unit
+
+```python
+from ledger import create_qis
 
 qis = create_qis(
-    symbol="QIS_2X_SPX",
-    underlying="SPX",
-    notional=1_000_000,
-    strategy=leveraged_2x,
-    funding_rate=0.05,
-    rebalance_schedule=monthly_dates,
-    payer_wallet="dealer",
-    receiver_wallet="investor",
+    symbol="QIS_FIXED_60_40",
+    name="Fixed 60/40 Strategy",
+    notional=Decimal("1000000"),
+    strategy=fixed_weight_strategy,
+    underlying={"AAPL", "GOOG"},
+    financing_rate=Decimal("0.02"),
+    payer_wallet="investor",
+    receiver_wallet="dealer",
+    initial_prices={"AAPL": Decimal("150"), "GOOG": Decimal("2500")},
+    target_weights={"AAPL": Decimal("0.6"), "GOOG": Decimal("0.4")},
 )
 ```
 
-### Core Pure Functions (~100 lines total)
+### Step 5: Register and Test Integration
 
 ```python
-def compute_nav(holdings: float, price: float, cash: float) -> float:
-    """V_t = phi_t * P_t + C_t"""
-    return holdings * price + cash
+ledger.register_unit(qis)
+ledger.set_balance("investor", "QIS_FIXED_60_40", Decimal("1"))
+ledger.set_balance("dealer", "QIS_FIXED_60_40", Decimal("-1"))
 
-def accrue_financing(cash: float, rate: float, days: int) -> float:
-    """C_{t+dt} = C_t * e^{r*dt}"""
-    return cash * (1 + rate * days / 365)
-
-def compute_rebalance(nav, price, current_holdings, current_cash, strategy, state):
-    """Self-financing: NAV before = NAV after."""
-    target = strategy(nav, price, state)
-    delta = target - current_holdings
-    new_cash = current_cash - delta * price
-    assert abs(compute_nav(target, price, new_cash) - nav) < 1e-9
-    return target, new_cash
-
-def compute_qis_payoff(final_nav, initial_nav, notional) -> float:
-    """Payoff_T = N * (V_T / V_0 - 1)"""
-    return notional * (final_nav / initial_nav - 1)
-```
-
-### What NOT to Do
-
-1. NOT create a separate "hypothetical ledger" class
-2. NOT create complex strategy hierarchies
-3. NOT add abstract base classes
-4. NOT separate portfolio state from swap state
-5. NOT create Strategy registry or factory patterns
-
-### File Structure
-
-```
-ledger/units/qis.py      # ~250-300 lines, ONE file
-tests/unit/test_qis.py   # ~200 lines
+# Test rebalancing
+result = compute_qis_rebalance(
+    view=ledger,
+    symbol="QIS_FIXED_60_40",
+    prices={"AAPL": Decimal("155"), "GOOG": Decimal("2600")},
+    timestamp=datetime.now(),
+)
 ```
 
 ---
 
-## Comparison Summary
+## 4. Validation Checklist
 
-| Aspect | Jane Street | FinOps | Lattner | Karpathy |
-|--------|-------------|--------|---------|----------|
-| **Focus** | Correctness & type safety | Financial precision | API design & evolution | Radical simplicity |
-| **Numeric type** | float (with epsilon) | Decimal internally | float | float |
-| **Strategy type** | Protocol with frozen dataclass | Protocol | Protocol + BaseStrategy | Simple Callable |
-| **Financing** | Continuous | Daily compound | Configurable | Linear approx |
-| **Files** | 1 large file | 1 file + tests | strategies/ directory | 1 file |
-| **Lines estimate** | ~600 | ~500 | ~400 + strategies | ~250-300 |
-| **Abstractions** | Full frozen dataclasses | Decimal wrappers | Progressive disclosure | Minimal |
+Before deploying a new strategy:
+
+| Check | Description | How to Verify |
+|-------|-------------|---------------|
+| **Purity** | No side effects | Code review; no I/O, no globals |
+| **Determinism** | Same inputs → same outputs | Run 100× with same inputs |
+| **Totality** | No unhandled cases | Test edge cases; analyze domain |
+| **Decimal** | No float arithmetic | grep for `float(` in strategy code |
+| **Conservation** | Rebalancing preserves NAV | Assert NAV_before = NAV_after |
+| **Financing** | Interest accrual is correct | Verify cash changes match formula |
 
 ---
 
-## Recommended Synthesis
+## 5. Allowed Practices
 
-Based on all four reviews, the recommended approach:
+| Practice | Reason |
+|----------|--------|
+| Using `Decimal` for all quantities | Exact arithmetic |
+| Reading from `state` dictionary | Explicit parameterization |
+| Raising `ValueError` for invalid inputs | Fail-fast on domain violations |
+| Computing derived values from inputs | Pure computation |
+| Using module-level constants | Immutable, deterministic |
 
-1. **Start with Karpathy's minimal implementation** (~300 lines) as the foundation
-2. **Use Lattner's Strategy Protocol** for extensibility without complexity
-3. **Add FinOps precision guards** (tolerance checks, audit events) for financial correctness
-4. **Follow Jane Street's state design** with frozen dataclasses for the QIS terms
+---
 
-### Minimal Viable Implementation
+## 6. Forbidden Practices
+
+| Practice | Reason | Alternative |
+|----------|--------|-------------|
+| `datetime.now()` | Non-deterministic | Use timestamp parameter |
+| `random.random()` | Non-deterministic | Use seeded RNG from state |
+| `float()` | Precision loss | Use `Decimal` |
+| Global mutable state | Hidden dependencies | Pass via `state` dict |
+| Network/file I/O | Side effects | Pre-fetch data, pass as input |
+| Mutating inputs | Violates purity | Return new structures |
+
+---
+
+## 7. Built-In Strategy Examples
+
+### 7.1 Leveraged Strategy
 
 ```python
-# ledger/units/qis.py
+def leveraged_strategy(
+    nav: Decimal,
+    prices: Dict[str, Decimal],
+    state: Dict[str, Any],
+) -> Dict[str, Decimal]:
+    """
+    Constant leverage on a single underlying.
 
-UNIT_TYPE_QIS = "QIS"
+    Required state:
+        leverage: Decimal (e.g., 2.0 for 2x)
+        underlying: str (e.g., "SPX")
+    """
+    leverage = state["leverage"]
+    underlying = state["underlying"]
 
-# Strategy: just a callable
-Strategy = Callable[[float, Dict[str, float], dict], Dict[str, float]]
+    if underlying not in prices:
+        raise ValueError(f"Missing price for {underlying}")
 
-# Core functions
-def compute_nav(holdings, cash, prices) -> float
-def accrue_financing(cash, rate, days) -> float
-def compute_rebalance(nav, holdings, cash, strategy, prices, state) -> Tuple[Dict, float]
-def verify_self_financing(nav_before, nav_after, tolerance=0.01) -> bool
+    target_exposure = nav * leverage
+    target_quantity = target_exposure / prices[underlying]
 
-# Unit creation
-def create_qis(...) -> Unit
-
-# Lifecycle
-def compute_qis_rebalance(view, symbol, strategy, prices, days) -> PendingTransaction
-def compute_qis_settlement(view, symbol, prices) -> PendingTransaction
-
-# SmartContract
-def qis_contract(strategy_registry) -> Callable
+    return {underlying: target_quantity}
 ```
 
-**Total: ~300-400 lines in one file.**
+### 7.2 Fixed Weight Strategy
+
+See implementation in Step 2 above.
+
+---
+
+## 8. Error Handling
+
+Strategies should fail explicitly rather than silently degrade:
+
+```python
+# FORBIDDEN: Silent degradation
+def silent_strategy(nav, prices, state):
+    weights = state.get("weights", {})  # Silent empty default
+    return {a: nav * w / prices.get(a, Decimal("1"))  # Silent price default
+            for a, w in weights.items()}
+
+# ALLOWED: Explicit failure
+def explicit_strategy(nav, prices, state):
+    if "weights" not in state:
+        raise ValueError("Strategy requires 'weights' in state")
+
+    weights = state["weights"]
+    missing = set(weights.keys()) - set(prices.keys())
+    if missing:
+        raise ValueError(f"Missing prices for: {missing}")
+
+    return {a: nav * w / prices[a] for a, w in weights.items()}
+```
+
+---
+
+## 9. Summary
+
+A correctly implemented strategy:
+
+1. **Is a pure function** with no side effects
+2. **Uses Decimal** for all quantities
+3. **Is total** over its declared domain
+4. **Fails explicitly** when preconditions are violated
+5. **Is deterministic** for identical inputs
+
+These properties ensure the strategy can be composed with the Ledger's execution model without breaking conservation, replay, or audit guarantees.

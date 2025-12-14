@@ -50,13 +50,14 @@ from .deferred_cash import (
 
 # Bond units
 from .bond import (
+    Coupon,
     create_bond_unit,
     compute_accrued_interest,
-    compute_coupon_payment,
+    compute_coupon_entitlements,
+    process_coupons,
     compute_redemption,
     transact as bond_transact,
     bond_contract,
-    generate_coupon_schedule,
     year_fraction,
 )
 
@@ -109,13 +110,14 @@ __all__ = [
     'deferred_cash_transact',
     'deferred_cash_contract',
     # Bonds
+    'Coupon',
     'create_bond_unit',
     'compute_accrued_interest',
-    'compute_coupon_payment',
+    'compute_coupon_entitlements',
+    'process_coupons',
     'compute_redemption',
     'bond_transact',
     'bond_contract',
-    'generate_coupon_schedule',
     'year_fraction',
     # Futures
     'create_future',
