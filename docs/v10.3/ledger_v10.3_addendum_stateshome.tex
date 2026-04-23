@@ -48,364 +48,806 @@
   morestring=[b]'
 }
 
-\title{The Ledger: Addendum to v10.3\\[6pt]
-\large StatesHome --- Where Does Unit State Live?\\
-\normalsize A resolution of \S 7 by 27-iteration adversarial multi-agent review}
+\title{The Ledger: Addendum A1 to v10.3\\[6pt]
+\large Locating Unit State: A Refinement of \S 7}
 \author{R.\ Delloye}
-\date{April 2026 --- Addendum A1 to v10.3}
+\date{April 2026}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-This addendum resolves the design question raised in \S 7 of the Ledger v10.3 specification: \emph{should the state of a unit be attached to the wallet or to the unit?} Four concrete test cases --- a future whose state depends on past transactions, a managed account whose state is inherently wallet-attached, a QIS strategy that trades futures, and an instrument that exists in the universe but has not been traded yet --- force the design. The conclusion, reached after twenty-seven independent adversarial agent invocations across eight review rounds, is that unit state lives in three distinct maps: an immutable versioned \textit{ProductTerms}, a shared mutable \textit{UnitStatus}, and a per-position \textit{PositionState}. There is no separate wallet-keyed state sector, because every economic per-wallet fact is naturally keyed by a mandate- or strategy-unit and collapses into \textit{PositionState}[w, u\textsubscript{MA}]. Twelve conditions, denoted C1--C12, make seven of the ten core invariants of \S 11 structurally unreachable. This addendum supersedes the phrasing at v10.3 line 1034 and line 2287.
+Section~7 of v10.3 introduced a unit state dictionary $\mathrm{state}_t(u)$ and noted that, for some instruments, the dictionary must be keyed by the pair $(w, u)$ rather than by $u$ alone. The phrasing was correct but coarse: it treated the per-unit and per-$(w,u)$ cases as a binary switch and left unspecified where shared mutable data (settlement prices, strategy weights, lifecycle stages) live. This addendum refines the treatment by resolving unit state into three distinct stores: an immutable, versioned, per-unit \textit{ProductTerms}; a mutable, per-unit, holder-shared \textit{UnitStatus}; and a per-holder, per-unit \textit{PositionState}. The refinement is not additive only: it removes the need for a separate wallet-keyed state store, because every economic fact that looked per-wallet is naturally keyed by $(w, u)$ once mandates and strategies are admitted as a new sub-class of unit (contract units). Eleven conditions and four auxiliary definitions govern the use and mutation of these three stores. Under these, the negation of v10.3 Invariant~P1 (conservation) and of v10.3 Invariant~P8 (snapshot consistency, time travel) become structurally unreachable in the persistent ledger state; three additional invariants internal to this addendum (Q1--Q3: terms immutability, identity permanence, handler-field canon) are also structurally unreachable. The refinement supersedes the phrasing at v10.3 line~1034 and the accessor signature at line~2287; the rest of the main document is unchanged.
 \end{abstract}
 
 \tableofcontents
 \clearpage
 
 %==============================================================================
-\section{The Question}
-\label{sec:question}
+\section{What This Addendum Changes, and What It Preserves}
+\label{sec:scope}
 %==============================================================================
+
+\subsection{The Passage Under Refinement}
+
+Section~7.3 of v10.3 (line~1034) establishes unit state as an explicit object:
 
 \begin{quote}
-Should the state of a unit be attached to the wallet or to the unit?
-
-Consider: (1) a future whose state depends on past transactions; (2) a managed account, whose state is inherently attached to a wallet; (3) a QIS strategy that trades futures; (4) an instrument that exists in the universe but has not been traded yet.
+\textit{``Each tradable object has a unit identifier $u$. Beyond static fields (currency, maturity, notional), the framework associates an explicit state dictionary $\mathrm{state}_t(u)$ at time $t$. Unit state is per-unit for most instrument types. For instruments with per-wallet state (e.g., futures accumulated cost), the state dictionary is per (wallet, unit) pair.''}
 \end{quote}
 
-\noindent Adversarial reviewers --- \texttt{formalis}, \texttt{jane-street-cto}, \texttt{testcommittee}, \texttt{correctness-architect}, \texttt{institutional-brake} --- stress-tested every proposal on testability, correctness, and simplicity.
+\noindent The read accessor is introduced at line~2287 as \texttt{view.get\_unit\_state(unit)}: a function from $u$ to the current state dictionary.
 
+This phrasing mixes three distinct concerns into one dictionary: (i) static contractual terms that never mutate, (ii) per-contract observables---settlement prices, lifecycle stage, strategy weights---that are mutable but shared by all holders, and (iii) per-position accounting state---accumulated cost, high-water marks, accrued fees---that must differ between two wallets holding the ``same'' contract. The distinction between (ii) and (iii) is real, not cosmetic: (ii) is read by every holder but written by one canonical lifecycle handler; (iii) is read and written only under the identity of a particular $(w, u)$ pair. Folding all three into \texttt{get\_unit\_state}$(u)$ forces the implementation either to duplicate shared observables across holders (breaking conservation of observables) or to carve per-$(w,u)$ data out of a per-$u$ dictionary by convention (defeating the type system).
+
+\subsection{What Is Preserved}
+
+The three-store refinement is compatible with every guarantee v10.3 established. Conservation (Invariant~P1) still holds for every unit by construction. Snapshot consistency / time travel (Invariant~P8) still holds because the three stores are each a deterministic function of the event log. Referential integrity, atomic commitment, lifecycle purity, and PnL path-independence all survive unchanged. What changes is the internal shape of the state dictionary and the read signatures; the external guarantees do not. A reader who only wants the guarantees and not the internal shape may stop here.
+
+The refinement introduces one substantive change to v10.3: it partitions the set $\mathcal{U}$ of units into \emph{asset units} and \emph{contract units}. Contract units (mandates, CSAs, strategy subscriptions) obey a restricted version of v10.3's unit laws; Section~\ref{sec:contract-units} states the carve-outs and justifies them.
+
+\subsection{Collapse of the Wallet Sector: What the Reader Needs to Know}
+
+Section~6 of v10.3 introduced managed accounts and CSA margin agreements (Credit Support Annex, the ISDA collateral agreement attached to an OTC contract) as ``wallet-level smart contracts''. This phrasing is compatible with two internal representations. The first gives each wallet an overlay dictionary containing per-mandate entries. The second promotes each mandate to a full unit, held by the client and issued by the manager, so that what looked like overlay fields are just \textit{PositionState} rows. The second is adopted here, subject to the contract-unit carve-outs of Section~\ref{sec:contract-units}. It respects conservation (by bookkeeping discipline, not by market mechanism), it composes correctly under multiple concurrent mandates on the same wallet, and it does not introduce a state sector whose keying convention differs from the rest of the ledger.
+
+\clearpage
 %==============================================================================
-\section{The Ruling}
-\label{sec:ruling}
+\section{Definitions}
+\label{sec:definitions}
 %==============================================================================
 
-\textbf{State attaches to three distinct objects, each with its own map and its own totality discipline.}
+This section defines every technical term the rest of the addendum uses. The style follows v10.3 \S 2: each term is stated as a definition and followed by a short gloss.
 
-\begin{lstlisting}
-ProductTerms  : Map[UnitId, NonEmptyList[TermsVersion]]   # total on registered u, append-only, versioned
-UnitStatus    : Map[UnitId, UnitStatus]                   # total on registered u, mutable, shared across holders
-PositionState : Map[(WalletId, UnitId), PositionState]    # monotone carrier, Option accessor, per-(holder, unit)
-\end{lstlisting}
+\subsection{The Three Stores}
 
-\noindent Plus a non-state, non-financial sidecar:
+\begin{definition}[ProductTerms]
+\label{def:productterms}
+The \emph{ProductTerms} store is a function
+\[
+\textit{ProductTerms} : \mathcal{U}_t^{\mathrm{reg}} \to \mathrm{NonEmptyList}[\textit{TermsVersion}],
+\]
+total on the set $\mathcal{U}_t^{\mathrm{reg}}$ of units registered at time $t$. It assigns to every registered unit a non-empty, append-only, chronologically ordered list of \textit{TermsVersion} records. A \textit{TermsVersion} is a snapshot of the contractual terms of the unit as of a given effective date. Existing versions are never mutated in place; amendments append a new \textit{TermsVersion}. The current terms of a unit are the last element of its list.
+\end{definition}
 
-\begin{lstlisting}
-WalletRegistry : Map[WalletId, WalletMetadata]            # KYC, permissions, audit cursor, NOT state
-\end{lstlisting}
+\begin{definition}[UnitStatus]
+\label{def:unitstatus}
+The \emph{UnitStatus} store is a function
+\[
+\textit{UnitStatus} : \mathcal{U}_t^{\mathrm{reg}} \to \textit{UnitStatusRecord},
+\]
+total on the set of registered units at time $t$. It assigns to every registered unit a mutable status record shared across all holders. Fields of a \textit{UnitStatusRecord} include the lifecycle stage (\textsc{listed}, \textsc{active}, \textsc{expired}, \textsc{settled}, \textsc{closed}), the last published settlement price and its date, the current strategy weights (for a Quantitative Investment Strategy unit), the triggered-barrier flag (for barrier products), and the supersession link (Condition~\ref{cond:amendment}). \textit{UnitStatus} is mutated by lifecycle handlers under the constraint that each field has exactly one canonical writer (Condition~\ref{cond:fieldcanon}).
+\end{definition}
 
-\noindent \textbf{There is no \texttt{WalletState} sector.} Every economic per-wallet fact turned out to be $(w, u_{\mathrm{mandate}})$-keyed once the mandate/strategy is given its rightful identity as a unit --- so the $W$-sector is empty of economic state and collapses into \textit{PositionState}.
+\begin{definition}[PositionState]
+\label{def:positionstate}
+The \emph{PositionState} store is a partial function
+\[
+\textit{PositionState} : \mathcal{W} \times \mathcal{U}_t^{\mathrm{reg}} \rightharpoonup \textit{PositionStateRecord},
+\]
+assigning to a pair (a holder wallet and a unit) the per-position accounting state of that holder's position in that unit. Fields of a \textit{PositionStateRecord} include the accumulated cost (for futures-like instruments), the clearinghouse binding when multiple clearinghouses are possible, the per-position OTC lifecycle cursor, the entry net asset value (for a subscription to a strategy), the high-water mark, accrued management and performance fees, the benchmark reference level at this holder's inception, and any mandate-breach flags. \textit{PositionState} is partial: not every holder/unit pair has a row.
+\end{definition}
 
-\subsection{The Three Keys, in One Line Each}
+\subsection{Registered Units and Totality}
 
-\begin{longtable}{p{3.5cm}p{3cm}p{8cm}}
+\begin{definition}[Registered unit set]
+\label{def:registered}
+The set $\mathcal{U}_t^{\mathrm{reg}} \subseteq \mathcal{U}$ of units registered at time $t$ is the set of unit identifiers written into the Unit Store by the \texttt{register} operation defined in Conditions~\ref{cond:unitstatusregistrationtotal} and \ref{cond:termsregistrationtotal}. Registration atomically adds a unit to $\mathcal{U}_t^{\mathrm{reg}}$, writes the initial \textit{TermsVersion}, and writes the default \textit{UnitStatus}. Registration is monotone: there is no \texttt{unregister} operator. Accessing an unregistered unit raises; accessing a registered unit always succeeds for \textit{ProductTerms} and \textit{UnitStatus}, and returns an optional value for \textit{PositionState}.
+\end{definition}
+
+\subsection{Asset Units and Contract Units}
+\label{sec:contract-units}
+
+\begin{definition}[Asset unit, contract unit]
+\label{def:unitclasses}
+The unit universe $\mathcal{U}$ partitions into two sub-classes.
+\begin{itemize}[leftmargin=*,nosep]
+\item An \emph{asset unit} represents a tradable economic claim: cash in a given currency, a listed equity, a listed derivative on a specific CCP, an OTC trade, a bond, a structured note, a tokenised security, a managed-strategy share class. Asset units are the subject of v10.3 \S 3.2's unit identity principle without modification. They are fungible-across-holders within their identity class, transferable between wallets through moves, divisible per their \texttt{multiplier} and currency conventions, and priceable under the standard valuation functional $V = \sum_u w(u) P(u)$.
+
+\item A \emph{contract unit} represents a bilateral service agreement: a mandate, a CSA, a subscription agreement, a prime brokerage overlay. A contract unit has one issuer (the service provider) and one holder (the client), both named in its \textit{ProductTerms}. It is \emph{not} fungible across holders: two clients' mandates differ in fee schedule, HWM methodology, and benchmark, and must not net against each other. It is \emph{not} transferable in the move sense: a mandate is a relationship, not a bearer instrument, and it moves only by novation (a breaking amendment). It is \emph{not} priceable under the standard valuation functional: it has no market price, only a residual accounting value expressed through the per-position fields.
+\end{itemize}
+\end{definition}
+
+\begin{remark}[Carve-outs of v10.3 unit laws for contract units]
+\label{rem:carveouts}
+For a contract unit, the following v10.3 unit-level laws are modified or withdrawn.
+\begin{itemize}[leftmargin=*,nosep]
+\item \emph{Fungibility across holders} (v10.3 \S 3.2): withdrawn. Contract units are fungible only within a single holder's position and only within a single \textit{TermsVersion}.
+\item \emph{Transferability via moves} (v10.3 \S 2.3): restricted to novation events, which are breaking amendments (Condition~\ref{cond:amendment}).
+\item \emph{Valuation under $V = \sum_u w(u) P(u)$} (v10.3 \S 4): withdrawn. Contract units contribute zero to portfolio valuation by the standard functional; the economic value of a contract manifests through the \textit{PositionState} fields (accrued fees, HWM, mark of the underlying strategy) which are separately accounted.
+\item \emph{Conservation} (v10.3 \S 11 P1): \emph{retained but by bookkeeping, not by market}. Section~\ref{sec:accountability} explains the distinction. The balance $\sum_w w(u) = 0$ holds trivially by the $\pm 1$ issuance discipline: the manager issues with balance $-1$, the client holds with balance $+1$. This is conservation as accounting discipline, not as market mechanism.
+\end{itemize}
+\end{remark}
+
+\begin{remark}[Accountability, not arithmetic]
+\label{rem:accountability}
+\label{sec:accountability}
+The $-1$ balance the manager carries on a mandate is not an economic short position in the sense an OTC equity option short is. The manager does not owe the client a mandate back; the manager owes the client \emph{performance under the mandate}. The Dirac sentinel-unit scheme considered in Section~\ref{sec:alternatives} fails precisely because no identifiable party stands behind the $-1$ side: the conservation sum is declared by fiat. The contract-unit scheme passes because the $-1$ is assigned to the manager, who is an accountable legal person. The distinction between the two schemes is one of accountability, not of balance arithmetic: both produce $\sum_w w(u) = 0$; only one has a named party standing behind it.
+\end{remark}
+
+\subsection{Accessor and Carrier Disciplines}
+
+\begin{definition}[Option accessor discipline]
+\label{def:optionaccessor}
+The read accessor for \textit{PositionState} returns an optional value:
+\[
+\mathrm{position\_state}(w, u) : \mathrm{Option}[\textit{PositionStateRecord}].
+\]
+The two return shapes are semantically distinct. A result of \texttt{None} means \emph{this wallet has never held this unit}. A result of \texttt{Some}$(r)$, including the case where every field of $r$ is zero, means \emph{this wallet has held this unit at some point and currently stands flat}. Consumers that must distinguish ``never held'' from ``held-and-closed''---variation margin settlement, wash-sale lookback for tax reporting, record-date entitlement calculations for dividends---depend on this distinction. Collapsing \texttt{None} into \texttt{Some} of a zero record is forbidden.
+\end{definition}
+
+\begin{definition}[Growing key-set discipline]
+\label{def:growingkeyset}
+The key set of \textit{PositionState} is \emph{extensive}: once a key pair has received a write, the key is never removed. Closing out a position leaves a row with every balance-like field equal to zero. The row is preserved for the lifetime of the unit. (This discipline was called ``monotone carrier'' in a preceding draft; the present name avoids collision with the order-theoretic sense of monotone.) The extensive property is what makes the replay operator a literal fold over the event stream---see Remark~\ref{rem:foldidentity}.
+\end{definition}
+
+\subsection{Events, Deltas, Conservation, and Replay}
+
+\begin{definition}[StateDelta]
+\label{def:statedelta}
+A \emph{StateDelta} is the output of an event handler: a structured record describing a proposed modification to one or more of the three stores. A \textit{StateDelta} has three components: a list of \textit{ProductTerms} appends, a list of \textit{UnitStatus} field writes, and a list of \textit{PositionState} row writes. A \textit{StateDelta} is a mathematical object with no side effects; applying it is a separate step (Condition~\ref{cond:atomic}).
+\end{definition}
+
+\begin{definition}[Conserved field set]
+\label{def:conservedfields}
+Each \textit{PositionState} field has a conservation status declared at unit registration in \texttt{ProductTerms[u].field\_spec}. The conservation status is immutable under preserving amendments and re-declared only on breaking amendments. For all units considered in this addendum, \texttt{accumulated\_cost} and \texttt{balance} are conserved; \texttt{hwm}, \texttt{accrued\_fee}, \texttt{entry\_nav}, and \texttt{mandate\_breach\_flags} are non-conserved. Write
+\[
+\mathcal{F}_{\mathrm{cons}}(u) = \{f : \mathrm{field\_spec}[u][f].\mathrm{conserved} = \mathrm{True}\}.
+\]
+\end{definition}
+
+\begin{definition}[Handler-level conservation]
+\label{def:handlerconservation}
+For each unit $u$ touched by a handler's output and each field $f \in \mathcal{F}_{\mathrm{cons}}(u)$, the \textit{StateDelta} $\Delta$ produced by the handler satisfies
+\[
+\sum_{(w, u') \in \mathrm{rows}(\Delta),\; u' = u} \Delta f(w, u) \;=\; 0.
+\]
+The sum is over rows written by that single event, not over the full key space of \textit{PositionState}; it is a per-event structural law, not a global audit. Induction over the event stream then yields the global invariant $\sum_w f(w, u) = 0$ (Theorem~\ref{thm:conservation}).
+\end{definition}
+
+\begin{definition}[Vacuous base case]
+\label{def:vacuous}
+A lifecycle event fires \emph{vacuously} on a unit when the set of holders of that unit is empty at event time. For such an event the handler-level conservation constraint is discharged trivially because the sum is empty. The base case matters because it catches a common bug class---per-share division or per-holder fan-out computed without checking that holders exist---before it can occur. See Section~\ref{sec:untraded}.
+\end{definition}
+
+\begin{definition}[Apply and replay fold]
+\label{def:apply}
+Write \texttt{apply} for the deterministic function that applies a single event to a state snapshot, producing a new snapshot. Write \texttt{apply\_from} for its iterated form over a list of events starting from a given snapshot:
+\[
+\mathrm{apply\_from}(s, \texttt{[]}) = s, \qquad \mathrm{apply\_from}(s, e :: \mathit{rest}) = \mathrm{apply\_from}(\mathrm{apply}(s, e), \mathit{rest}),
+\]
+and let $s_0$ denote the empty state. The global replay fold is $\mathrm{apply\_all}(E) = \mathrm{apply\_from}(s_0, E)$.
+\end{definition}
+
+\begin{definition}[Structural unreachability (persistent)]
+\label{def:structural}
+A state predicate $\varphi$ is \emph{structurally unreachable in the persistent ledger state} when no sequence of well-typed events, applied through the \texttt{apply} boundary with conservation enforcement, can yield a committed state satisfying $\varphi$. The delta that would produce $\varphi$ may still be constructible in handler code; conservation rejection at \texttt{apply} prevents it from reaching persistence. A stronger sense---``unreachable at any point in the handler computation''---would require refinement types on handler output and is a future direction; it is not claimed here. Throughout this addendum, ``structurally unreachable'' means unreachable in the persistent state, per this definition.
+\end{definition}
+
+\begin{remark}[Fold identity under extensive key-sets]
+\label{rem:foldidentity}
+If the \textit{PositionState} key set is extensive (Definition~\ref{def:growingkeyset}), then for every index $k$,
+\[
+\mathrm{apply\_all}(E) \;=\; \mathrm{apply\_from}\bigl(\mathrm{apply\_all}(E[0{:}k]),\; E[k{:}]\bigr).
+\]
+The equation is type-correct: both sides are states; the right-hand side threads an intermediate state through the split. The identity holds because no event's behaviour depends on the \emph{absence} of a key. If keys could be removed, a later event might observe a different key set depending on whether an earlier close-out preceded or followed the replay boundary, and the fold would no longer be associative.
+\end{remark}
+
+\subsection{Fungibility and Amendments}
+
+\begin{definition}[Fungibility predicate]
+\label{def:fungibility}
+The \emph{fungibility predicate} is a product-declared function
+\[
+\mathrm{is\_fungibility\_preserving} : \textit{TermsVersion} \times \textit{TermsAmendment} \to \{\textsc{preserving}, \textsc{breaking}\}.
+\]
+It takes the current \textit{TermsVersion} and a proposed amendment and returns whether the amendment preserves fungibility of existing positions with positions opened under the amended terms. The predicate must satisfy three properties to be accepted at registration:
+\begin{itemize}[leftmargin=*,nosep]
+\item \emph{Deterministic:} the same $(\mathit{TermsVersion}, \mathit{TermsAmendment})$ input produces the same decision on every invocation.
+\item \emph{Monotone under field change:} an amendment that changes a superset of the fields an already-classified-breaking amendment changes is itself breaking.
+\item \emph{Conservation-safe:} any amendment that changes a field in the conservation-affecting dependency set---the settlement currency, the multiplier, or any field that defines membership in $\mathcal{F}_{\mathrm{cons}}$---is breaking.
+\end{itemize}
+Predicates that violate any of the three are rejected at registration. A coupon-rate tweak within a declared corridor is typically preserving; an ISIN change, a benchmark substitution, a bond restructuring, or a currency change is breaking. The predicate itself is versioned and governed.
+\end{definition}
+
+\subsection{Placing a New Field: Decision Tree}
+\label{sec:decisiontree}
+
+Given a candidate field, the following procedure locates its store.
+\begin{enumerate}[leftmargin=*]
+\item \emph{Does the field's value differ between two wallets holding the same unit?} If yes, it is per-holder: \textit{PositionState}$[w, u]$.
+\item \emph{Does the field mutate after the unit is created?} If no, it is immutable: \textit{ProductTerms}$[u]$.
+\item \emph{Otherwise}, it is mutable but shared: \textit{UnitStatus}$[u]$.
+\item \emph{If the field represents a per-client fact about a mandate or strategy,} find the contract unit (mandate, CSA, subscription) and place the field on \textit{PositionState}$[w, u]$ under that contract unit---never on a per-wallet scalar.
+\end{enumerate}
+Steps~1 and 2 together decide among the three stores. Step~4 handles the wallet-sector collapse: what looks like a per-wallet fact is really a per-position fact under an appropriate contract unit.
+
+\subsection{Compact Notation Used in This Addendum}
+
+In the prose, we refer to ``the mandate unit'', ``the strategy unit'', ``the manager's wallet'', and ``the client's wallet'' rather than using subscripted symbols. Subscripts appear in equations only where disambiguation is essential---for the QIS example of Section~\ref{sec:qis}, which simultaneously involves the strategy unit, the futures underlyings, a potential mandate wrapper, the strategy's trading wallet, and the client's wallet, we retain $u_{\mathrm{QIS}}, u_{\mathrm{ES}}, w_{\mathrm{QIS}}, w_C$ for readability.
+
+The acronyms used in this addendum are: CCP (central counterparty, the clearinghouse into which exchange-traded derivatives are novated); CSA (Credit Support Annex, the ISDA collateral agreement attached to an OTC trade); CDM (Common Domain Model, the ISDA/FINOS canonical data model); HWM (high-water mark, the running maximum of a client's net asset value used to determine performance fees); NAV (net asset value); QIS (Quantitative Investment Strategy, a rule-based index-like product); SFTR (Securities Financing Transactions Regulation, EU); EMIR (European Market Infrastructure Regulation); UTI (Unique Transaction Identifier); LEI (Legal Entity Identifier); VM (variation margin, daily mark-to-market cash flow on a cleared derivative).
+
+\clearpage
+%==============================================================================
+\section{The Three-Store Decomposition}
+\label{sec:threestore}
+%==============================================================================
+
+\subsection{What Lives Where}
+
+Each of the three stores has a distinct mutation discipline, a distinct key, and a distinct canonical reader. Table~\ref{tab:stores} summarises the assignment.
+
+\begin{longtable}{p{3.3cm}p{3cm}p{8.5cm}}
+\caption{The three state stores. Each store is keyed differently and mutated by a disjoint set of handlers.}\label{tab:stores}\\
 \toprule
-\textbf{Key} & \textbf{Home} & \textbf{Examples} \\
+\textbf{Store} & \textbf{Key} & \textbf{Representative fields} \\
 \midrule
-$u$ (immutable) & \textit{ProductTerms} & multiplier, currency, expiry, CCP, strike, ISIN, fee schedule, mandate text, benchmark identity, index methodology \\
+\endfirsthead
+\textit{ProductTerms} & $u$ (immutable, versioned) & multiplier, currency, expiry, clearinghouse, strike, ISIN, fee schedule, mandate text, benchmark identity, index methodology, field conservation spec \\
 \addlinespace
-$u$ (mutable, shared) & \textit{UnitStatus} & \texttt{lifecycle\_stage}, \texttt{last\_settlement\_price}, \texttt{last\_settlement\_date}, \texttt{current\_weights}, \texttt{nav\_index}, \texttt{triggered\_barrier}, \texttt{superseded\_by} \\
+\textit{UnitStatus} & $u$ (mutable, shared) & lifecycle stage, last settlement price, last settlement date, current strategy weights, NAV index level, triggered-barrier flag, supersession link \\
 \addlinespace
-$(w, u)$ & \textit{PositionState} & \texttt{accumulated\_cost}, \texttt{ccp\_binding}, per-position OTC lifecycle, \texttt{entry\_nav}, \texttt{hwm}, \texttt{accrued\_\{mgmt,perf\}\_fee}, \texttt{benchmark\_nav\_at\_inception}, \texttt{mandate\_breach\_flags} \\
+\textit{PositionState} & $(w, u)$ (partial) & accumulated cost, clearinghouse binding, per-position OTC lifecycle cursor, entry NAV, HWM, accrued management fee, accrued performance fee, benchmark reference level at inception, mandate breach flags \\
 \bottomrule
 \end{longtable}
 
-\subsection{Two Orthogonal Disciplines on \textit{PositionState}}
+The remainder of this section justifies the three assignments. Section~\ref{sec:conditions} then states the eleven conditions that govern their use.
 
+\subsection{Why ProductTerms Is Versioned and Append-Only}
+
+Unit terms change over time: a bond coupon steps up, a CSA's eligible-collateral list is amended, a fee schedule is re-negotiated. An implementation that mutated the terms in place would lose the historical version, which is needed for three purposes: (a) regulatory reconstruction---the terms in force at a past settlement must be recoverable; (b) audit of past PnL decomposition, which is computed against the then-current terms; and (c) safe amendment rollback if a version is retracted before its effective date.
+
+The append-only, non-empty list discipline serves these purposes at no cost to the common case: the current terms are the last element of the list and can be cached. The non-emptiness is a type-level guarantee that ProductTerms is never absent for a registered unit: registration writes the first TermsVersion atomically with the creation of the entry (Condition~\ref{cond:termsregistrationtotal}).
+
+\subsection{Why UnitStatus Is Separate from ProductTerms}
+
+ProductTerms and UnitStatus are both keyed by $u$, so one might ask whether they should be a single store. They should not, for two reasons.
+
+\emph{First, the mutation disciplines differ.} ProductTerms is append-only and written by a governance process (contract amendment). UnitStatus is written on every settlement, every corporate action, every strategy rebalance, and every lifecycle stage transition. Merging them would force one of two compromises: either UnitStatus inherits append-only semantics, producing a new TermsVersion on every mark-to-market---a write amplification of orders of magnitude---or ProductTerms inherits in-place mutation, defeating the amendment audit trail.
+
+\emph{Second, the readers differ.} ProductTerms is read by pricing and by amendment processing. UnitStatus is read by every holder during variation margin settlement and by every client looking up current strategy weights. Co-locating data with different read patterns behind a single accessor hides the difference from the caller and makes caching decisions harder. Separation makes the access pattern explicit.
+
+\subsection{Why PositionState Is Per-$(w,u)$ and Not Per-$u$}
+
+Two wallets holding the ``same'' contract can have different accounting state even when the contract is fully fungible as an asset unit. A manager and a client both long the same E-mini S\&P contract have different entry prices and therefore different accumulated cost; a client subscribed to a strategy in March and a client subscribed in July have different high-water marks even though both are long the identical strategy unit; two clients whose mandates bind on different dates have different benchmark reference levels.
+
+There is no per-$u$ data layout that can encode distinct accounting state for two simultaneous holders without either (a) duplicating the row under a synthetic key that includes the holder, in which case the store is in fact per-$(w, u)$ with extra ceremony, or (b) aggregating across holders and losing the distinction. Keying PositionState by $(w, u)$ is the only layout that preserves holder distinguishability by types rather than by convention.
+
+\subsection{Two Orthogonal Disciplines on PositionState}
+
+PositionState is governed by two disciplines that operate on different axes and are both required.
+
+The first is the Option accessor discipline of Definition~\ref{def:optionaccessor}: reading a key that has never been touched returns \texttt{None}, and reading a key that is currently flat but has been touched returns \texttt{Some} of a zero record. This is a discipline on the \emph{type} of the read result.
+
+The second is the growing key-set discipline of Definition~\ref{def:growingkeyset}: once a key has been written, it is never deleted. This is a discipline on the \emph{storage} layout.
+
+The two are orthogonal. The Option accessor could in principle be provided by a store that deletes closed-out rows (returning \texttt{None} instead of \texttt{Some} of zero), and an extensive store could in principle expose a bare accessor that defaults missing keys to a zero record (collapsing \texttt{None} and \texttt{Some} of zero). Neither of these is acceptable for the framework. A deleting store would break Remark~\ref{rem:foldidentity}: replay would cease to be associative because the key set would depend on whether close-outs preceded or followed the replay boundary. A collapsing accessor would break the semantic distinction on which wash-sale reporting and record-date entitlements depend.
+
+Both disciplines are therefore required, and they are required independently. This is the first of the eleven conditions.
+
+\clearpage
+%==============================================================================
+\section{The Eleven Conditions}
+\label{sec:conditions}
+%==============================================================================
+
+The three-store decomposition is necessary but not sufficient. Eleven additional conditions govern how the stores are written, read, and registered. They fall into four groups:
+\begin{itemize}[leftmargin=*,nosep]
+\item \emph{Structural} (C1, C3, C5, C9, C11): govern the shape of the stores.
+\item \emph{Write-discipline} (C2, C10): govern who may mutate what, preserving what.
+\item \emph{Registration-totality} (C4, C6, C8): govern what must exist at registration and what to do with the empty case.
+\item \emph{Amendment} (C7): governs the two-track fungibility rule.
+\end{itemize}
+A fifth group, \emph{authorisation}, is deferred: cross-wallet read authorisation is governed by a separate capability layer outside the scope of this addendum.
+
+Each condition is stated as a property, explained by the failure mode it prevents, and referenced to the layer that enforces it (types, schema, or handler obligation) with a specific pointer to the reference implementation of Section~\ref{sec:reference}.
+
+\begin{condition}[Option accessor and extensive carrier, both]\label{cond:optionmonotone}
+The PositionState accessor returns \texttt{Option[PositionStateRecord]} (Definition~\ref{def:optionaccessor}) and the key set is extensive (Definition~\ref{def:growingkeyset}).
+
+\emph{Failure mode prevented.} A bare (non-Option) accessor collapses ``never held'' into ``held and flat'', silently producing false-positive results for wash-sale lookback, record-date entitlement, and historical holdings queries. A non-extensive store breaks replay associativity (Remark~\ref{rem:foldidentity}) and forces lifecycle handlers to distinguish ``closed on replay path A'' from ``closed on replay path B''.
+
+\emph{Enforcement.} Two layers. (1) The application API of \texttt{Ledger.position} (see \S\ref{sec:reference}) returns \texttt{Optional[PositionState]} and exposes no delete operator. (2) The persistence schema revokes row-deletion privileges from the application database role. Under these two, no code path in the application can construct the illegal state. Admin-level access is outside this threat model and governed by separate controls.
+\end{condition}
+
+\begin{condition}[Handler-level conservation with vacuous base case]\label{cond:handlerconservation}
+Each event handler produces a StateDelta whose sum over rows of each conserved field is zero (Definition~\ref{def:handlerconservation}). The case of zero holders is included as a vacuous base case (Definition~\ref{def:vacuous}).
+
+\emph{Failure mode prevented.} A handler that distributes a cash flow per holder but fails to handle the zero-holder case may divide by zero, or more insidiously, may silently emit no moves while updating UnitStatus---leaving the ledger apparently consistent but semantically broken. The vacuous case is also the simplest unit test.
+
+\emph{Enforcement.} By handler obligation: \texttt{Ledger.apply} (see \S\ref{sec:reference}) sums the delta's row values per conserved field at the \texttt{apply} boundary and raises on non-zero sum; no uncovered delta reaches persistence. Contrast C3 below.
+\end{condition}
+
+\begin{condition}[Atomic StateDelta across the three stores]\label{cond:atomic}
+A StateDelta is applied atomically across ProductTerms, UnitStatus, and PositionState. Partial application is rejected.
+
+\emph{Failure mode prevented.} A rebalance event that updates UnitStatus (new strategy weights) but fails to update the strategy's PositionState rows (corresponding futures trades) leaves the reported strategy weights inconsistent with the strategy's actual holdings---a silent divergence that no downstream consumer can detect without cross-store reconciliation.
+
+\emph{Enforcement.} By the storage layer: the three-store write in \texttt{Ledger.apply} is wrapped in a single database transaction at the persistence boundary.
+
+\emph{Relationship to C2.} C2 is a property of the StateDelta qua mathematical object: the sum over rows of each conserved field is zero, enforceable at handler output. C3 is a persistence discipline: the delta is applied as a single atomic write across the three stores. C2 governs the delta's content; C3 governs the write's atomicity. Both are needed: C2 without C3 allows torn writes; C3 without C2 persists non-conserving state atomically.
+\end{condition}
+
+\begin{condition}[UnitStatus total at registration]\label{cond:unitstatusregistrationtotal}
+For every unit registered in $\mathcal{U}_t^{\mathrm{reg}}$, UnitStatus is present and fully initialised with product-declared default values at registration time.
+
+\emph{Failure mode prevented.} A handler that reads UnitStatus before any trade has touched the unit---for example, on listing-day lifecycle activation---must not observe an absent entry. Registration totality makes every lifecycle transition from \textsc{listed} to \textsc{active} to \textsc{expired} expressible purely through UnitStatus updates, with no PositionState row required.
+
+\emph{Enforcement.} By schema: \texttt{Ledger.register} (see \S\ref{sec:reference}) atomically writes the first UnitStatus record alongside the first ProductTerms version.
+\end{condition}
+
+\begin{condition}[ProductTerms versioned and append-only]\label{cond:termsappendonly}
+ProductTerms of a unit is a \texttt{NonEmptyList[TermsVersion]}, written only by appending. In-place mutation of an existing TermsVersion is forbidden.
+
+\emph{Failure mode prevented.} A mutable TermsVersion destroys the audit of amendment history and makes past PnL non-reconstructable (past moves were made against the then-current terms, which would no longer exist). The type also forestalls an absent-terms bug: a non-empty list has a first element by construction.
+
+\emph{Enforcement.} By types: the \texttt{NonEmpty} type in \S\ref{sec:reference} has an append-only API and no mutation method.
+\end{condition}
+
+\begin{condition}[ProductTerms total at registration]\label{cond:termsregistrationtotal}
+For every unit in $\mathcal{U}_t^{\mathrm{reg}}$, ProductTerms contains at least one TermsVersion, written atomically at registration.
+
+\emph{Failure mode prevented.} Separating registration of a unit from the first terms write allows a window in which the unit is referenced but has no defined contractual terms, making every downstream computation on it ill-defined.
+
+\emph{Enforcement.} By schema: \texttt{Ledger.register} (see \S\ref{sec:reference}) takes a TermsVersion as a mandatory argument.
+\end{condition}
+
+\begin{condition}[Amendment is two-track, governed by the fungibility predicate]\label{cond:amendment}
+An amendment to the terms of a unit is classified by the product-declared fungibility predicate (Definition~\ref{def:fungibility}) as either preserving or breaking. A preserving amendment appends a new TermsVersion to the unit's ProductTerms list and leaves existing PositionState rows untouched. A breaking amendment allocates a fresh unit identifier, writes the new terms as that unit's ProductTerms, stamps a supersession link in the old unit's UnitStatus, and emits an atomic re-subscription StateDelta that re-keys positions from the old unit to the new while preserving the conservation sum.
+
+\emph{Failure mode prevented.} Mutating a unit's terms in place when the amendment is breaking silently changes the economic content of every outstanding position. Allocating a fresh unit for every amendment---including those that preserve fungibility---bloats the unit universe and destroys netting.
+
+\emph{Enforcement.} By handler obligation: \texttt{Ledger.amend} (see \S\ref{sec:reference}) branches on the fungibility predicate's output and invokes the preserving or breaking path accordingly.
+\end{condition}
+
+\begin{condition}[Handlers discharge conservation vacuously on zero-holder units]\label{cond:vacuous}
+Each handler's conservation obligation includes the empty-rows case (Definition~\ref{def:vacuous}).
+
+\emph{Failure mode prevented.} A dividend handler implemented as \texttt{per\_share = total / n\_holders} fails with division by zero on a listed-but-untraded security; more subtly, a rebalance handler that reads the set of holders and distributes pro-rata can silently update UnitStatus without emitting any PositionState writes when no one holds the unit. Both are caught by the empty-rows obligation.
+
+\emph{Enforcement.} By handler obligation and by test: the zero-holder case is a mandatory unit test in the handler test suite. A handler that fails to return explicitly on the empty case cannot be registered through the handler-registration path of \S\ref{sec:reference}.
+\end{condition}
+
+\begin{condition}[Re-registration is a hard error]\label{cond:rereg}
+Attempting to register a unit whose identifier already exists in $\mathcal{U}_t^{\mathrm{reg}}$ is rejected. Registration is never a silent reset.
+
+\emph{Failure mode prevented.} A silent reset would destroy the amendment history, the lifecycle stage, and all existing PositionState rows under the old identity, while leaving outstanding references---in cached trade confirmations, in pending settlement instructions, in external regulatory reports---dangling.
+
+\emph{Enforcement.} By schema: \texttt{Ledger.register} performs a compare-and-set against the registry and raises on collision.
+\end{condition}
+
+\begin{condition}[Each PositionState field is tagged with its canonical handler]\label{cond:fieldcanon}
+Every field of PositionStateRecord is annotated with the unique handler class that is permitted to mutate it: \texttt{accumulated\_cost} by settlement and trade handlers, \texttt{hwm} by the fee-crystallisation handler, \texttt{entry\_nav} by the subscription handler, \texttt{accrued\_management\_fee} by the fee-accrual handler, and so on. Mutation by any other handler is a type error.
+
+\emph{Failure mode prevented.} When multiple handlers can write the same field, idempotency becomes a cross-handler coordination problem: replaying an event produces different results depending on which handler wrote a given field last. Field-canon tagging makes idempotency a per-key deduplication within a single handler class.
+
+\emph{Enforcement.} By types: field access is gated by handler-class tokens in the \texttt{FIELD\_SPEC} of \S\ref{sec:reference}.
+\end{condition}
+
+\begin{condition}[No per-wallet scalar store for economic state]\label{cond:wcollapse}
+All per-holder economic state with respect to a mandate or strategy lives at PositionState under the appropriate contract unit. Flat per-wallet scalars holding economic state---a wallet-keyed HWM, a wallet-keyed accrued fee---are not permitted.
+
+\emph{Failure mode prevented.} A flat per-wallet scalar collapses the mandate dimension: a client holding two mandates on the same wallet (base and overlay, or two concurrent strategies) cannot carry two HWMs, two accrued fee balances, two breach flags. The single per-wallet scalar would silently aggregate or overwrite.
+
+\emph{Enforcement.} By schema: the WalletRegistry (\S\ref{sec:walletregistry}) declares only metadata fields and no economic scalars.
+\end{condition}
+
+\subsection{The Wallet Registry Is Metadata, Not State}
+\label{sec:walletregistry}
+
+There is a fourth store in the system, but it holds no economic state:
+
+\begin{definition}[WalletRegistry]
+The \emph{WalletRegistry} is a total function $\textit{WalletRegistry} : \mathcal{W} \to \textit{WalletMetadata}$, where WalletMetadata contains non-economic fields: Know-Your-Customer status, permissions, the audit cursor, and operational flags. It is not part of the state layer.
+\end{definition}
+
+\noindent The WalletRegistry participates in authorisation and operational concerns; it does not participate in conservation, in PnL, or in time travel of economic state. Its separation from the three state stores is what makes Condition~\ref{cond:wcollapse} easy to enforce by convention alone: if a field seems to want to live on WalletMetadata but carries economic content, it has been mis-placed and should live on a PositionState row keyed by the appropriate contract unit.
+
+\subsection{On Authorisation}
+
+Cross-wallet read authorisation---who may read PositionState under which wallet---is not addressed by the eleven conditions above. The v2 draft of this addendum included a ``capability'' condition at this point; it is withdrawn. The v10.3 main document does not define a capability layer, and introducing one here as a new primitive would exceed the addendum's scope. Cross-wallet authorisation is the subject of a separate authorisation-layer specification. Readers of the eleven conditions should assume that per-wallet reads are authorised elsewhere.
+
+\clearpage
+%==============================================================================
+\section{How v10.3 \S 7 Is Refined}
+\label{sec:refinement}
+%==============================================================================
+
+\subsection{Replacement Text for Line 1034}
+
+The sentence at v10.3 line~1034 is replaced by the following block:
+
+\begin{quote}
+Each registered unit carries immutable, versioned ProductTerms and mutable, holder-shared UnitStatus. Each held position $(w, u)$ carries a PositionState record, accessed through an Option-valued accessor in which \texttt{None} means ``never held'' and \texttt{Some} of a zero record means ``held and currently flat''. State pertaining to a client's relationship to a strategy, mandate, or managed account lives at PositionState under a contract unit---a mandate, CSA, or subscription agreement registered per v10.3 \S 6 and classified as a contract unit per Definition~\ref{def:unitclasses}. There is no separate wallet-keyed state store; the WalletRegistry holds only operational metadata.
+\end{quote}
+
+\subsection{Replacement Signature for Line 2287}
+
+The accessor \texttt{view.get\_unit\_state(unit)} is refined into three accessors:
+
+\begin{lstlisting}
+view.product_terms(unit)          -> NonEmptyList[TermsVersion]
+view.unit_status(unit)            -> UnitStatusRecord
+view.position_state(wallet, unit) -> Option[PositionStateRecord]
+\end{lstlisting}
+
+\noindent During migration, \texttt{get\_unit\_state(unit)} is retained as a deprecated alias that concatenates \texttt{product\_terms(unit)} and \texttt{unit\_status(unit)}. The single-argument form never returned per-holder data and so carries no migration risk; the two-argument form at v10.3 line~2287 is the dangerous one and is explicitly replaced by \texttt{position\_state(wallet, unit)}.
+
+\subsection{What Else Moves}
+
+A handful of small refinements accompany the line~1034 replacement.
 \begin{itemize}[leftmargin=*]
-\item \textbf{Accessor returns \texttt{Option[PositionState]}} (Lattner, Jane Street): \texttt{None} means \emph{this wallet has never held this unit}. \texttt{Some(zero)} means \emph{held once, currently flat}. Both readings are load-bearing (VM-settle, wash-sale lookback, record-date entitlements); \texttt{None} versus \texttt{Some(zero)} cannot be collapsed.
-\item \textbf{Carrier is monotone} (Feynman, testcommittee): once created, a row is never garbage-collected. Close-out leaves a \texttt{zero} row. This makes replay a literal fold --- \texttt{apply\_all(events)} is identical regardless of checkpoint boundaries --- and makes the conservation property a single pass over a stable key set.
+\item The \texttt{clearinghouse} field at v10.3 line~1168 is re-described: when the same contract class can be cleared through multiple CCPs, each CCP gives rise to a distinct unit in ProductTerms; the per-$(w, u)$ CCP binding in PositionState is an explicit acknowledgement of that partition, not a per-wallet override of a shared field.\footnote{This modifies v10.3 \S 3.2's unit identity rule for listed derivatives by including the clearing venue in the unit identity. The change is motivated by the non-fungibility of positions cleared at different CCPs for a given holder.}
+\item The \texttt{first\_touch\_date} field, which appears in some informal discussions of v10.3, is explicitly \emph{not} a PositionState field. It is derived from the event log on demand. Caching it in PositionState would create a fold inconsistency under back-dated corrections.
+\item The ``wallet-level smart contract'' language of v10.3 \S 6 is preserved. The refinement makes explicit that such a contract's state lives at PositionState under a contract unit rather than under a separate wallet-keyed store.
 \end{itemize}
 
-\noindent The two are orthogonal: one is type discipline, the other is storage discipline. Both are required. This is \textbf{C1}.
-
-\subsection{Conservation Lives at the Event Handler, Not at the Storage Shape}
-
-No map layout can enforce $\sum_w \texttt{accumulated\_cost}(w, u) = 0$ by types alone; refinement types on decimal sums are not free in any production language. Instead, every event handler --- \texttt{Trade}, \texttt{SettleVM}, \texttt{CorporateAction}, \texttt{QISRebalance}, \texttt{MandateAmend} --- produces a \texttt{StateDelta} that satisfies
-\[
-\sum_w \Delta f(w, u) = 0
-\]
-\emph{structurally per event class}, with explicit proofs for the 2-leg, $K$-leg, VM-fan-out, and vacuous (zero-holder) base cases. Induction over the event stream gives the global invariant. This is \textbf{C2}.
-
-\subsection{The Twelve Conditions C1--C12}
-
-\begin{description}[leftmargin=3.2em,labelwidth=2.8em,labelsep=0.4em,style=nextline]
-\item[\textbf{C1}] Option accessor + monotone carrier, both.
-\item[\textbf{C2}] Handler-level conservation, per event class, with vacuous base case.
-\item[\textbf{C3}] Atomic \texttt{StateDelta} across \textit{ProductTerms} / \textit{UnitStatus} / \textit{PositionState}. Partial application rejected.
-\item[\textbf{C4}] Capability-scoped reads; cross-$(w, u_{\mathrm{MA}})$ overlay reads forbidden; strategy exports flow only through \textit{UnitStatus}.
-\item[\textbf{C5}] \textit{UnitStatus} registration-total; product-declared defaults applied at Unit Store registration.
-\item[\textbf{C6}] \textit{ProductTerms} versioned append-only; no in-place mutation.
-\item[\textbf{C7}] \textit{ProductTerms} registration-total; first write at registration.
-\item[\textbf{C8}] Amendment two-track: a product-declared fungibility predicate decides \emph{Preserving} (append \texttt{TermsVersion}) versus \emph{Breaking} (allocate fresh $u$ + \texttt{SupersededBy}).
-\item[\textbf{C9}] Handlers on zero-holder units discharge $\sum = 0$ vacuously; per-class proof obligation includes the empty case.
-\item[\textbf{C10}] Re-registration of a $u_{\mathrm{id}}$ is a hard error --- never a silent reset.
-\item[\textbf{C11}] Each \textit{PositionState} field is tagged with the unique handler allowed to mutate it (\texttt{ac} $\to$ settle/trade; \texttt{hwm} $\to$ fee\_crystallise; \texttt{entry\_nav} $\to$ subscribe; $\ldots$).
-\item[\textbf{C12}] All per-$(w, \mathrm{mandate}/\mathrm{strategy})$ economic state lives at \textit{PositionState}$[w, u_{\mathrm{MA}}]$ / $[w, u_{\mathrm{QIS}}]$ --- no flat per-wallet scalars for economic state. $W$-sector collapse enforced by schema.
-\end{description}
-
+\clearpage
 %==============================================================================
-\section{Effect on v10.3, Line 1034}
-\label{sec:line1034}
-%==============================================================================
-
-The v10.3 main document currently reads:
-
-\begin{quote}
-\textit{``Unit state is per-unit for most instrument types. For instruments with per-wallet state (e.g., futures accumulated cost), the state dictionary is per (wallet, unit) pair.''}
-\end{quote}
-
-\noindent This phrasing is replaced by:
-
-\begin{quote}
-Every unit $u \in \mathcal{U}$ carries immutable \textit{ProductTerms}$[u]$ (versioned append-only) and mutable \textit{UnitStatus}$[u]$ (shared across all holders). Every held position $(w, u)$ carries a \textit{PositionState}$[w, u]$, with \texttt{None} on the accessor distinguishing ``never held'' from \texttt{Some}$(zero_P)$ ``held-and-flat''. State pertaining to a holder's relationship to a strategy, mandate, or managed account lives at \textit{PositionState}$[w, u_{\mathrm{MA}}]$ where $u_{\mathrm{MA}}$ is the mandate/strategy contract unit. There is no separate wallet-keyed state sector.
-\end{quote}
-
-\noindent The change is additive-then-swap: \texttt{get\_unit\_state}$(u)$ remains as a deprecated alias to \texttt{product\_terms}$(u)$ \texttt{++} \texttt{unit\_status}$(u)$; \texttt{get\_unit\_state}$(w, u)$ at line 2287 maps to \texttt{position\_state}$(w, u)$.
-
-%==============================================================================
-\section{Application to the Four Test Cases}
+\section{Four Test Cases}
 \label{sec:testcases}
 %==============================================================================
 
-\subsection{Future with State Depending on Past Transactions}
+The original motivation for this refinement was a set of four concrete scenarios that v10.3 \S 7 handled but only at the cost of the binary per-unit/per-$(w,u)$ split. This section shows how each scenario is handled under the three-store decomposition, with numeric traces.
 
-\begin{longtable}{p{5.5cm}p{3.5cm}p{6cm}}
+\subsection{A Future Whose State Depends on Past Transactions}
+\label{sec:future}
+
+Three clients take positions in the CME-cleared E-mini S\&P futures contract: client $A$ is long ten, client $B$ is short fifteen, client $C$ is long five. All three share the contract specification. Their accumulated costs, entry prices, and variation margin trajectories differ.
+
+Table~\ref{tab:future-fields} records the store assignment.
+
+\begin{longtable}{p{5.8cm}p{3.2cm}p{6cm}}
+\caption{E-mini S\&P: field placement.}\label{tab:future-fields}\\
 \toprule
-\textbf{Field} & \textbf{Home} & \textbf{Rationale} \\
+\textbf{Field} & \textbf{Store} & \textbf{Why it lives there} \\
 \midrule
-\texttt{multiplier}, \texttt{currency}, \texttt{expiry}, \texttt{clearinghouse}, \texttt{exchange}, \texttt{product\_id} & \textit{ProductTerms}$[u_{\mathrm{ES}}]$ & Immutable. CME-ES and ICE-ES are \emph{distinct units} (this replaces v10.3 line 1168's ``per-wallet clearinghouse'' phrasing). \\
+multiplier, currency, expiry, clearinghouse, exchange, product identifier & ProductTerms & Immutable contract specification. CME-cleared and ICE-cleared E-mini are distinct units. \\
 \addlinespace
-\texttt{lifecycle\_stage}, \texttt{last\_settlement\_price}, \texttt{last\_settlement\_date} & \textit{UnitStatus}$[u_{\mathrm{ES}}]$ & Shared across all holders. One settle price per contract. \\
+lifecycle stage, last settlement price, last settlement date & UnitStatus & Shared observables. One settlement price per contract, published by the exchange and applied uniformly. \\
 \addlinespace
-\texttt{accumulated\_cost} (\texttt{ac}) & \textit{PositionState}$[w, u_{\mathrm{ES}}]$ & Conservation $\sum_w \texttt{ac}(w, u) = 0$ holds by handler-level structural zero-sum on every \texttt{Trade} (buyer delta + seller delta = 0) and every \texttt{SettleVM} (each wallet reset to target; cash moves offset exactly). \\
+accumulated cost & PositionState & Per-holder by necessity: three clients, three different accumulated costs. \\
 \bottomrule
 \end{longtable}
 
-\begin{itemize}[leftmargin=*]
-\item \textbf{Per-$(w, u)$ state earns its place} by the Karpathy substitution test: two wallets holding the same contract can have different \texttt{ac}; any $u$-keyed layout would collapse them.
-\item \textbf{\texttt{first\_touch\_date} is NOT state} --- it is derived from the event log on demand. Caching it in \textit{PositionState} would create a fold-inconsistency under back-dated corrections (R5\_futures A3).
-\item \textbf{Settled positions retain their rows} (monotone carrier). Tax reporting, wash-sale lookback, and 1099-B reconstruction demand the ghost row.
-\end{itemize}
-
-\subsection{Managed Account --- The ``Inherently Wallet-Attached'' Case}
-
-\textbf{The mandate itself is a unit} ($u_{\mathrm{MA}}$). v10.3 \S 6 already places mandates in $\mathcal{U}$ (``the managed-account smart contract'', ``CSA margin as a wallet-level smart contract''). The mandate is issued by the manager and held by the client:
-\[
-w_{\mathrm{manager}}(u_{\mathrm{MA}}) = -1 \qquad w_{\mathrm{client}}(u_{\mathrm{MA}}) = +1 \qquad \sum_w w(u_{\mathrm{MA}}) = 0.
-\]
-
-\noindent With $u_{\mathrm{MA}}$ promoted to a first-class unit, every field that \emph{looked} per-wallet in Sec 6 relocates naturally:
-
-\begin{longtable}{p{8.5cm}p{6.5cm}}
-\toprule
-\textbf{Field} & \textbf{Home} \\
-\midrule
-Mandate text, fee schedule, benchmark identity, max position limits & \textit{ProductTerms}$[u_{\mathrm{MA}}]$ \\
-HWM hurdle methodology, crystallisation frequency & \textit{ProductTerms}$[u_{\mathrm{MA}}]$ \\
-HWM \emph{value} (client-specific), \texttt{hwm\_date} & \textit{PositionState}$[w_{\mathrm{client}}, u_{\mathrm{MA}}]$ \\
-Accrued mgmt / perf fee, mandate breach flags, subscription / redemption cursor & \textit{PositionState}$[w_{\mathrm{client}}, u_{\mathrm{MA}}]$ \\
-Benchmark NAV at this wallet's inception & \textit{PositionState}$[w_{\mathrm{client}}, u_{\mathrm{MA}}]$ \\
-Current benchmark level (shared, from index source) & \textit{UnitStatus}$[u_{\mathrm{bench}}]$ \\
-\bottomrule
-\end{longtable}
-
-\paragraph{Why this is not the Dirac $u_\emptyset$ hack.} $u_\emptyset$ had no issuer, no holder, no conservation partner --- it was a self-reflexive sentinel that broke $\sum_w = 0$ by fiat. $u_{\mathrm{MA}}$ is a real contract with a real issuer (manager) and a real holder (client); conservation holds by the standard issuance law.
-
-\paragraph{Multi-mandate composition} (a client with base + overlay mandate on the same wallet) is handled natively: two separate $(w_{\mathrm{client}}, u_{\mathrm{MA,base}})$ and $(w_{\mathrm{client}}, u_{\mathrm{MA,overlay}})$ rows, each with its own HWM, fees, breach flags. A flat per-wallet scalar would have collapsed them.
-
-\subsection{QIS Strategy that Trades Futures}
-
-\textbf{Five distinct keyings coexist --- and no two are in the same map.}
+\paragraph{Numeric trace.} Write \texttt{ac} for \texttt{accumulated\_cost}, multiplier $\$50/\mathrm{pt}$ absorbed.
 
 \begin{lstlisting}
-u_QIS         -- the strategy itself (a tradable unit)
-u_ES, u_NQ    -- the futures the strategy trades
-u_MA_C        -- the mandate under which client C holds QIS (if applicable)
-w_QIS         -- the strategy's own wallet (where futures positions live)
-w_C           -- a client wallet
+t=0  Trade: A buys 10 ES at 4500 from B
+     PS[A, ES].ac -= 45000 ; PS[B, ES].ac += 45000
+     row sum = 0                                         [C2]
+t=1  Trade: C buys 5 ES at 4520 from B
+     PS[C, ES].ac -= 22600 ; PS[B, ES].ac += 22600
+     row sum = 0                                         [C2]
+t=2  SettleVM(ES, close = 4510)
+     PS[A, ES].ac += 100  (A gains 10 ticks at $1/tick)
+     PS[B, ES].ac -= 50   (B, net short 5, loses 10 ticks)
+     PS[C, ES].ac -= 50   (C, long 5, loses 10 ticks from 4520)
+     row sum = 0                                         [C2]
+t=3  Close: A sells 10 ES at 4510 to B
+     PS[A, ES].ac += 45100 ; PS[B, ES].ac -= 45100
+     row sum = 0                                         [C2]
+     PS[A, ES] retained with ac = 100 (realised PnL)    [C1 extensive]
 \end{lstlisting}
 
-\begin{longtable}{p{8.5cm}p{6.5cm}}
-\toprule
-\textbf{State} & \textbf{Home} \\
-\midrule
-Strategy contract terms (vol target, barrier, universe, share-class index start) & \textit{ProductTerms}$[u_{\mathrm{QIS}}]$ \\
-Strategy current state (\texttt{last\_rebalance\_date}, \texttt{current\_weights}, \texttt{cumulative\_return}, \texttt{nav\_index}, \texttt{vol\_realised}, \texttt{triggered\_barrier}) & \textit{UnitStatus}$[u_{\mathrm{QIS}}]$ --- \emph{strategy-level, shared across all holders} \\
-Futures positions held by the strategy (\texttt{accumulated\_cost}, ccp) & \textit{PositionState}$[w_{\mathrm{QIS}}, u_{\mathrm{ES}}]$, $[w_{\mathrm{QIS}}, u_{\mathrm{NQ}}]$, $[w_{\mathrm{QIS}}, u_{\mathrm{YM}}]$ \\
-Per-client subscription state (\texttt{entry\_nav}, \texttt{hwm}) & \textit{PositionState}$[w_C, u_{\mathrm{QIS}}]$ \\
-Per-client mandate overlay (if any) & \textit{PositionState}$[w_C, u_{\mathrm{MA,C}}]$ \\
-\bottomrule
-\end{longtable}
+\noindent After $t{=}3$, the PositionState row $[A, \mathrm{ES}]$ is retained with \texttt{ac} equal to the realised gain. Tax reporting, wash-sale lookback, and year-end reconciliation all require the row to remain accessible. The Option accessor now returns \texttt{Some} of a non-zero record.
 
-\paragraph{HWM resolved.} R5 had a live tension: \textit{WalletState}$[w_C]$.overlays$[u_{\mathrm{MA}}]$ (R5\_managed\_account) versus \textit{PositionState}$[w_C, u_{\mathrm{QIS}}]$ (R5\_qis). \texttt{correctness-architect} and \texttt{formalis} broke the tie: a client holding \emph{two} strategies must carry \emph{two} HWMs, so any $w$-only keying collapses them. HWM lives at \textit{PositionState}$[w_C, u_{\mathrm{QIS}}]$ (or $[w_C, u_{\mathrm{MA,C}}]$ when a mandate wrapper is in force).
+\subsection{A Managed Account: The Inherently Wallet-Attached Case}
+\label{sec:managed}
 
-\paragraph{Rebalance event.} The barrier-hit or monthly-rebalance event is one atomic \texttt{StateDelta} that updates \textit{UnitStatus}$[u_{\mathrm{QIS}}]$ (new weights, new lifecycle if barrier breached) \emph{and} the strategy's \textit{PositionState}$[w_{\mathrm{QIS}}, u_{\mathrm{ES/NQ/YM}}]$ rows (via trade moves on the underlying futures). C3 mandates atomicity across all three maps.
+A manager runs a discretionary portfolio on behalf of a client. The mandate specifies a fee schedule with a management fee and a performance fee subject to a high-water mark. The client's accrued fees, HWM, benchmark reference level, and breach flags appear to be per-wallet facts; they are specific to this client's relationship with this manager.
 
-\paragraph{Wind-down.} \textit{UnitStatus}$[u_{\mathrm{QIS}}].\texttt{lifecycle\_stage} \to \texttt{CLOSED}$ propagates to clients as a NAV-strike redemption event. \textit{PositionState}$[w_C, u_{\mathrm{QIS}}]$ rows are \textbf{retained} with balance 0 (monotone carrier); they preserve the audit trail and the final HWM for tax reporting.
-
-\subsection{Instrument in the Universe that Has Not Been Traded Yet}
-
-\begin{itemize}[leftmargin=*]
-\item \textit{ProductTerms}$[u]$ --- \textbf{present} at Unit Store registration. C7.
-\item \textit{UnitStatus}$[u]$ --- \textbf{present and fully initialised} at registration with product-declared defaults (e.g., \texttt{lifecycle\_stage = LISTED}, \texttt{last\_settlement\_price = None}). C5. \texttt{view.unit\_status}$(u)$ is \emph{total}.
-\item \textit{PositionState}$[w, u]$ --- \textbf{no rows} for any $w$. \texttt{view.position\_state}$(w, u) = $ \texttt{None} for all $w$ until first touch. C1.
-\item \textit{WalletRegistry}$[w]$ --- unaffected.
-\end{itemize}
-
-\paragraph{Lifecycle totality.} An untraded option can transition $\texttt{LISTED} \to \texttt{ACTIVE} \to \texttt{EXPIRED}$ purely through \textit{UnitStatus} updates, with zero \textit{PositionState} rows ever created. Handlers fire on $\texttt{holders\_of}(u) = \emptyset$ and discharge $\sum_w \Delta = 0$ vacuously (C9). A naive bug class --- \texttt{dividend\_per\_share / len(holders)} --- is caught by C9's explicit empty-set obligation.
-
-\paragraph{Amendment discipline.} A bond amendment that preserves fungibility (coupon step-up, CSA eligible-collateral change, fee-rate tweak within declared band) appends a \texttt{TermsVersion} to \textit{ProductTerms}$[u]$ --- existing \textit{PositionState} rows survive untouched. An amendment that breaks fungibility (new ISIN, benchmark swap, bond restructuring) allocates a fresh $u_{\mathrm{new}}$, stamps $\texttt{SupersededBy}(u_{\mathrm{old}} \to u_{\mathrm{new}})$ in both \textit{UnitStatus} rows, and emits an atomic re-subscription \texttt{StateDelta} that moves $(w, u_{\mathrm{old}}) \to (w, u_{\mathrm{new}})$ preserving $\sum_w$. The product-declared fungibility predicate
+Section~6 of v10.3 admits mandates as ``wallet-level smart contracts''. Here the smart contract is given its full identity as a \emph{contract unit} per Definition~\ref{def:unitclasses}. The manager issues it with balance $-1$; the client holds it with balance $+1$:
 \[
-\texttt{is\_fungibility\_preserving} : \textit{ProductTerms} \times \textit{TermsAmendment} \to \{\texttt{Preserving}, \texttt{Breaking}\}
+w_{\mathrm{manager}}(u_{\mathrm{MA}}) = -1, \qquad w_{\mathrm{client}}(u_{\mathrm{MA}}) = +1, \qquad \sum_w w(u_{\mathrm{MA}}) = 0.
 \]
-is total and testable. C8.
 
-%==============================================================================
-\section{Pareto Frontier --- Alternatives Considered and Rejected}
-\label{sec:pareto}
-%==============================================================================
+\noindent This is \emph{bookkeeping conservation} (Remark~\ref{rem:accountability}): the manager does not owe the client a mandate back but owes performance under the mandate. The $-1$ names an accountable party, which is what distinguishes the scheme from the sentinel-unit scheme of Section~\ref{sec:alternatives}.
 
-The iteration tested six candidates on three axes (0--10, higher = better; simplicity axis inverted for display):
+Table~\ref{tab:mandate} shows the field assignment under the contract unit.
 
-\begin{longtable}{p{7cm}rrr}
+\begin{longtable}{p{8.5cm}p{5.5cm}}
+\caption{Mandate state, re-keyed from per-wallet to $(w_{\mathrm{client}}, u_{\mathrm{MA}})$.}\label{tab:mandate}\\
 \toprule
- & \textbf{Testability} & \textbf{Correctness} & \textbf{Simplicity (viable)} \\
+\textbf{Field} & \textbf{Store} \\
 \midrule
-A --- v10.3 current (per-unit + per-(w,u) for futures) & 4 & 5 & 4 \\
-\textbf{B --- 3 maps + C1--C12 (ship)} & \textbf{9} & \textbf{9} & \textbf{8} \\
-C --- Dirac $\sigma : W \times U \rightharpoonup S_u$ with $u_\emptyset$ sentinel & 7 & 3 & 7 \\
-D --- Minsky 4-map (retains explicit \textit{WalletState}) & 7 & 7 & 5 \\
-E --- Grothendieck sheaf on $H_t \subseteq W \times U$ & 8 & 9 & 2 \\
-F --- 2-map (\textit{ProductTerms} + \textit{PositionState}) with universe wallet $w_\star$ & 5 & 6 & 6 \\
+Mandate text, fee schedule, benchmark identity, maximum position limits & ProductTerms[$u_{\mathrm{MA}}$] \\
+HWM hurdle methodology, crystallisation frequency & ProductTerms[$u_{\mathrm{MA}}$] \\
+HWM value (client-specific), HWM date & PositionState[$w_{\mathrm{client}}, u_{\mathrm{MA}}$] \\
+Accrued management fee, accrued performance fee & PositionState[$w_{\mathrm{client}}, u_{\mathrm{MA}}$] \\
+Mandate breach flags, subscription and redemption cursor & PositionState[$w_{\mathrm{client}}, u_{\mathrm{MA}}$] \\
+Benchmark reference level at this client's inception & PositionState[$w_{\mathrm{client}}, u_{\mathrm{MA}}$] \\
+Current benchmark level (shared, from the index administrator) & UnitStatus[$u_{\mathrm{bench}}$] \\
 \bottomrule
 \end{longtable}
 
-\paragraph{Domination findings.}
+\paragraph{Two wallets, two mandates, no collapse.} A client with a base discretionary mandate and a concurrent overlay mandate on the same wallet carries two distinct PositionState rows: one under $u_{\mathrm{MA,base}}$ and one under $u_{\mathrm{MA,overlay}}$, each with its own HWM, accrued fees, and breach flags. A flat per-wallet scalar representation would have collapsed them. This is the failure Condition~\ref{cond:wcollapse} prevents.
+
+\subsection{A Quantitative Investment Strategy That Trades Futures}
+\label{sec:qis}
+
+A Quantitative Investment Strategy is a rule-based tradable product whose return is generated by a systematic trading algorithm running against a declared universe. A client subscribes to the strategy; the strategy itself holds a trading wallet that executes the underlying trades. Five keyings coexist:
+
+\begin{lstlisting}
+u_QIS  -- the strategy unit (asset unit), tradable by clients
+u_ES, u_NQ, u_YM -- futures the strategy holds in its trading wallet
+u_MA_C -- a mandate contract unit, if the client holds QIS in a wrapper
+w_QIS  -- the strategy's own trading wallet
+w_C    -- the client's wallet
+\end{lstlisting}
+
+\noindent No two of these live in the same store. Table~\ref{tab:qis} shows the assignment.
+
+\begin{longtable}{p{8.5cm}p{5.5cm}}
+\caption{QIS state, split across the three stores by key.}\label{tab:qis}\\
+\toprule
+\textbf{Field} & \textbf{Store} \\
+\midrule
+Strategy contract terms: volatility target, barrier level, tradable universe, share-class index start level & ProductTerms[$u_{\mathrm{QIS}}$] \\
+\addlinespace
+Strategy current state: last rebalance date, current strategy weights, cumulative return, NAV index, realised volatility, triggered-barrier flag & UnitStatus[$u_{\mathrm{QIS}}$] (strategy-level, shared across all holders) \\
+\addlinespace
+Futures positions held by the strategy: accumulated cost, CCP binding & PositionState[$w_{\mathrm{QIS}}, u_{\mathrm{ES}}$], etc. \\
+\addlinespace
+Per-client subscription state: entry NAV, HWM & PositionState[$w_C, u_{\mathrm{QIS}}$] \\
+\addlinespace
+Per-client mandate overlay, if present & PositionState[$w_C, u_{\mathrm{MA,C}}$] \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Rebalance row-set.} A rebalance is not one event but a \emph{compound}: one weight-update on UnitStatus[$u_{\mathrm{QIS}}$] plus $N$ trade events, one per underlying, whose counterparty rows are the executing CCP or market-maker. Conservation over \texttt{accumulated\_cost} holds row-sum-zero on each trade; the UnitStatus weight update is not a conserved-field write. The atomic StateDelta spans three stores and $N+1$ counterparty wallets.
+
+\paragraph{Numeric trace.} A weekly rebalance moves weights (ES, NQ, YM) from $(0.50, 0.30, 0.20)$ to $(0.40, 0.35, 0.25)$. Strategy NAV is $\$10{,}000{,}000$; contract multipliers $50/20/5$; prices ES $4500$, NQ $15000$, YM $35000$. Executing CCP is $w_{\mathrm{CME}}$.
+
+\begin{lstlisting}
+t=0  UpdateWeights(u_QIS, (0.50,0.30,0.20) -> (0.40,0.35,0.25))
+     US[u_QIS].weights := (0.40, 0.35, 0.25)
+     (not a conserved-field write)                              [C3]
+
+t=0  Trade: w_QIS sells 4 ES at 4500 to w_CME
+     PS[w_QIS, ES].ac += 900000 ; PS[w_CME, ES].ac -= 900000
+     row sum = 0                                                [C2]
+
+t=0  Trade: w_QIS buys 2 NQ at 15000 from w_CME
+     PS[w_QIS, NQ].ac -= 600000 ; PS[w_CME, NQ].ac += 600000
+     row sum = 0                                                [C2]
+
+t=0  Trade: w_QIS buys 3 YM at 35000 from w_CME
+     PS[w_QIS, YM].ac -= 525000 ; PS[w_CME, YM].ac += 525000
+     row sum = 0                                                [C2]
+\end{lstlisting}
+
+\noindent The four lines above are one atomic StateDelta (C3). Without atomicity, a reader observing UnitStatus might see the new weights before the corresponding futures positions appear, producing a transient inconsistency visible to every client.
+
+\paragraph{HWM placement.} A client with two strategy subscriptions must carry two HWMs. The only representation that composes correctly is the per-$(w, u_{\mathrm{QIS}})$ row. When the client holds the strategy inside a mandate wrapper, the HWM of record for performance-fee purposes is on $(w_C, u_{\mathrm{MA,C}})$; when no wrapper mandate is in force, it is on $(w_C, u_{\mathrm{QIS}})$ directly. The distinction is carried by the mandate ProductTerms, not by a convention on the HWM value.
+
+\paragraph{Wind-down.} Transitioning the strategy's lifecycle stage to \textsc{closed} propagates to clients as a NAV-strike redemption event. Each client's PositionState row is updated to a zero balance and \emph{retained} by the extensive carrier discipline. The retained rows preserve the audit trail, the final HWM, and the per-client performance history for tax reporting.
+
+\subsection{An Instrument Listed in the Universe but Not Yet Traded}
+\label{sec:untraded}
+
+A listed option series is created on listing day, long before any holder takes a position. The framework must represent this state cleanly: the unit exists, its terms are fixed, its lifecycle stage is \textsc{listed}, and no wallet holds it.
+
 \begin{itemize}[leftmargin=*]
-\item \textbf{B strictly dominates A, C, D, F} on all three axes.
-\item \textbf{B dominates E} (Grothendieck): equal on correctness, higher on testability (sheaf generators require non-existent libraries), radically higher on simplicity. Elegance is real; shippability is not.
-\item \textbf{F looks simpler but isn't.} Folding \textit{UnitStatus} into \textit{PositionState}$[w_\star, u]$ re-introduces the per-unit/per-$(w,u)$ split as a \emph{runtime predicate} \texttt{is\_universe}$(w)$ on the wallet axis. Conservation $\sum_w \Delta \texttt{ac}(w, u) = 0$ must then \emph{exclude} $w_\star$ explicitly --- a carve-out, not a rule. This is the Minsky denormalisation trap. \textbf{B's \textit{UnitStatus} is the type-level expression of what F hides as a wallet-id convention.}
-\item \textbf{C (Dirac $u_\emptyset$)} fails day-one correctness: $u_\emptyset$ has no issuer, no conservation partner. It breaks $\sum_w w(u) = 0$ by fiat.
+\item ProductTerms: present, with the initial TermsVersion written at registration (Condition~\ref{cond:termsregistrationtotal}).
+\item UnitStatus: present and fully initialised with product-declared defaults---for an option, \texttt{lifecycle\_stage} is \textsc{listed}, \texttt{last\_settlement\_price} is absent, \texttt{triggered\_barrier} is \texttt{false} (Condition~\ref{cond:unitstatusregistrationtotal}). The accessor \texttt{unit\_status} is total.
+\item PositionState: no rows for any wallet. The accessor \texttt{position\_state} returns \texttt{None} for every wallet until first touch (Condition~\ref{cond:optionmonotone}).
+\item WalletRegistry: unaffected.
 \end{itemize}
 
-\noindent \textbf{B is the unique Pareto-optimum under any correctness gate $\geq 7$.} The iteration has converged.
+\paragraph{Lifecycle totality.} The sequence $\textsc{listed} \to \textsc{active} \to \textsc{expired}$ occurs entirely within UnitStatus, producing zero PositionState writes. Each transition fires with an empty holder set. The vacuous base case discharges the conservation obligation: the sum over zero rows is zero.
 
-\subsection{Why Exactly Three Maps --- Not Two, Not Four}
+\paragraph{The untraded-instrument bug.} Condition~\ref{cond:vacuous} catches a concrete bug class. The following dividend handler crashes on a listed-but-untraded security:
 
-Three independent forcing constraints, each of which breaks a different map:
+\begin{lstlisting}[language=pythonstyle]
+# Naive: crashes on listed-but-untraded unit
+def dividend_handler(u, total):
+    holders = all_holders_of(u)
+    per = total / len(holders)   # ZeroDivisionError
+    return [Move(treasury, w, per, cash) for w in holders]
+\end{lstlisting}
 
+\noindent The fix is to discharge conservation vacuously:
+
+\begin{lstlisting}[language=pythonstyle]
+# Correct: vacuous discharge of conservation
+def dividend_handler(u, total):
+    holders = all_holders_of(u)
+    if not holders:
+        return []                # sum = 0 trivially (C9)
+    per = total / len(holders)
+    return [Move(treasury, w, per, cash) for w in holders]
+\end{lstlisting}
+
+\paragraph{Amendment discipline.} Amendments flow through Condition~\ref{cond:amendment}. A fungibility-preserving amendment---a coupon-step-up within the declared corridor, a CSA eligible-collateral extension, an administrative fee-schedule tweak---appends a new TermsVersion. Existing PositionState rows, if any, are untouched. A fungibility-breaking amendment---an ISIN change, a benchmark swap, a bond restructuring---allocates a fresh unit. The new terms are written as the new unit's ProductTerms, a supersession link is stamped into the old unit's UnitStatus, and an atomic re-subscription StateDelta re-keys each position from the old unit to the new while preserving the conservation sum.
+
+\clearpage
+%==============================================================================
+\section{Alternatives Considered}
+\label{sec:alternatives}
+%==============================================================================
+
+Three alternative representations were considered before the three-store decomposition was adopted. Each fails for a specific reason, and the nature of the failure is instructive: it shows that removing any of the three stores, or adding a fourth, is forced by a corresponding feature of the problem.
+
+\subsection{Two Stores (ProductTerms and PositionState Only)}
+
+A seemingly simpler scheme fuses UnitStatus into PositionState by introducing a ``universe wallet'' $w_\star$ that holds the shared observables: the last settlement price sits on $[w_\star, u]$, the strategy weights on $[w_\star, u_{\mathrm{QIS}}]$, and so on. The scheme promises to reduce the number of stores from three to two.
+
+It fails at conservation. The conservation law must now be re-stated to exclude $w_\star$, and every conserved-field handler must be taught to exclude it. The per-$u$ vs.\ per-$(w, u)$ distinction that the scheme was supposed to eliminate has re-appeared as a runtime predicate on the wallet axis. Worse, the distinction is now enforced by convention (a wallet identifier check) rather than by the type system.
+
+\subsection{Four Stores (Keeping an Explicit WalletState)}
+
+A four-store scheme retains an explicit WalletState store keyed by $w$ alone, containing per-wallet economic fields: a wallet-keyed HWM, a wallet-keyed accrued fee, a wallet-keyed benchmark reference level. Every such field must be assigned to some mandate or strategy to be meaningful---a client's HWM is a HWM \emph{under some mandate}; there is no such thing as a mandate-free HWM.
+
+Enumerating the fields a WalletState would contain, each turns out to be naturally keyed by a contract unit. The HWM, accrued fees, and breach flags live at $(w, u_{\mathrm{MA}})$. The benchmark reference level lives at $(w, u_{\mathrm{MA}})$. The subscription and redemption cursor lives at $(w, u_{\mathrm{MA}})$ (or $(w, u_{\mathrm{QIS}})$ when the client holds the strategy without a wrapper mandate). The putative WalletState is empty of economic content. The four-store scheme introduces a sector whose cardinality is zero.
+
+\subsection{A Sentinel-Unit Scheme (``Dirac'')}
+
+A further scheme introduces a sentinel unit $u_\emptyset$ under which per-wallet state is keyed as PositionState$[w, u_\emptyset]$. The scheme is internally consistent except at the conservation law: $u_\emptyset$ has no issuer, no identifiable holder on the other side, and no accountable party standing behind the $-1$ balance. The conservation sum $\sum_w w(u_\emptyset) = 0$ would have to be declared by fiat rather than earned by an accountability discipline. Contrast the contract unit of Definition~\ref{def:unitclasses}: its $-1$ balance is carried by the manager, who is a legal person accountable for performance. See Remark~\ref{rem:accountability}. A system that carves out exceptions to its conservation law without naming the party behind them pays an ongoing correctness tax; the scheme is rejected on this ground.
+
+\subsection{Why Exactly Three}
+
+Three independent forcing constraints each break a different store:
 \begin{enumerate}[leftmargin=*]
-\item \textbf{Karpathy substitution} --- two wallets holding the ``same'' contract need distinct lifecycle state $\Rightarrow$ \textit{PositionState}$[w, u]$ is required.
-\item \textbf{Shared observables} --- \texttt{last\_settlement\_price}, index values, strategy weights are one-per-contract observables dereferenced by every holder $\Rightarrow$ a $u$-keyed map distinct from per-holder state is required.
-\item \textbf{Append-only versioned terms vs mutable per-$u$ status} --- \textit{ProductTerms} is never mutated in place (audit, amendment trail, regulatory reconstruction); \textit{UnitStatus} is written on every settle. Merging them would conflate two mutation disciplines under one name $\Rightarrow$ a third map is required.
+\item \emph{Two wallets holding the same contract must be distinguishable.} Distinct accumulated costs, distinct entry NAVs, distinct HWMs require PositionState$[w, u]$. Removing it is impossible.
+\item \emph{Shared observables exist.} A settlement price, an index level, a strategy weight vector is one-per-contract and is dereferenced by every holder; duplicating it across holders is both wasteful and inconsistent, so a $u$-keyed store distinct from PositionState is required.
+\item \emph{The audit discipline of terms differs from the mutation rate of status.} Versioned append-only amendment history conflicts with per-settlement mutation; merging them under a single name forces a compromise that breaks one of the two use cases.
 \end{enumerate}
 
-\noindent Removing any of the three breaks one of (i)--(iii). Adding a fourth (explicit \textit{WalletState}) introduces a sector whose economic content is empty (R6\_formalis \S 2 enumerates every candidate and shows each collapses to $(w, u_{\mathrm{MA}})$). The three-map schema is the minimum basis of the problem, not a compromise.
+\noindent The three stores are pinned by points (1), (2), and (3) respectively. Removing any of the three destroys the corresponding invariant. Adding a fourth introduces a sector whose economic cardinality is zero. Three is the minimum faithful decomposition; it is not a compromise.
 
+\clearpage
 %==============================================================================
-\section{Invariants that Become Structurally Unreachable}
+\section{Structurally Unreachable Invariants}
 \label{sec:unreachable}
 %==============================================================================
 
-Under B with C1--C12, 7 of v10.3's 10 core invariants (\S 11) are \textbf{structurally unreachable} --- the system cannot express the illegal state:
+``Structurally unreachable'' is defined in Definition~\ref{def:structural}: a state predicate is structurally unreachable in the persistent ledger state when no sequence of well-typed events, applied through the \texttt{apply} boundary with conservation enforcement, can yield a committed state satisfying it. This section establishes that the \emph{negation} of each of two v10.3 \S 11 invariants, and of three additional invariants internal to this addendum, is structurally unreachable.
 
-\begin{description}[leftmargin=3em,labelwidth=2em,labelsep=0.5em,style=nextline]
-\item[\textbf{P1}] (conservation of quantity) --- enforced by handler-level per-event-class structural zero-sum (C2) and atomic \texttt{StateDelta} (C3).
-\item[\textbf{P3}] (determinism of replay) --- monotone carrier (C1) makes $\texttt{apply\_all}(\texttt{events}[:k])$ \texttt{++} $\texttt{events}[k:] \equiv \texttt{apply\_all}(\texttt{events})$ a literal fold identity.
-\item[\textbf{P5}] (idempotency of lifecycle events) --- single $(w, u)$ lattice and per-field canonical handler (C11) make idempotency a per-key dedup, not a cross-map coordination.
-\item[\textbf{P6}] (immutability of terms) --- \texttt{NonEmptyList[TermsVersion]} append-only (C6) + registration totality (C7).
-\item[\textbf{P7}] (no in-place mutation of identity) --- C10 (re-registration rejected) + C8 (breaking amendments allocate $u_{\mathrm{new}}$, never rewrite $u_{\mathrm{old}}$).
-\item[\textbf{P9}] (capability scoping) --- C4 prohibits cross-$(w, u_{\mathrm{MA}})$ overlay reads.
-\item[\textbf{P10}] (handler-field canon) --- C11 names the unique writer per field; mutation by any other handler is a type error.
-\end{description}
+Restricting attention to the core ten v10.3 \S 11 invariants (P1--P10; SBL-specific invariants P11--P20 and obligation-liveness invariants P21--P23, declared elsewhere in v10.3, are outside this addendum's scope): P1 is conservation; P8 is snapshot consistency (time travel). The other eight---P2 atomic commitment, P3 referential integrity, P4 log monotonicity, P5 transaction idempotency, P6 lifecycle idempotency, P7 virtual/real isolation, P9 lifecycle purity, P10 PnL path-independence---are not newly made structurally unreachable by this addendum; they are already enforced by v10.3's existing primitives (atomic transactions, append-only move stream, deduplication by \texttt{tx\_id}, virtual wallet taxonomy, state-sufficiency of valuation).
 
-\noindent No other candidate exceeds 3 structurally-unreachable invariants (R7\_correctness).
+This addendum introduces three new invariants, labelled Q1 through Q3, that are specific to the three-store decomposition and that are not in the v10.3 \S 11 list. They are: Q1 immutability of terms, Q2 permanence of unit identity, and Q3 handler-field canon. The labels are fresh to make clear that these are addendum-level commitments.
 
+Honest count: two v10.3 invariants whose negation is structurally unreachable (P1, P8), plus three addendum-level invariants (Q1, Q2, Q3). Five in total.
+
+\subsection{v10.3 Invariant P1: Conservation}
+
+\begin{theorem}[C1 ensures non-violation of P1]\label{thm:conservation}
+The negation of v10.3 Invariant~P1---the existence at some time $t$ and some asset unit $u$ of a committed ledger state in which $\sum_w w_t(u) \neq 0$---is structurally unreachable (Definition~\ref{def:structural}).
+\end{theorem}
+
+\begin{proof}[Sketch]
+Each event handler produces a StateDelta satisfying handler-level conservation for each conserved field (Condition~\ref{cond:handlerconservation}), applied atomically (Condition~\ref{cond:atomic}). \texttt{Ledger.apply} (see \S\ref{sec:reference}) computes the per-field row sum and raises on non-zero sum; a non-conserving delta does not reach persistence. Induction on the event stream yields the global invariant. The vacuous base case (Condition~\ref{cond:vacuous}) covers events on zero-holder units.
+\end{proof}
+
+\begin{remark}[Rejection vs.\ prevention]
+\label{rem:rejection}
+Conservation is enforced by synchronous rejection at the \texttt{apply} boundary. The illegal state is never persisted, but it is \emph{constructible} in handler code up to the \texttt{apply} call. A stronger ``compile-time structural unreachability'' would require refinement types on handler output and is a future direction. In the sense of Definition~\ref{def:structural}---unreachable in the persistent state---conservation is structurally enforced; in a stronger sense, it is runtime-enforced.
+\end{remark}
+
+For contract units, the conservation sum holds by the bookkeeping discipline of Remark~\ref{rem:accountability} rather than by market mechanism, but the theorem applies in the form stated.
+
+\subsection{v10.3 Invariant P8: Snapshot Consistency}
+
+\begin{theorem}[C1 ensures non-violation of P8]\label{thm:p8}
+The negation of v10.3 Invariant~P8---the existence of an event stream $E$ and an index $k$ for which $\mathrm{apply\_all}(E) \neq \mathrm{apply\_from}(\mathrm{apply\_all}(E[0{:}k]), E[k{:}])$ in the persistent state---is structurally unreachable.
+\end{theorem}
+
+\begin{proof}[Sketch]
+Three hypotheses are required for replay-to-snapshot equivalence:
+\begin{enumerate}[leftmargin=*,nosep]
+\item Events are totally ordered under a reproducible ordering (v10.3 P4 log monotonicity and the sequencer's timestamp/tiebreak discipline).
+\item Handlers are pure of hidden inputs (v10.3 \S 7.5 purity).
+\item \texttt{apply}$(\mathit{delta}, \mathit{state})$ is deterministic on its inputs (v10.3 \S 2.3 move semantics).
+\end{enumerate}
+Condition~\ref{cond:optionmonotone}, carrier clause (extensive key-sets, Definition~\ref{def:growingkeyset}), adds the fourth hypothesis needed to lift replay-to-snapshot equivalence \emph{through close-outs}: no event's behaviour depends on the \emph{absence} of a key. Under (1)--(3) from v10.3 and the extensive-key-set discipline from this addendum, Remark~\ref{rem:foldidentity} yields the fold identity, which is P8 in the notation of Definition~\ref{def:apply}.
+\end{proof}
+
+\subsection{Addendum Invariant Q1: Terms Immutability}
+
+\begin{invariant}[Q1: Terms immutability]\label{inv:q1}
+An already-written TermsVersion is never mutated. Amendment appends a new version; breaking amendment allocates a fresh unit.
+\end{invariant}
+
+\begin{theorem}[C6 and C7 ensure non-violation of Q1]
+The negation of Q1 is structurally unreachable.
+\end{theorem}
+
+\begin{proof}[Sketch]
+By Condition~\ref{cond:termsappendonly} the TermsVersion list is an append-only \texttt{NonEmptyList} with no mutation API. By Condition~\ref{cond:amendment} amendments route through one of two named paths, neither of which mutates an existing version.
+\end{proof}
+
+\subsection{Addendum Invariant Q2: Identity Permanence}
+
+\begin{invariant}[Q2: Unit identity permanence]\label{inv:q2}
+A unit identifier once registered is never reassigned. Breaking amendments allocate a fresh identifier; the old is preserved under a supersession link.
+\end{invariant}
+
+\begin{theorem}[C9 and C7 ensure non-violation of Q2]
+The negation of Q2 is structurally unreachable.
+\end{theorem}
+
+\begin{proof}[Sketch]
+Re-registration is rejected by Condition~\ref{cond:rereg}. Breaking amendments, by Condition~\ref{cond:amendment}, allocate a fresh identifier and stamp a supersession link on the old unit's UnitStatus; neither path reassigns an existing identifier.
+\end{proof}
+
+\subsection{Addendum Invariant Q3: Handler-Field Canon}
+
+\begin{invariant}[Q3: Handler-field canon]\label{inv:q3}
+Every PositionState field has a unique canonical writer.
+\end{invariant}
+
+\begin{theorem}[C10 ensures non-violation of Q3]
+The negation of Q3 is structurally unreachable.
+\end{theorem}
+
+\begin{proof}[Sketch]
+By Condition~\ref{cond:fieldcanon}, which is a type-level gate on field access. Two handler classes attempting to write the same field fail to type-check.
+\end{proof}
+
+\subsection{What the Addendum Does Not Make Structurally Unreachable}
+
+Six of the v10.3 \S 11 invariants are not re-established here because they are already enforced by v10.3's primitives, independently of the state decomposition: P2 atomic commitment (transaction boundary), P3 referential integrity (wallet/unit existence check), P4 log monotonicity (append-only move stream), P5 transaction idempotency (\texttt{tx\_id} deduplication), P7 virtual/real isolation (wallet taxonomy), P9 lifecycle purity (pure handler functions), P10 PnL path-independence (state-sufficient valuation). P6 lifecycle idempotency remains a handler obligation and is assisted by Q3 (handler-field canon gives idempotency a single-owner key), but is not itself structurally unreachable in persistent state; an idempotent handler is a design discipline, not a type-level guarantee in the sense of Definition~\ref{def:structural}.
+
+\clearpage
 %==============================================================================
-\section{Mutation-Score and Testing Expectations}
-\label{sec:mutationscore}
+\section{Testing Targets}
+\label{sec:testing}
 %==============================================================================
 
-The \texttt{testcommittee} (R4, R7) committed to concrete numbers:
+The three-store decomposition constrains the test programme. Because the stores have different mutation disciplines, they have different mutation-testing profiles. The following figures are targets, not commitments.
 
 \begin{itemize}[leftmargin=*]
-\item Event handlers (arithmetic on \texttt{Decimal}): \textbf{85--90\%} mutation score --- conservation kills most sign/coefficient mutants.
-\item Lifecycle guards ($\texttt{LISTED} \to \texttt{ACTIVE} \to \texttt{EXPIRED}$): \textbf{70--80\%} --- boundary-comparison mutants (\texttt{>} vs \texttt{>=}) require targeted tests.
-\item Overall core: $\geq$ \textbf{80\%} --- meets the Feathers change-safety threshold.
-\item State-machine spec at $|W|=3,\ |U|=2,\ \text{depth}\leq 6$: $10^5$--$10^6$ reachable states (TLC-tractable); conservation-violating handlers caught at depth 1.
+\item \textbf{Event handlers over conserved \texttt{Decimal} fields.} Target mutation score: 85--90 percent. The handler-level conservation constraint kills most sign and coefficient mutants directly---a mutated delta that no longer sums to zero fails the conservation test immediately.
+\item \textbf{Lifecycle guards.} Target mutation score: 70--80 percent. Boundary-comparison mutants---replacing \texttt{>} with \texttt{>=}, or \texttt{<=} with \texttt{<}---require targeted tests around the lifecycle transition points; they are not caught by conservation alone.
+\item \textbf{Core state layer overall.} Target mutation score: at least 80 percent. This meets the common industry threshold for change-safe core code.
+\item \textbf{Reachable state exploration.} For small state-machine configurations---three wallets, two units, event-sequence depth at most six---the reachable state space is of order $10^5$ to $10^6$ configurations, tractable for an explicit-state model checker. A conservation-violating handler is caught at depth one.
 \end{itemize}
 
-\noindent The generator universe --- CDM enum $\times$ product-type cross-product --- is finite and enumerable, so test coverage is structurally bounded.
+\noindent The generator universe for property-based testing is the Cartesian product of CDM enumerations (v10.3 \S 10, \S 11) with the product-type universe. Because both components are finite and enumerable, test coverage is structurally bounded.
 
+\clearpage
 %==============================================================================
-\section{Risk Register --- Institutional-Brake Gate (R8)}
+\section{Risk Register for Migration}
 \label{sec:risk}
 %==============================================================================
 
-The \texttt{institutional-brake} reviewer raised eight concerns. None invalidate the design on correctness grounds; all are migration / governance / operational risks that must be budgeted for.
+The refinement does not invalidate any correctness property of v10.3. It does introduce migration, governance, and operational risks that a programme plan must budget for. The eight risks below have been reviewed and none is a correctness blocker; each is an engineering or stakeholder concern.
 
-\begin{longtable}{p{0.7cm}p{6.5cm}p{7.5cm}}
+\begin{longtable}{p{0.8cm}p{6.2cm}p{7.8cm}}
+\caption{Migration risk register. Items marked with an asterisk require stakeholders outside the engineering team before implementation can begin.}\\
 \toprule
 \textbf{\#} & \textbf{Risk} & \textbf{Mitigation} \\
 \midrule
-F1 & Migration scope of retrofitting v10.3 (every downstream reader of \texttt{unit\_state}) & Ship \texttt{get\_unit\_state} as deprecated alias; additive split before cutover; parallel-run at least one quarter with reconciliation. \\
+R1 & Migration scope: every downstream reader of the legacy \texttt{get\_unit\_state} accessor must be updated. & Retain \texttt{get\_unit\_state} as a deprecated alias that concatenates \texttt{product\_terms} and \texttt{unit\_status}; land the additive split before the cutover; run the parallel representations for at least one quarter and reconcile. \\
 \addlinespace
-F2 & Ownership of the C8 fungibility predicate is ungoverned & Assign per-product RACI in the Unit Store registry; Legal/Product/Risk sign-off required for predicate changes; version the predicate itself. \\
+R2* & Governance of the fungibility predicate (Condition~\ref{cond:amendment}): who declares, who reviews, who retracts. & Assign a per-product RACI in the Unit Store registry; require Legal, Product, and Risk sign-off for any predicate change; version the predicate itself alongside TermsVersion. \\
 \addlinespace
-F3 & Monotone carrier key-space growth at $10^7 \times 10^6$ scale is unbenchmarked & Benchmark Option-accessor cost and cache behaviour before merge; add tombstone-compaction policy for \textit{PositionState} where a row has been \texttt{Some(zero)} for $>$ retention horizon. \\
+R3 & Extensive carrier growth at the target scale of roughly $10^7$ wallets and $10^6$ units is unbenchmarked. & Benchmark the Option-accessor cost and cache behaviour before merge. Accept unbounded key-set growth as a genuine operational cost of the extensive-carrier discipline; a tombstone-with-compaction policy would contradict Condition~\ref{cond:optionmonotone} (closed-and-compacted would be indistinguishable from never-held) and is not adopted. Focus R3 mitigation on capacity planning and retrieval-path caching. \\
 \addlinespace
-F4 & C1--C12 is a multi-sprint test programme, not a release & Land the schema first with C1/C5/C6/C7/C9/C10 (type-enforced-for-free); stage C2/C3/C8/C11 over subsequent releases; never merge without at least C1 + C2 + C3. \\
+R4 & The full set of Conditions~\ref{cond:optionmonotone}--\ref{cond:wcollapse} is a multi-sprint test programme, not a single release. & Land the schema first with Conditions~\ref{cond:optionmonotone}, \ref{cond:unitstatusregistrationtotal}, \ref{cond:termsappendonly}, \ref{cond:termsregistrationtotal}, \ref{cond:vacuous}, and \ref{cond:rereg}---all type- or schema-enforced and available at no marginal test cost. Stage Conditions~\ref{cond:handlerconservation}, \ref{cond:atomic}, \ref{cond:amendment}, and \ref{cond:fieldcanon} over subsequent releases. Never merge without at least Conditions~\ref{cond:optionmonotone}, \ref{cond:handlerconservation}, and \ref{cond:atomic}. \\
 \addlinespace
-F5 & Mandate-as-unit creates an SFTR/EMIR reporting surface for mandate issuance & Pre-flight with Regulatory team; determine whether $u_{\mathrm{MA}}$ issuance requires UTI / LEI pair; may need opt-out flag on \textit{ProductTerms}$[u_{\mathrm{MA}}]$.\texttt{reportable}. \\
+R5* & Mandate-as-contract-unit may expand the regulatory reporting surface for mandate issuance under SFTR and EMIR. & Pre-flight with Regulatory before implementation; determine whether mandate-unit issuance requires a UTI and an LEI pair; provide a \texttt{reportable} flag on the mandate's ProductTerms to opt an issuance out of reporting where the regulation permits. \\
 \addlinespace
-F6 & CDM alignment (\texttt{TradeState} per \texttt{Trade} vs \textit{PositionState}$[w, u]$) is asserted, not verified & Rerun Rosetta NS1--7 mapping against the 3-map schema before any CDM adapter work; publish a delta document. \\
+R6* & CDM alignment of PositionState against the CDM \texttt{TradeState} shape is claimed but not re-verified under the three-store decomposition. & Re-run the Rosetta namespace mappings (NS1 through NS7) against the three-store schema before any CDM adapter work; publish a delta document describing any mapping changes. \\
 \addlinespace
-F7 & Onboarding cost of three maps + Option/Monotone + 12 conditions is real & Ship a decision tree and a runbook; mandatory training for new engineers before they touch handlers; one-page cheat sheet. \\
+R7 & Onboarding cost: three stores, two orthogonal disciplines on PositionState, and eleven conditions is a nontrivial mental model. & Provide the decision tree of \S\ref{sec:decisiontree}, a runbook, and a one-page cheat sheet. Mandatory training before new engineers touch handler code. \\
 \addlinespace
-F8 & Forward migration is not reversible once \textit{WalletState} is collapsed & Keep a read-only mirror of v10.3 \textit{WalletState} for at least 4 quarters post-cutover; document the inverse mapping (overlay-key $u_{\mathrm{MA}} \to$ former \textit{WalletState} field) explicitly. \\
+R8 & The forward migration is not trivially reversible once legacy WalletState fields have been re-keyed. & Keep a read-only mirror of the legacy representation for at least four quarters post-cutover; document the inverse mapping (contract unit back to the former WalletState field) explicitly in the migration runbook. \\
 \bottomrule
 \end{longtable}
 
-\noindent \textbf{F2, F5, F6 are the three that require external stakeholders before any line of code ships.} F1, F3, F4, F7, F8 are internal engineering risks, manageable within the delivery programme.
+\noindent R2, R5, and R6 each require engagement outside the engineering team before any code ships. R1, R3, R4, R7, and R8 are internal engineering risks.
 
+\clearpage
 %==============================================================================
-\section{Iteration Log}
-\label{sec:iterationlog}
-%==============================================================================
-
-Twenty-seven independent agent invocations across eight rounds:
-
-\begin{longtable}{p{0.8cm}p{5cm}p{3.5cm}p{5cm}}
-\toprule
-\textbf{Round} & \textbf{Agents} & \textbf{Purpose} & \textbf{Key output} \\
-\midrule
-R1 & grothendieck, noether, minsky, dirac, finops-architect, rosetta-cdm-engineer & Independent proposals & Convergence on three-sector model \\
-\addlinespace
-R2 & formalis, jane-street-cto, testcommittee & Adversarial \#1 & Grothendieck / Dirac rejected; Minsky + Finops emerge \\
-\addlinespace
-R3 & geohot, karpathy, feynman, chris-lattner & Simplicity panel & \textit{ProductTerms} split from \textit{UnitStatus}; Option vs Monotone tension raised \\
-\addlinespace
-R4 & formalis, jane-street-cto, testcommittee & Adversarial \#2 & Option \emph{and} Monotone (orthogonal); C1--C6 established \\
-\addlinespace
-R5 & gatheral ($\times$2), finops-architect, correctness-architect & Test cases 1--4 & HWM placement tension between managed-account and QIS; amendment two-track (C8) \\
-\addlinespace
-R6 & correctness-architect, formalis, jane-street-cto & Reconciliation & 3 maps, not 4; mandate-as-unit legitimised; C1--C12 finalised \\
-\addlinespace
-R7 & testcommittee, correctness-architect, geohot & Pareto analysis & B Pareto-optimal on all three axes; convergence confirmed \\
-\addlinespace
-R8 & institutional-brake & Final gate & 8 migration/governance risks logged; no design-level blocker \\
-\bottomrule
-\end{longtable}
-
-\noindent All agent reports are preserved in \texttt{/home/renaud/A61E33BB10/output/v10.3/StatesHome\_work/R\{1..8\}\_*.md}.
-
-%==============================================================================
-\section{Minimal Reference Implementation ($\leq 50$ lines)}
+\section{Reference Implementation}
 \label{sec:reference}
 %==============================================================================
+
+The following listing is a minimal, runnable sketch of the state layer. It is not a production implementation; it is a demonstration that the design is concrete and that the conditions are mechanically checkable.
+
+The \texttt{Ledger} class, presented first, carries every lesson: three stores (\texttt{PT}, \texttt{US}, \texttt{PS}), registration, position lookup, apply, amend. The supporting dataclasses (\texttt{NonEmpty}, \texttt{TermsVersion}, \texttt{UnitStatus}, \texttt{PositionState}) follow as backdrop.
 
 \begin{lstlisting}[language=pythonstyle]
 from dataclasses import dataclass
@@ -413,78 +855,107 @@ from typing import Callable, Generic, Optional, TypeVar
 
 U = TypeVar("U"); W = TypeVar("W"); T = TypeVar("T")
 
+class Ledger:
+    def __init__(self) -> None:
+        self.PT: dict = {}   # ProductTerms  (Conditions 5, 6)
+        self.US: dict = {}   # UnitStatus    (Condition 4)
+        self.PS: dict = {}   # PositionState (Condition 1)
+
+    def register(self, u, tv, us) -> None:
+        # Condition 9: re-registration rejected
+        # Condition 4: UnitStatus total at registration
+        # Condition 6: ProductTerms total at registration
+        if u in self.PT:
+            raise ValueError("C9: re-registration rejected")
+        self.PT[u] = NonEmpty(tv)
+        self.US[u] = us
+
+    def position(self, w, u) -> Optional["PositionState"]:
+        # Condition 1: Option accessor; no delete operator exposed
+        return self.PS.get((w, u))
+
+    def apply(self, delta: dict) -> None:
+        # Condition 3: atomic three-store application
+        # Condition 2: handler-level conservation per conserved field
+        # Condition 10: handler-field canon (checked via FIELD_SPEC tokens)
+        for f, spec in FIELD_SPEC.items():
+            if spec["conserved"]:
+                s = sum(d.get(f, 0) for d in delta["rows"].values())
+                if s != 0:
+                    raise ValueError(f"C2: {f} not conserved (sum={s})")
+        # Begin atomic write across PT, US, PS (Condition 3)
+        for u_key, us_update in delta.get("us", {}).items():
+            self.US[u_key] = us_update
+        for (w, u), diff in delta["rows"].items():
+            old = self.PS.get((w, u), PositionState())
+            # Extensive carrier: row is never deleted (Condition 1)
+            self.PS[(w, u)] = PositionState(**{**old.__dict__, **diff})
+        # End atomic write
+
+    def amend(self, u, tv_new, fresh: Callable[[], object]):
+        # Condition 7: two-track amendment, fungibility-predicate-driven
+        head = self.PT[u].current()
+        if head.is_fungibility_preserving(tv_new):
+            self.PT[u] = self.PT[u].append(tv_new)  # preserving track
+            return u
+        # breaking track: fresh unit, supersession link
+        u_new = fresh()
+        self.PT[u_new] = NonEmpty(tv_new)
+        self.US[u] = UnitStatus(
+            **{**self.US[u].__dict__, "superseded_by": u_new})
+        return u_new
+
+# Supporting dataclasses follow.
+
 @dataclass(frozen=True)
 class NonEmpty(Generic[T]):
-    head: T; tail: tuple[T, ...] = ()
-    def append(self, x: T) -> "NonEmpty[T]": return NonEmpty(self.head, self.tail + (x,))
-    def current(self) -> T: return self.tail[-1] if self.tail else self.head
+    head: T
+    tail: tuple = ()
+    def append(self, x):    # Condition 5: append-only API
+        return NonEmpty(self.head, self.tail + (x,))
+    def current(self):
+        return self.tail[-1] if self.tail else self.head
 
 @dataclass(frozen=True)
 class TermsVersion:
     fields: dict
     is_fungibility_preserving: Callable[["TermsVersion"], bool]
+    # Fungibility predicate is product-declared (Definition 2.16):
+    # deterministic, monotone under field change, conservation-safe.
 
 @dataclass(frozen=True)
 class UnitStatus:
-    lifecycle: str; last_px: Optional[float]; superseded_by: Optional[object] = None
+    lifecycle: str
+    last_px: Optional[float]
+    superseded_by: Optional[object] = None
 
 @dataclass(frozen=True)
 class PositionState:
-    ac: float = 0.0; balance: float = 0.0; hwm: float = 0.0
+    accumulated_cost: float = 0.0
+    balance: float = 0.0
+    hwm: float = 0.0
 
-FIELD_SPEC = {                                              # C11
-    "ac":      {"conserved": True,  "handler": "settle"},
-    "balance": {"conserved": True,  "handler": "transfer"},
-    "hwm":     {"conserved": False, "monotone": True, "handler": "fee_crystallise"},
+# Condition 10: each field carries its canonical handler tag and
+# its conservation status (set at registration per Definition 2.10).
+FIELD_SPEC = {
+    "accumulated_cost": {"conserved": True,  "handler": "settle"},
+    "balance":          {"conserved": True,  "handler": "transfer"},
+    "hwm":              {"conserved": False, "handler": "fee_crystallise"},
 }
-
-class Ledger:
-    def __init__(self) -> None:
-        self.PT: dict = {}                                  # ProductTerms       C6, C7
-        self.US: dict = {}                                  # UnitStatus         C5
-        self.PS: dict = {}                                  # PositionState      C1
-
-    def register(self, u, tv: TermsVersion, us: UnitStatus) -> None:
-        if u in self.PT: raise ValueError("C10: re-registration")
-        self.PT[u] = NonEmpty(tv); self.US[u] = us
-
-    def position(self, w, u) -> Optional[PositionState]:    # C1 Option accessor
-        return self.PS.get((w, u))
-
-    def apply(self, delta: dict) -> None:                   # C3 atomic; C2 checked; C11 handler-tagged
-        for f, spec in FIELD_SPEC.items():
-            if spec["conserved"] and sum(d.get(f, 0) for d in delta["rows"].values()) != 0:
-                raise ValueError(f"C2: {f} not conserved")
-        for (w, u), diff in delta["rows"].items():
-            old = self.PS.get((w, u), PositionState())
-            self.PS[(w, u)] = PositionState(**{**old.__dict__, **diff})   # monotone: never deleted
-
-    def amend(self, u, tv_new: TermsVersion, fresh: Callable[[], object]):  # C8 two-track
-        head = self.PT[u].current()
-        if head.is_fungibility_preserving(tv_new):
-            self.PT[u] = self.PT[u].append(tv_new); return u
-        u2 = fresh()
-        self.PT[u2] = NonEmpty(tv_new)
-        self.US[u]  = UnitStatus(**{**self.US[u].__dict__, "superseded_by": u2})
-        return u2
 \end{lstlisting}
 
+\noindent The listing exhibits the Option accessor (\texttt{position} returns \texttt{Optional[PositionState]}), the extensive carrier (no delete operator), the atomic three-store StateDelta (\texttt{apply} either applies the full delta or raises), the handler-level conservation (checked per field), the re-registration rejection (Condition~\ref{cond:rereg}), the two-track amendment (Condition~\ref{cond:amendment}), and the field-canon tagging (Condition~\ref{cond:fieldcanon} through \texttt{FIELD\_SPEC}). The fungibility predicate is declared on \texttt{TermsVersion}, satisfying its product-declared origin.
+
+\clearpage
 %==============================================================================
-\section{The One-Sentence Answer}
-\label{sec:onesentence}
+\section{Summary}
+\label{sec:summary}
 %==============================================================================
 
-\begin{quote}
-\textbf{Unit state lives in three places --- immutable \textit{ProductTerms}$[u]$, shared mutable \textit{UnitStatus}$[u]$, and per-position \textit{PositionState}$[w, u]$ --- with no separate wallet-keyed state sector, because every economic per-wallet fact is naturally keyed by a mandate or strategy unit and collapses into \textit{PositionState}$[w, u_{\mathrm{MA}}]$.}
-\end{quote}
+The refinement changes the phrasing at v10.3 line~1034 and the accessor signature at v10.3 line~2287. Nothing else in v10.3 changes.
 
-\noindent This is the Pareto-optimal schema on testability, correctness, and simplicity. It is the minimum basis of the problem, not a compromise. Ship B.
+Section~7 of v10.3 correctly observed that unit state for some instruments must be keyed by $(w, u)$ and for others by $u$ alone. This addendum refines the observation into a three-store decomposition---ProductTerms, UnitStatus, PositionState---plus a partition of the unit universe into asset units and contract units. Eleven conditions govern the use of the stores. The putative fourth sector (a wallet-keyed state store) collapses into PositionState keyed by a contract unit.
 
-\vfill
-\begin{center}
-\rule{0.5\textwidth}{0.4pt}\\[4pt]
-\textit{Document compiled 2026-04-22 from 27 adversarial agent rounds.}\\
-\textit{All supporting analyses preserved in \texttt{StatesHome\_work/}.}
-\end{center}
+Under the refinement, the negation of two v10.3 \S 11 invariants (P1 conservation, P8 snapshot consistency) is structurally unreachable in the persistent state, and three additional invariants internal to this addendum (Q1 terms immutability, Q2 identity permanence, Q3 handler-field canon) are likewise structurally unreachable. The remaining eight v10.3 invariants are enforced by v10.3's existing primitives, not by the state decomposition. The four test cases---the future, the managed account, the QIS strategy, and the listed-but-untraded instrument---exhibit the decomposition with numeric traces. The risk register lists the concrete migration and governance risks.
 
 \end{document}
