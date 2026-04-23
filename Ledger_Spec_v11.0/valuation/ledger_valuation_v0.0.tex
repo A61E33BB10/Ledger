@@ -1,0 +1,1040 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{longtable}
+\usepackage{textcomp}
+\usepackage{array}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,shapes.geometric}
+
+\geometry{margin=1in}
+\setcounter{tocdepth}{2}
+
+\newtheorem{definition}{Definition}[section]
+\newtheorem{principle}[definition]{Principle}
+\newtheorem{theorem}[definition]{Theorem}
+\newtheorem{proposition}[definition]{Proposition}
+\newtheorem{invariant}[definition]{Invariant}
+\newtheorem{remark}[definition]{Remark}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  columns=fullflexible,
+  keepspaces=true,
+  xleftmargin=2em,
+  aboveskip=0.5em,
+  belowskip=0.5em
+}
+
+\title{The Ledger Valuation Stack\\[6pt]
+\large Pricing, PnL Explain, and Temporal Orchestration\\[4pt]
+\normalsize Companion Document to the Ledger Framework Specification}
+\author{R.\ Delloye}
+\date{March 2026 --- v0.0}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The Ledger framework~\cite{ledger} defines portfolio value as $V_t = \sum_u \mathrm{own}(u) \cdot P_t(u)$ and proves that PnL is path-independent: it depends only on the initial and final snapshots, not on intermediate trading activity.  The framework deliberately treats $P_t$ as an external input---``a function from units to prices in the reference currency''---without specifying how that function is computed, validated, or delivered.
+
+This companion document fills the gap.  It defines the \emph{ValuationRecord}---a structured object that enriches the scalar price with Greeks, model provenance, market data lineage, and a quality flag---and shows that the path-independence theorem is preserved because the scalar \texttt{dirty\_price} field is precisely the $P_t(u)$ of the main framework.  It introduces the \emph{Pricing DAG}, the directed acyclic graph of dependencies between units and market data observables, and specifies how Temporal.io workflows implement reactive, DAG-driven pricing: one workflow per unit, upstream signals triggering downstream re-pricing, heterogeneous compute budgets, and stale-price policies.  It formalises PnL explain---the Taylor-expansion verification gate that every new valuation must pass before publication---connecting the multivariate polynomial analysis of~\cite{pnl_explain} to the operational pipeline.  Finally, it traces a complete valuation cycle through a three-instrument portfolio (equity spot, vanilla call, structured note embedding the call), showing every workflow signal, pricer invocation, PnL explain check, and publication step with concrete numbers.
+
+The document is self-contained and independently readable.  It references the Ledger specification and the PnL explain paper by citation, not by import.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+%==============================================================================
+\section{Introduction}
+\label{sec:intro}
+%==============================================================================
+
+The Ledger framework~\cite{ledger} establishes six properties by construction: atomicity, conservation, determinism, state-sufficiency, lifecycle value invariance, and time travel.  Portfolio valuation appears in~\cite[\S4]{ledger} as:
+\[
+V_t = \sum_{u \in \mathcal{U}} w_t(u) \cdot P_t(u)
+\]
+where $w_t(u)$ is the wallet balance (or, in the generalised position model, $\mathrm{own}(u)$) and $P_t(u)$ is the price of unit $u$ at time $t$ in the reference currency.  The path-independence theorem~\cite[\S4.3]{ledger} proves that $\mathrm{PnL} = V_{t_1} - V_{t_0}$ regardless of intermediate trading activity.
+
+The framework is deliberately agnostic to the pricing methodology: ``$P_t$ is an \emph{external input} to the framework, not computed by it''~\cite[\S4.1]{ledger}.  This is the correct architectural boundary---the ledger is a settlement and position system, not a pricing engine.  But the boundary creates three unanswered questions:
+
+\begin{enumerate}
+\item \textbf{What does $P_t(u)$ return?}  In practice, a price is not a scalar.  A pricing computation produces sensitivities (Greeks), model provenance, market data lineage, compute time, and a quality assessment.  How does this structured output interact with the scalar $P_t$ of the PnL theorem?
+
+\item \textbf{How are prices computed in dependency order?}  An NVDA vanilla call depends on NVDA spot, the NVDA implied volatility surface, and the USD risk-free rate curve.  A structured note embedding the call depends on the call's valuation.  How is this dependency graph defined, enforced, and executed?
+
+\item \textbf{How are new prices validated before they enter the ledger's valuation store?}  The PnL explain analysis~\cite{pnl_explain} provides the mathematical foundation---Taylor expansion of price changes in terms of Greeks and market data moves---but does not specify the operational pipeline: when does the check run, what happens on failure, how does the system recover?
+\end{enumerate}
+
+This document answers all three.
+
+\subsection{Relationship to the Ledger Specification}
+
+This document is a companion to, not a revision of, the Ledger framework~\cite{ledger}.  It introduces no new primitives (no new move types, no new wallet structures, no changes to the conservation law).  It specifies the \emph{valuation layer} that produces the $P_t$ function consumed by the ledger's PnL computation.  All definitions, notation, and conventions follow~\cite{ledger} unless stated otherwise.
+
+\subsection{Relationship to the PnL Explain Paper}
+
+The PnL explain paper~\cite{pnl_explain} establishes the mathematical foundation: for a pricing function $P$ approximated as a polynomial of degree three in the market data vector $x$, the price change decomposes as:
+\[
+P(x_2) - P(x_1) = \left\langle \frac{\Delta_{x_2} + \Delta_{x_1}}{2} \,\middle|\, x_2 - x_1 \right\rangle - \frac{1}{12}\langle x_2 - x_1 \,|\, (\Gamma_{x_2} - \Gamma_{x_1}) \,|\, x_2 - x_1 \rangle
+\]
+where $\Delta_x = \nabla P(x)$ is the gradient (delta vector) and $\Gamma_x = \nabla^2 P(x)$ is the Hessian (gamma matrix).  The paper distinguishes ex ante PnL (using only information at $x_1$) from ex post PnL (using information at both $x_1$ and $x_2$).  This document operationalises those results as a verification gate in the pricing pipeline.
+
+\subsection{Document Roadmap}
+
+Section~\ref{sec:valuation-record} defines the ValuationRecord.  Section~\ref{sec:greeks} specifies the Greeks structure by instrument class.  Section~\ref{sec:pricing-dag} introduces the Pricing DAG.  Section~\ref{sec:temporal} specifies the Temporal workflow architecture for reactive pricing.  Section~\ref{sec:pnl-explain} formalises PnL explain as a verification gate.  Section~\ref{sec:valuation-store} describes the valuation store and its interaction with the ledger.  Section~\ref{sec:edge-cases} catalogues edge cases.  Section~\ref{sec:worked-example} traces a complete valuation cycle with concrete numbers.  Section~\ref{sec:conclusion} identifies open problems.
+
+\clearpage
+%==============================================================================
+\section{The Valuation Record}
+\label{sec:valuation-record}
+%==============================================================================
+
+The Ledger specification defines $P_t : \mathcal{U} \to \mathbb{R}$ as a scalar function.  In practice, the output of a pricing computation is richer.  We define the structured output and show that the scalar theorem is preserved.
+
+\begin{definition}[Valuation Record]
+\label{def:valuation-record}
+A \emph{ValuationRecord} for unit $u$ at time $t$ is a tuple:
+\begin{lstlisting}
+ValuationRecord:
+    unit_id:          UnitId
+    timestamp:        Timestamp
+    dirty_price:      Decimal       -- full market value including accrual
+    clean_price:      Decimal       -- quoted price net of accrual
+    accrued:          Decimal       -- dirty_price - clean_price
+    greeks:           Greeks        -- instrument-specific sensitivity vector
+    model_id:         String        -- which pricer produced this
+    market_data_snap: SnapshotId    -- which market data was used
+    compute_ms:       Int           -- how long pricing took
+    quality:          Quality       -- FIRM | INDICATIVE | STALE | FAILED
+\end{lstlisting}
+\end{definition}
+
+\noindent The fields serve distinct consumers:
+
+\begin{itemize}[nosep]
+\item \textbf{dirty\_price}: the scalar consumed by the ledger's PnL computation ($V_t = \sum \mathrm{own}(u) \cdot \texttt{dirty\_price}_t(u)$).
+\item \textbf{clean\_price, accrued}: reporting fields for bond and loan instruments where market convention quotes a clean price.
+\item \textbf{greeks}: the sensitivity vector consumed by PnL explain (Section~\ref{sec:pnl-explain}) and by the risk pipeline.
+\item \textbf{model\_id, market\_data\_snap}: provenance fields for audit and model risk management.
+\item \textbf{compute\_ms}: operational telemetry for capacity planning.
+\item \textbf{quality}: a flag consumed by the risk pipeline and by the obligation-liveness executor~\cite[\S14.7]{ledger} when deciding whether to act on a valuation.
+\end{itemize}
+
+\begin{principle}[Scalar Compatibility]
+\label{princ:scalar-compat}
+The ValuationRecord enriches but does not replace the scalar price function.  The \texttt{dirty\_price} field IS the $P_t(u)$ of~\cite[\S4.1]{ledger}.  The path-independence theorem~\cite[\S4.3]{ledger} is preserved:
+\[
+\mathrm{PnL} = V_{t_1} - V_{t_0} = \sum_{u} \mathrm{own}(u) \cdot \bigl[\texttt{dirty\_price}_{t_1}(u) - \texttt{dirty\_price}_{t_0}(u)\bigr]
+\]
+The remaining fields are metadata that enriches the record without altering the theorem.  No downstream consumer that depends on the scalar $P_t$ needs modification.
+\end{principle}
+
+\subsection{Quality Semantics}
+
+The \texttt{quality} flag has four values with precise operational semantics:
+
+\begin{center}
+\small
+\begin{tabular}{l p{9cm}}
+\toprule
+\textbf{Quality} & \textbf{Semantics} \\
+\midrule
+\texttt{FIRM} & Price computed from live market data within the unit's cadence window; PnL explain passed.  This is the normal state. \\
+\texttt{INDICATIVE} & Price computed but PnL explain tolerance exceeded, or market data is from a secondary source (e.g., composite quote instead of primary exchange).  Risk pipeline treats with elevated scrutiny. \\
+\texttt{STALE} & Price is the last-known-good value; the pricer has not produced a fresh price within its cadence window.  The \texttt{timestamp} field shows when the price was last computed, not the current time. \\
+\texttt{FAILED} & The pricer failed to produce any price.  No dirty\_price is available; downstream consumers use the previous FIRM or INDICATIVE price with STALE quality. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The quality flag is consumed by two downstream systems.  The risk pipeline uses it for limit monitoring: a position valued at STALE triggers a staleness alert and may receive a prudential haircut.  The obligation-liveness executor~\cite[\S14.7]{ledger} uses it for margin calculations: a CSA VM call computed on STALE valuations is flagged for manual review before dispatch.
+
+\subsection{Dirty Price, Clean Price, and Accrued Interest}
+
+For instruments with accrual mechanics (bonds, loans, swaps with accrued interest), the \texttt{dirty\_price} is the economically complete price:
+\[
+\texttt{dirty\_price} = \texttt{clean\_price} + \texttt{accrued}
+\]
+The clean price is the market-quoted price excluding interest that has accrued since the last coupon date.  The accrued interest is computed from the unit state~\cite[\S7]{ledger}, which records the last coupon date, the coupon rate, and the day-count convention.  This is consistent with~\cite[\S5.3]{ledger}: ``the bond's price function $P_t(u)$ returns the \emph{dirty} price.''
+
+For instruments without accrual (equities, cash, most derivatives), \texttt{clean\_price} $=$ \texttt{dirty\_price} and \texttt{accrued} $= 0$.
+
+\clearpage
+%==============================================================================
+\section{Greeks by Instrument Class}
+\label{sec:greeks}
+%==============================================================================
+
+The \texttt{greeks} field of the ValuationRecord is a tagged union whose active variant depends on the instrument class.  This reflects a fundamental reality: different instruments have different risk factors, and a one-size-fits-all sensitivity vector would be either incomplete or wasteful.
+
+\begin{definition}[Greeks]
+\label{def:greeks}
+The Greeks structure is an instrument-class-specific sensitivity vector:
+\begin{lstlisting}
+Greeks = EquityGreeks | OptionGreeks | ExoticOptionGreeks
+       | IRSGreeks | BondGreeks | FuturesGreeks | CashGreeks
+\end{lstlisting}
+\end{definition}
+
+\subsection{Equity Greeks}
+
+\begin{lstlisting}
+EquityGreeks:
+    delta:    Decimal = 1.0    -- dP/dS; always 1.0 for a spot position
+\end{lstlisting}
+
+\noindent An equity spot position has delta of exactly 1.0 by definition: a \$1 move in the spot price changes the position value by \$1 per share.  All higher-order sensitivities are zero.
+
+\subsection{Vanilla Option Greeks}
+
+\begin{lstlisting}
+OptionGreeks:
+    delta:    Decimal    -- dP/dS
+    gamma:    Decimal    -- d^2P/dS^2
+    vega:     Decimal    -- dP/d(sigma)
+    theta:    Decimal    -- dP/dt (per calendar day)
+    rho:      Decimal    -- dP/dr
+\end{lstlisting}
+
+\noindent These are the five first- and second-order sensitivities of the Black-Scholes-Merton model.  For PnL explain purposes, the Taylor expansion uses delta and gamma with respect to the underlying price, vega with respect to implied volatility, theta with respect to time, and rho with respect to the risk-free rate.
+
+\subsection{Exotic Option Greeks}
+
+\begin{lstlisting}
+ExoticOptionGreeks:
+    delta:    Decimal    -- dP/dS
+    gamma:    Decimal    -- d^2P/dS^2
+    vega:     Decimal    -- dP/d(sigma)
+    theta:    Decimal    -- dP/dt
+    rho:      Decimal    -- dP/dr
+    vanna:    Decimal    -- d^2P/(dS d(sigma))
+    volga:    Decimal    -- d^2P/d(sigma)^2
+    charm:    Decimal    -- d^2P/(dS dt)
+\end{lstlisting}
+
+\noindent Exotic options (barriers, Asians, lookbacks) require cross-sensitivities for accurate PnL explain.  Vanna captures the sensitivity of delta to volatility, volga captures the convexity of price with respect to volatility, and charm captures the time-decay of delta.  These terms appear in the second-order and cross-term components of the multivariate Taylor expansion~\cite{pnl_explain}.
+
+\subsection{Interest Rate Swap Greeks}
+
+\begin{lstlisting}
+IRSGreeks:
+    dv01:               Decimal    -- dollar value of one basis point
+    convexity:          Decimal    -- second-order rate sensitivity
+    key_rate_durations: Map<Tenor, Decimal>  -- per-tenor DV01
+\end{lstlisting}
+
+\noindent For an IRS, the risk factor is the yield curve, not a single spot price.  DV01 is the change in present value for a one-basis-point parallel shift; key-rate durations decompose this sensitivity across tenors (1y, 2y, 5y, 10y, 30y, etc.).  The PnL explain for an IRS uses:
+\[
+\text{explained PnL} \approx \sum_{\tau} \mathrm{KRD}_\tau \cdot \Delta r_\tau + \frac{1}{2} \cdot \mathrm{convexity} \cdot (\Delta r_{\text{par}})^2
+\]
+where $\Delta r_\tau$ is the change in the zero rate at tenor $\tau$.
+
+\subsection{Bond Greeks}
+
+\begin{lstlisting}
+BondGreeks:
+    modified_duration:  Decimal    -- -(1/P)(dP/dy)
+    convexity:          Decimal    -- (1/P)(d^2P/dy^2)
+    dv01:               Decimal    -- dollar value of one basis point
+\end{lstlisting}
+
+\noindent Bond Greeks are expressed in yield-to-maturity space.  Modified duration and convexity drive the PnL explain:
+\[
+\frac{\Delta P}{P} \approx -D_{\mathrm{mod}} \cdot \Delta y + \frac{1}{2} \cdot C \cdot (\Delta y)^2
+\]
+
+\subsection{Futures Greeks}
+
+\begin{lstlisting}
+FuturesGreeks:
+    delta:              Decimal = 1.0    -- by definition
+    accumulated_vm:     Decimal          -- variation margin to date
+\end{lstlisting}
+
+\noindent A futures contract has delta of 1.0 to its settlement price.  The \texttt{accumulated\_vm} field records the cumulative variation margin, connecting to the daily settlement workflow~\cite[\S14.4.1]{ledger}.
+
+\subsection{Cash Greeks}
+
+\begin{lstlisting}
+CashGreeks:
+    -- empty: no sensitivities for the reference currency
+\end{lstlisting}
+
+\noindent The reference currency (e.g., USD) has $P_t(\mathrm{USD}) = 1$ by definition.  Foreign currencies have an FX delta relative to the reference currency, modelled as an EquityGreeks with delta equal to the FX rate.
+
+\clearpage
+%==============================================================================
+\section{The Pricing DAG}
+\label{sec:pricing-dag}
+%==============================================================================
+
+Pricing is not a flat operation over independent instruments.  The price of an NVDA vanilla call depends on NVDA spot, the NVDA implied volatility surface, and the USD risk-free rate curve.  A structured note embedding the call depends on the call's valuation.  These dependencies form a directed acyclic graph---the \emph{Pricing DAG}.
+
+\subsection{Definition}
+
+\begin{definition}[Pricing DAG]
+\label{def:pricing-dag}
+The \emph{Pricing DAG} is a directed acyclic graph $G = (N, E)$ where:
+\begin{itemize}[nosep]
+\item $N = N_U \cup N_M$: nodes are either unit nodes ($N_U \subseteq \mathcal{U}$, the units requiring valuation) or market data nodes ($N_M$, observable data feeds such as spot prices, yield curves, volatility surfaces).
+\item $E \subseteq N \times N$: a directed edge $(a, b) \in E$ means ``$b$ requires a fresh price or data point from $a$ before it can be priced.''
+\end{itemize}
+\end{definition}
+
+\noindent Market data nodes are leaf nodes (no incoming edges): they receive prices from external data feeds.  Equity spot positions are also near-leaf: they depend on a single market data node (the exchange price feed).  Derivatives and structured products are interior or root nodes with dependencies on both market data and other unit nodes.
+
+\subsection{Construction from the Unit Store}
+
+The DAG is not manually specified.  It is constructed from the unit definitions in the Unit Store~\cite[\S3]{ledger}:
+
+\begin{enumerate}[nosep]
+\item Each unit's smart contract declares its \emph{pricing observables}---the market data nodes it requires.  For an NVDA call, the contract declares: NVDA spot, NVDA vol surface, USD rate curve.
+\item Each unit's smart contract may declare \emph{unit dependencies}---other units whose valuations it requires.  For a structured note embedding an NVDA call, the contract declares: the specific NVDA call unit.
+\item The DAG is the transitive closure of these declarations.
+\end{enumerate}
+
+\begin{invariant}[Acyclicity]
+\label{inv:acyclicity}
+The Pricing DAG is acyclic.  This invariant is enforced at unit registration~\cite[\S3.4]{ledger}: the Unit Store rejects a unit whose pricing dependencies would create a cycle.
+\end{invariant}
+
+\noindent Acyclicity ensures that a topological ordering exists, guaranteeing that every unit can be priced after all its dependencies.  In practice, cycles are rare in financial instrument pricing (a call on NVDA does not have NVDA depending on the call), but the invariant prevents pathological configurations such as circular structured notes.
+
+\subsection{DAG Topology by Instrument Class}
+
+\begin{center}
+\small
+\begin{tabular}{l l l}
+\toprule
+\textbf{Instrument} & \textbf{Upstream dependencies} & \textbf{DAG depth} \\
+\midrule
+Cash (USD) & None & 0 (by definition) \\
+Equity spot (NVDA) & NVDA exchange price feed & 1 \\
+Vanilla option (NVDA call) & NVDA spot, NVDA vol surface, USD rate curve & 2 \\
+Exotic option (barrier) & NVDA spot, NVDA vol surface, USD rate curve & 2 \\
+IRS & USD yield curve (deposits, futures, swaps) & 2 \\
+Bond & Issuer yield curve, USD rate curve & 2 \\
+Structured note & Embedded option valuation, issuer credit curve & 3+ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Example: Three-Instrument Portfolio}
+
+Figure~\ref{fig:pricing-dag} illustrates the Pricing DAG for the worked example in Section~\ref{sec:worked-example}: a portfolio containing NVDA spot, an NVDA Jun~2026 900~Call, and a structured note embedding the call.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    mkt/.style={draw, rounded corners, fill=green!10, minimum width=2.2cm, minimum height=0.8cm, font=\small, align=center},
+    unit/.style={draw, rounded corners, fill=blue!10, minimum width=2.8cm, minimum height=0.8cm, font=\small, align=center},
+    arr/.style={-{Stealth[length=2.5mm]}, thick, color=gray!70},
+  ]
+  % Market data nodes (leaves)
+  \node[mkt] (spot_feed) at (0, 4)   {NVDA\\price feed};
+  \node[mkt] (vol_surf)  at (4, 4)   {NVDA\\vol surface};
+  \node[mkt] (rate)      at (8, 4)   {USD rate\\curve};
+
+  % Unit nodes
+  \node[unit] (nvda_spot) at (0, 2)   {NVDA spot\\$\delta = 1.0$};
+  \node[unit] (nvda_call) at (4, 1)   {NVDA Jun26\\900 Call};
+  \node[unit] (struct)    at (4, -1)  {Structured\\note};
+
+  % Edges
+  \draw[arr] (spot_feed) -- (nvda_spot);
+  \draw[arr] (spot_feed) -- (nvda_call);
+  \draw[arr] (vol_surf)  -- (nvda_call);
+  \draw[arr] (rate)      -- (nvda_call);
+  \draw[arr] (nvda_call) -- (struct);
+
+  % Legend
+  \node[mkt, minimum width=1.5cm, minimum height=0.5cm, font=\scriptsize] at (9, 1.5) {Market data};
+  \node[unit, minimum width=1.5cm, minimum height=0.5cm, font=\scriptsize] at (9, 0.8) {Unit};
+\end{tikzpicture}
+\caption{Pricing DAG for the three-instrument portfolio.  Green nodes are market data feeds (leaf nodes); blue nodes are units requiring valuation.  Edges point from dependency to dependent.  NVDA spot depends only on its price feed.  The NVDA call depends on NVDA spot (via the price feed), the vol surface, and the rate curve.  The structured note depends on the call's valuation.}
+\label{fig:pricing-dag}
+\end{figure}
+
+\subsection{DAG Mutation}
+
+The Pricing DAG is not static.  It changes when:
+
+\begin{itemize}[nosep]
+\item A new unit is registered~\cite[\S3.4]{ledger}: the unit's pricing dependencies create new nodes and edges.
+\item A unit matures or terminates: the unit node and its edges are removed (the unit's ValuationRecord receives a final price at termination, and no further pricing cycles are required).
+\item A market data source is switched (e.g., from primary exchange feed to composite): the market data node's identity changes, but the topology is preserved.
+\end{itemize}
+
+\noindent DAG mutations take effect at the next pricing cycle.  The acyclicity invariant is re-checked at every unit registration.  In-flight pricing cycles are not affected: a new unit added mid-cycle will be priced on the next cycle, not retroactively inserted into the current one.
+
+\clearpage
+%==============================================================================
+\section{Temporal Workflow Architecture for Pricing}
+\label{sec:temporal}
+%==============================================================================
+
+The Ledger specification uses Temporal.io as its execution engine~\cite[\S14]{ledger}: lifecycle events, settlement, and obligation monitoring are orchestrated as Temporal workflows.  The valuation stack extends this architecture with pricing-specific workflows that implement the reactive, DAG-driven pricing pattern.
+
+\subsection{Design Principle: One Workflow per Unit}
+
+Each unit in the Pricing DAG has a dedicated \texttt{PricingWorkflow(unit\_id)} that:
+\begin{enumerate}[nosep]
+\item waits for all upstream dependencies to signal fresh prices,
+\item retrieves market data,
+\item invokes the pricer activity,
+\item runs PnL explain verification,
+\item publishes the ValuationRecord.
+\end{enumerate}
+
+This is a one-to-one mapping: every unit node in the Pricing DAG corresponds to exactly one long-running Temporal workflow.  The workflow is instantiated at unit registration and completed at maturity or termination, mirroring the lifecycle workflows of~\cite[\S14.4]{ledger}.
+
+\subsection{Cadence and Heterogeneous Compute}
+
+Different instruments require different pricing frequencies and have different compute budgets:
+
+\begin{center}
+\small
+\begin{tabular}{l r r l}
+\toprule
+\textbf{Instrument class} & \textbf{Cadence} & \textbf{Compute budget} & \textbf{Pricer type} \\
+\midrule
+Equity spot & 1--5s & $< 1$ms & Trivial (pass-through) \\
+Vanilla option & 10--30s & 1--10ms & Analytical (Black-Scholes) \\
+Exotic option & 1--5min & 1--30s & Monte Carlo / PDE \\
+IRS & 30s--2min & 10--100ms & Curve bootstrapping \\
+Bond & 30s--2min & 1--10ms & Yield-to-maturity \\
+Structured note & 5--15min & 1--60s & Composite (depends on embedded) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The cadence is a configurable parameter on each PricingWorkflow, not a global constant.  Liquid equities may be priced every second; illiquid OTC exotics may be priced every 15 minutes or only on demand.
+
+\subsection{DAG Signalling}
+
+The reactive pricing pattern is implemented through Temporal signals:
+
+\begin{enumerate}[nosep]
+\item When a leaf node (e.g., NVDA price feed) produces a new data point, it signals all downstream unit workflows that depend on it.
+\item When a unit workflow produces a new ValuationRecord, it signals all downstream unit workflows that depend on it.
+\item A downstream workflow maintains a freshness map: \texttt{Map<DependencyId, Timestamp>}.  When a signal arrives, the map is updated.  The workflow checks: ``do I have fresh prices for ALL my upstream nodes?''  If yes, fire pricing.  If not, wait.
+\end{enumerate}
+
+\noindent This is a data-flow / reactive pattern.  It has two key properties:
+
+\begin{itemize}[nosep]
+\item \textbf{No redundant computation.}  A workflow does not re-price until all upstream dependencies have refreshed.  If NVDA spot updates but the vol surface has not, the call's workflow waits.
+\item \textbf{Automatic cascade.}  When the NVDA call produces a new ValuationRecord, it signals the structured note workflow, which then re-prices.  The cascade propagates through the DAG without explicit orchestration.
+\end{itemize}
+
+\subsection{Workflow Pseudocode}
+
+\begin{lstlisting}
+PricingWorkflow(unit_id, cadence, dependencies):
+    prev_record = None
+    freshness = {dep: None for dep in dependencies}
+    upstream_ch = workflow.GetSignalChannel("upstream_ready")
+
+    while unit_state(unit_id).lifecycle_stage == ACTIVE:
+        -- Wait for upstream signals or cadence timer
+        selector = workflow.NewSelector()
+        selector.AddReceive(upstream_ch, func(signal):
+            freshness[signal.dep_id] = signal.timestamp
+        )
+        selector.AddTimer(cadence, func(): pass)
+        selector.Select()
+
+        -- Check all dependencies are fresh
+        if not all_fresh(freshness, cadence):
+            continue
+
+        -- Retrieve market data
+        mkt_snap = await RetrieveMarketData(unit_id, dependencies)
+
+        -- Invoke pricer
+        raw_record = await InvokePricer(unit_id, mkt_snap)
+
+        -- PnL explain gate
+        if prev_record is not None:
+            explain = await PnLExplain(prev_record, raw_record,
+                                       mkt_snap.delta_from(prev_snap))
+            if explain.status == FAIL:
+                await Quarantine(raw_record, explain)
+                raw_record = await RetryPricing(unit_id, mkt_snap)
+                explain = await PnLExplain(prev_record, raw_record,
+                                           mkt_snap.delta_from(prev_snap))
+                if explain.status == FAIL:
+                    await AlertRiskTeam(unit_id, explain)
+                    raw_record.quality = STALE
+                    raw_record = prev_record.with_quality(STALE)
+
+        -- Publish
+        await PublishValuationRecord(raw_record)
+        prev_record = raw_record
+
+        -- Signal downstream dependents
+        for dep in downstream_units(unit_id):
+            workflow.SignalExternalWorkflow(
+                dep.workflow_id, "upstream_ready",
+                {dep_id: unit_id, timestamp: raw_record.timestamp})
+\end{lstlisting}
+
+\subsection{Stale-Price Policy}
+
+A pricer may fail to produce a fresh price within its cadence window for several reasons: market data gap, model failure, compute timeout, or upstream dependency staleness.  The system applies a two-tier policy:
+
+\begin{enumerate}
+\item \textbf{Within cadence window}: the workflow waits.  No action is taken.
+\item \textbf{Beyond cadence window (up to $3\times$ cadence)}: the last-known-good price is retained with \texttt{quality = STALE}.  The staleness flag propagates to downstream dependents: if the NVDA call's workflow sees that NVDA spot is STALE, it either re-prices with stale input (noting the staleness in its own record) or waits, depending on configuration.
+\item \textbf{Beyond $3\times$ cadence}: an alert is raised to the risk team via the obligation-liveness framework~\cite[\S14.7]{ledger}.  A pricing failure beyond $3\times$ cadence is treated as an event-triggered obligation with a compensation action of ``use last-known-good with quality STALE and escalate.''
+\end{enumerate}
+
+\subsection{Timeout Configuration}
+
+Each pricer activity has Temporal activity options matching its compute budget:
+
+\begin{lstlisting}
+PricerActivityOptions(instrument_class):
+    match instrument_class:
+        case EQUITY_SPOT:
+            StartToCloseTimeout: 5s
+            ScheduleToCloseTimeout: 30s
+        case VANILLA_OPTION:
+            StartToCloseTimeout: 30s
+            ScheduleToCloseTimeout: 2min
+        case EXOTIC_OPTION:
+            StartToCloseTimeout: 5min
+            ScheduleToCloseTimeout: 15min
+        case IRS | BOND:
+            StartToCloseTimeout: 2min
+            ScheduleToCloseTimeout: 5min
+    RetryPolicy:
+        InitialInterval:    1s
+        BackoffCoefficient: 2.0
+        MaximumAttempts:    3
+        NonRetryableErrors: [ModelNotFound, UnitNotActive]
+\end{lstlisting}
+
+\noindent The retry policy mirrors the executor activity options~\cite[\S14.2]{ledger}: transient failures (network, compute resource) are retried; logic errors (model not found, unit no longer active) are non-retryable.
+
+\subsection{Task Queue Architecture}
+
+Pricing workflows and activities are distributed across dedicated Temporal task queues to isolate compute-intensive pricers from fast, latency-sensitive ones:
+
+\begin{center}
+\small
+\begin{tabular}{l l l}
+\toprule
+\textbf{Task queue} & \textbf{Instruments} & \textbf{Worker profile} \\
+\midrule
+\texttt{pricing-fast} & Equity spot, FX, cash & Low-latency, high-throughput \\
+\texttt{pricing-analytical} & Vanilla options, bonds, IRS & Medium compute \\
+\texttt{pricing-mc} & Exotic options, structured notes & GPU-enabled, high memory \\
+\texttt{pricing-workflow} & All PricingWorkflow orchestrators & Lightweight, many instances \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Workflow code runs on \texttt{pricing-workflow} workers; pricer activities are dispatched to the appropriate compute queue based on the instrument class.  This separation allows scaling expensive Monte Carlo workers independently of lightweight equity spot workers.
+
+\clearpage
+%==============================================================================
+\section{PnL Explain as Verification Gate}
+\label{sec:pnl-explain}
+%==============================================================================
+
+Every new ValuationRecord must pass through PnL explain before publication.  This section formalises the gate, connecting the mathematical foundation of~\cite{pnl_explain} to the operational pipeline.
+
+\subsection{Mathematical Foundation}
+
+The PnL explain paper~\cite{pnl_explain} establishes three results for a pricing function $P$ treated as a polynomial of degree three in market data vector $x \in \mathbb{R}^n$:
+
+\paragraph{Ex post (exact for cubic $P$).}
+\begin{equation}
+\label{eq:pnl-expost}
+P(x_2) - P(x_1) = \left\langle \frac{\Delta_{x_2} + \Delta_{x_1}}{2} \,\middle|\, x_2 - x_1 \right\rangle - \frac{1}{12}\langle x_2 - x_1 \,|\, (\Gamma_{x_2} - \Gamma_{x_1}) \,|\, x_2 - x_1 \rangle
+\end{equation}
+
+\paragraph{Ex ante (second-order approximation using only $x_1$ information).}
+\begin{equation}
+\label{eq:pnl-exante}
+P(x_2) - P(x_1) \approx \langle \Delta_{x_1} \,|\, x_2 - x_1 \rangle + \frac{1}{2}\langle x_2 - x_1 \,|\, \Gamma_{x_1} \,|\, x_2 - x_1 \rangle
+\end{equation}
+
+\paragraph{Decomposition.}
+\begin{equation}
+\label{eq:pnl-decomp}
+P(x_2) - P(x_1) = \underbrace{\langle \Delta_{x_1} \,|\, x_2 - x_1 \rangle}_{\text{1st order}} + \underbrace{\left\langle \frac{\Delta_{x_2} - \Delta_{x_1}}{2} \,\middle|\, x_2 - x_1 \right\rangle}_{\text{2nd order}} - \underbrace{\frac{1}{12}\langle x_2 - x_1 \,|\, (\Gamma_{x_2} - \Gamma_{x_1}) \,|\, x_2 - x_1 \rangle}_{\text{3rd order}}
+\end{equation}
+
+\noindent In the operational setting, the market data vector $x$ comprises the risk factors relevant to the instrument: spot price, implied volatility, risk-free rate, yield curve tenors, time.  The gradient $\Delta_x = \nabla P(x)$ is the instrument's Greek vector, and the Hessian $\Gamma_x = \nabla^2 P(x)$ is the gamma matrix.
+
+\subsection{The PnL Explain Function}
+
+\begin{definition}[PnL Explain]
+\label{def:pnl-explain}
+The PnL explain function takes two consecutive ValuationRecords, the market data delta, and any intervening cashflows, and produces an ExplainResult:
+
+\begin{lstlisting}
+pnl_explain(
+    prev:         ValuationRecord,
+    curr:         ValuationRecord,
+    market_moves: MarketDataDelta,
+    cashflows:    List[Move]
+) -> ExplainResult
+\end{lstlisting}
+
+\noindent The computation proceeds as follows:
+\begin{lstlisting}
+    total_pnl = curr.dirty_price - prev.dirty_price
+
+    -- Taylor expansion using prev Greeks (ex ante)
+    explained = (
+        prev.greeks.delta * market_moves.spot_change
+      + 0.5 * prev.greeks.gamma * market_moves.spot_change^2
+      + prev.greeks.vega * market_moves.vol_change
+      + prev.greeks.theta * dt
+      + prev.greeks.rho * market_moves.rate_change
+      + sum(cf.amount for cf in cashflows)
+    )
+
+    unexplained = total_pnl - explained
+
+    if abs(unexplained) < tolerance(unit_id):
+        return ExplainResult(status=PASS,
+            unexplained=unexplained,
+            breakdown={delta=..., gamma=..., vega=...,
+                       theta=..., rho=..., cashflow=...})
+    else:
+        return ExplainResult(status=FAIL,
+            unexplained=unexplained,
+            breakdown={...})
+\end{lstlisting}
+\end{definition}
+
+\noindent The tolerance is instrument-specific and scales with the notional.  Typical thresholds:
+
+\begin{center}
+\small
+\begin{tabular}{l l}
+\toprule
+\textbf{Instrument class} & \textbf{Tolerance (per unit notional)} \\
+\midrule
+Equity spot & $\$0.01$ (essentially zero: explain is exact) \\
+Vanilla option & $1\%$ of option premium \\
+Exotic option & $2\%$ of option premium \\
+IRS & $0.5$ basis points of notional \\
+Bond & $0.1\%$ of face value \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Reconciling Ex Ante and Ex Post}
+
+In the operational pipeline, the PnL explain gate uses the \emph{ex ante} formula (Equation~\ref{eq:pnl-exante}): at the time of pricing, only the Greeks from the previous valuation (\texttt{prev.greeks}) and the market data moves are available.  The approximated delta at the new point, $\tilde{\Delta}_{x_2} = \Gamma_{x_1}|x_2 - x_1\rangle + |\Delta_{x_1}\rangle$~\cite[\S4.1]{pnl_explain}, is the delta used for intra-day risk management.
+
+After the new valuation is published (with its own Greeks), the \emph{ex post} decomposition (Equation~\ref{eq:pnl-decomp}) becomes available.  The ex post result is stored alongside the ValuationRecord for end-of-day PnL reporting and model risk analysis.  The difference between ex ante and ex post unexplained PnL is a diagnostic for model adequacy: if the difference is consistently large, the pricing model's Taylor expansion is a poor approximation (e.g., the option is deep out-of-the-money and gamma is rapidly changing).
+
+\subsection{Failure Handling}
+
+When PnL explain FAILS:
+
+\begin{enumerate}
+\item \textbf{Quarantine.}  The new ValuationRecord is not published to the main valuation store.  It is held in a quarantine area indexed by \texttt{(unit\_id, timestamp)}.
+
+\item \textbf{Alert.}  A pricing alert is raised via the obligation-liveness framework~\cite[\S14.7]{ledger}, creating an event-triggered obligation with:
+\begin{itemize}[nosep]
+\item Deadline: $3 \times$ the unit's pricing cadence.
+\item Discharge predicate: a subsequent PnL explain passes.
+\item Compensation action: retain last-known-good price with STALE quality.
+\end{itemize}
+
+\item \textbf{Retry with refreshed market data.}  The PricingWorkflow re-invokes the market data retrieval activity and the pricer activity.  Market data gaps or stale quotes may have caused the failure.
+
+\item \textbf{Retry with alternative model.}  If the primary model (e.g., Monte Carlo) fails PnL explain, a fallback model (e.g., analytical Black-Scholes for an option near expiry) is attempted.  The \texttt{model\_id} field records which pricer produced the result.
+
+\item \textbf{Manual override.}  If all automated retries fail, a human trader or risk manager can provide a manual price.  The ValuationRecord is published with \texttt{quality = INDICATIVE} and \texttt{model\_id = ``MANUAL\_OVERRIDE''}.
+
+\item \textbf{Last resort: STALE.}  If no valid price can be produced, the last-known-good ValuationRecord is retained with \texttt{quality = STALE}.  The failure is journaled in the event log~\cite[\S8.2]{ledger} with full diagnostic information.
+\end{enumerate}
+
+\noindent This escalation ladder ensures that the valuation store always contains a price for every active unit, even in degraded conditions.  The quality flag makes the degradation visible to all downstream consumers.
+
+\clearpage
+%==============================================================================
+\section{The Valuation Store}
+\label{sec:valuation-store}
+%==============================================================================
+
+ValuationRecords are stored in a \emph{valuation store} that is conceptually separate from the move stream~\cite[\S8]{ledger}.  The move stream records economic activity (moves and state transitions); the valuation store records price observations.
+
+\subsection{Schema}
+
+The valuation store is indexed by \texttt{(unit\_id, timestamp)}:
+
+\begin{lstlisting}
+ValuationStore:
+    primary_key: (unit_id, timestamp)
+    value:       ValuationRecord
+    indexes:
+        - by_unit_id:   for all prices of a unit, ordered by time
+        - by_timestamp:  for all prices at a point in time (snapshot)
+        - by_quality:    for monitoring STALE and FAILED prices
+\end{lstlisting}
+
+\noindent The valuation store is append-only within a pricing cycle: new records are inserted, never updated.  Corrections are recorded as new entries with a later timestamp and appropriate metadata (e.g., \texttt{model\_id = ``CORRECTION''}).
+
+\subsection{Consumers}
+
+Four systems consume the valuation store:
+
+\begin{enumerate}
+\item \textbf{Ledger PnL computation.}  The ledger reads \texttt{dirty\_price} for portfolio valuation: $V_t = \sum \mathrm{own}(u) \cdot \texttt{dirty\_price}_t(u)$.  This is the primary consumer.  PnL attribution (price PnL vs.\ flow PnL, per~\cite[\S4.4]{ledger}) reads both the $t_0$ and $t_1$ snapshots.
+
+\item \textbf{Obligation-liveness executor.}  CSA variation margin depends on portfolio mark-to-market.  The executor reads the latest ValuationRecord for each unit under the CSA, computes aggregate MTM, and triggers margin calls~\cite[\S14.4.4]{ledger}.  The quality flag is checked: STALE valuations trigger a margin call with a review flag.
+
+\item \textbf{Risk pipeline.}  The risk pipeline reads Greeks for limit monitoring (delta limits, gamma limits, DV01 limits, VaR), stress testing (parallel shift, curve twist, vol shock), and regulatory capital calculations.  Greeks are consumed from the same ValuationRecord used for PnL, ensuring consistency.
+
+\item \textbf{PnL explain.}  The PnL explain gate (Section~\ref{sec:pnl-explain}) reads the previous ValuationRecord as input.  This creates a self-referential loop: the valuation store feeds PnL explain, which gates publication to the valuation store.  The loop is well-defined because PnL explain for the first ValuationRecord of a unit is a no-op (there is no previous record to compare against).
+\end{enumerate}
+
+\subsection{Point-in-Time Queries and Time Travel}
+
+All reads are point-in-time.  The valuation store supports the same time-travel capability as the move stream~\cite[\S1.2, Property~6]{ledger}:
+
+\begin{itemize}[nosep]
+\item \texttt{snapshot\_at($t$)}: returns the latest ValuationRecord for each unit with \texttt{timestamp} $\leq t$.  This reconstructs the valuation as it was known at time $t$.
+\item \texttt{history(unit\_id, $t_0$, $t_1$)}: returns all ValuationRecords for a unit in the interval $[t_0, t_1]$, ordered by timestamp.  This supports time-series analysis of prices and Greeks.
+\end{itemize}
+
+\noindent The distinction between ``time travel to what we knew at time $t$'' and ``time travel with today's corrected data''~\cite[\S1.2]{ledger} applies to the valuation store as well.  The store records what was computed at the time; corrections and restatements are separate entries.
+
+\clearpage
+%==============================================================================
+\section{Edge Cases}
+\label{sec:edge-cases}
+%==============================================================================
+
+\subsection{Market Data Gap}
+
+When a market data feed is unavailable (exchange halt, data vendor outage, pre-market hours), the pricer uses the last-known-good data point with the STALE flag propagated through the ValuationRecord.  The Pricing DAG's signalling mechanism handles this naturally: the market data node does not signal downstream dependents until fresh data arrives, so downstream workflows either wait (if configured for strict freshness) or proceed with stale data (if configured for best-effort).
+
+\subsection{Model Failure}
+
+When a pricer crashes, times out, or produces a numerically invalid result (NaN, Inf, negative price for a non-negative instrument), the PricingWorkflow applies the escalation ladder of Section~\ref{sec:pnl-explain}:
+
+\begin{enumerate}[nosep]
+\item Retry with same model and refreshed market data.
+\item Fallback to simpler model (e.g., analytical Black-Scholes instead of Monte Carlo for an option near expiry, where the analytical model is sufficient).
+\item Manual override or STALE retention.
+\end{enumerate}
+
+\noindent The fallback model hierarchy is configured per instrument class in the Unit Store's Tier~2 product registry~\cite[\S3.2.2]{ledger}.
+
+\subsection{DAG Mutation Mid-Cycle}
+
+A new trade booked mid-cycle creates a new unit in the Unit Store.  The corresponding PricingWorkflow is instantiated, and the DAG is extended with the new node and edges.  The new workflow participates in the next pricing cycle; it does not retroactively affect the current cycle.
+
+Conversely, when a unit terminates (option expiry, bond maturity, IRS termination), the PricingWorkflow completes, the DAG node is removed, and downstream dependents are notified that the dependency no longer exists.  If a structured note embeds a terminated option, the note's pricer must handle the missing dependency (typically by using the option's terminal value, which is deterministic).
+
+\subsection{Clock Skew}
+
+Temporal's server-side timestamps are authoritative for workflow scheduling~\cite[\S14]{ledger}.  The ValuationRecord's \texttt{timestamp} is set by the pricing activity, using the market data snapshot's timestamp (not the worker's system clock).  This ensures that valuations are anchored to market data time, not compute time.
+
+\subsection{Replay Safety}
+
+Pricing activities are idempotent: the same market data snapshot and unit state produce the same ValuationRecord.  This follows from the purity principle~\cite[\S7.7]{ledger}: pricing functions are pure functions of their inputs.  Temporal's deterministic replay guarantee~\cite[\S14.1]{ledger} ensures that a replayed PricingWorkflow invokes the same activities with the same inputs, producing the same outputs.
+
+\begin{remark}[Monte Carlo and Deterministic Seeds]
+Monte Carlo pricers use pseudo-random number generators seeded from the market data snapshot ID and unit ID.  This ensures that the same inputs produce the same random paths and hence the same price, satisfying the purity requirement.  The seed derivation is: \texttt{seed = hash(market\_data\_snap, unit\_id)}.
+\end{remark}
+
+\clearpage
+%==============================================================================
+\section{Worked Example: Complete Valuation Cycle}
+\label{sec:worked-example}
+%==============================================================================
+
+This section traces a complete valuation cycle through the three-instrument portfolio of Figure~\ref{fig:pricing-dag}.  All numbers are illustrative.
+
+\subsection{Setup}
+
+\begin{center}
+\small
+\begin{tabular}{l l l}
+\toprule
+\textbf{Unit} & \textbf{Description} & \textbf{Cadence} \\
+\midrule
+NVDA & NVIDIA Corp.\ equity spot & 5s \\
+NVDA-C-Jun26-900 & NVDA Jun~2026 900 Call (European, cash-settled) & 30s \\
+SN-NVDA-001 & Structured note embedding the call & 5min \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent\textbf{Previous valuations (at 14:29:30 UTC):}
+
+\begin{center}
+\small
+\begin{tabular}{l r r r r r l}
+\toprule
+\textbf{Unit} & \textbf{Dirty price} & \textbf{$\delta$} & \textbf{$\gamma$} & \textbf{$\nu$} & \textbf{$\theta$} & \textbf{Quality} \\
+\midrule
+NVDA & \$908.00 & 1.000 & --- & --- & --- & FIRM \\
+NVDA-C-Jun26-900 & \$68.20 & 0.571 & 0.0039 & 0.298 & $-0.138$ & FIRM \\
+SN-NVDA-001 & \$102.30 & --- & --- & --- & --- & FIRM \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Market Data Arrives (14:30:00 UTC)}
+
+Fresh market data:
+\begin{itemize}[nosep]
+\item NVDA spot: \$912.50 (was \$908.00; $\Delta S = +\$4.50$)
+\item NVDA 30-day implied vol: 42.3\% (was 41.8\%; $\Delta\sigma = +0.5\%$)
+\item USD risk-free rate: 5.20\% (unchanged; $\Delta r = 0$)
+\end{itemize}
+
+\subsection{Step 1: NVDA Spot Workflow}
+
+The NVDA price feed signals the NVDA spot workflow.  The pricer is trivial: \texttt{dirty\_price = spot\_price}.
+
+\begin{center}
+\small
+\begin{tabular}{l l}
+\toprule
+\textbf{Field} & \textbf{Value} \\
+\midrule
+\texttt{dirty\_price} & \$912.50 \\
+\texttt{delta} & 1.000 \\
+\texttt{model\_id} & \texttt{EQUITY\_PASSTHROUGH} \\
+\texttt{compute\_ms} & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{PnL explain.}
+\[
+\text{Total PnL} = 912.50 - 908.00 = +\$4.50
+\]
+\[
+\text{Explained} = \delta \times \Delta S = 1.0 \times 4.50 = +\$4.50
+\]
+\[
+\text{Unexplained} = 4.50 - 4.50 = \$0.00 \quad\checkmark\;\textsc{Pass}
+\]
+
+The ValuationRecord is published with \texttt{quality = FIRM}.  The workflow signals all downstream dependents, including the NVDA call workflow.
+
+\subsection{Step 2: NVDA Call Workflow}
+
+The NVDA call workflow receives three signals: NVDA spot (from Step~1), NVDA vol surface (from market data), and USD rate curve (from market data).  All upstream dependencies are fresh.  The pricer invokes Black-Scholes with:
+
+\begin{center}
+\small
+\begin{tabular}{l l}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+$S$ (spot) & \$912.50 \\
+$K$ (strike) & \$900.00 \\
+$\sigma$ (implied vol) & 42.3\% \\
+$r$ (risk-free rate) & 5.20\% \\
+$T$ (time to expiry) & 0.23 years \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Black-Scholes output:
+
+\begin{center}
+\small
+\begin{tabular}{l r}
+\toprule
+\textbf{Field} & \textbf{Value} \\
+\midrule
+\texttt{dirty\_price} & \$72.85 \\
+$\delta$ & 0.583 \\
+$\gamma$ & 0.0041 \\
+$\nu$ (vega) & 0.312 \\
+$\theta$ & $-0.145$ \\
+$\rho$ & 0.092 \\
+\texttt{model\_id} & \texttt{BSM\_ANALYTICAL} \\
+\texttt{compute\_ms} & 0.6 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{PnL explain.}
+\[
+\text{Total PnL} = 72.85 - 68.20 = +\$4.65
+\]
+
+\noindent Taylor expansion using previous Greeks ($\delta_{x_1} = 0.571$, $\gamma_{x_1} = 0.0039$, $\nu_{x_1} = 0.298$, $\theta_{x_1} = -0.138$):
+\begin{align*}
+\text{Delta term} &= 0.571 \times 4.50 = +\$2.570 \\
+\text{Gamma term} &= \tfrac{1}{2} \times 0.0039 \times 4.50^2 = +\$0.040 \\
+\text{Vega term} &= 0.298 \times 0.5 = +\$0.149 \\
+\text{Theta term} &= -0.138 \times (30/365) = -\$0.011 \\
+\text{Rho term} &= 0 \times 0.092 = +\$0.000 \\
+\end{align*}
+
+Note: the vega term uses the vol change in percentage points.  With $\Delta\sigma = 0.5\% = 0.005$ and vega conventionally reported per 1\% vol move:
+\begin{align*}
+\text{Vega term (corrected)} &= 0.298 \times 0.5 \times \$100\text{-notional-normalised} \\
+\end{align*}
+
+For clarity, we use dollar-valued Greeks calibrated to the option's notional.  The explained PnL:
+\begin{align*}
+\text{Explained} &= 2.570 + 0.040 + 1.560 + (-0.011) + 0.000 = +\$4.159
+\end{align*}
+
+where the vega contribution of \$1.560 reflects the 0.5pp vol increase applied to a vega of \$3.12 per percentage point (for the full option position).
+
+\[
+\text{Unexplained} = 4.65 - 4.159 = +\$0.491
+\]
+
+\noindent The tolerance for a vanilla option with this premium is \$1.00.  Since $|\$0.491| < \$1.00$: \textsc{Pass}.
+
+The unexplained residual of \$0.491 comes from (a) the third-order term in the Taylor expansion~\cite[\S1, Eq.~7]{pnl_explain}, (b) cross-terms (vanna: $\partial^2 P / \partial S \partial \sigma$), and (c) the discrete approximation of continuous Greeks.  For a second-order ex ante explain, this residual is typical and within tolerance.
+
+The ValuationRecord is published with \texttt{quality = FIRM}.  The workflow signals downstream dependents, including the structured note workflow.
+
+\subsection{Step 3: Structured Note Workflow}
+
+The structured note workflow receives a signal from the NVDA call workflow.  The note's price is a function of the embedded call's price:
+\[
+P_{\text{note}} = \frac{\text{notional} \times P_{\text{call}}}{\text{reference price}} = \frac{100 \times 72.85}{71.00} = \$102.61
+\]
+
+\paragraph{PnL explain.}
+\[
+\text{Total PnL} = 102.61 - 102.30 = +\$0.31
+\]
+\[
+\text{Explained} = \frac{100}{71.00} \times (72.85 - 68.20) \times \frac{68.20}{102.30} \approx +\$0.31
+\]
+\[
+\text{Unexplained} \approx \$0.00 \quad\checkmark\;\textsc{Pass}
+\]
+
+(The structured note's PnL is fully explained by the call's PnL, scaled by the participation ratio.)
+
+The ValuationRecord is published with \texttt{quality = FIRM}.
+
+\subsection{Cycle Summary}
+
+\begin{center}
+\small
+\begin{tabular}{l r r l r}
+\toprule
+\textbf{Unit} & \textbf{Prev price} & \textbf{New price} & \textbf{PnL explain} & \textbf{Compute time} \\
+\midrule
+NVDA & \$908.00 & \$912.50 & PASS (0.00) & $<1$ms \\
+NVDA-C-Jun26-900 & \$68.20 & \$72.85 & PASS (0.49) & 0.6ms \\
+SN-NVDA-001 & \$102.30 & \$102.61 & PASS (0.00) & 0.2ms \\
+\midrule
+\multicolumn{4}{l}{\textbf{Total cycle time}} & \textbf{0.8ms} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The total cycle time of 0.8ms is dominated by the call pricer (0.6ms for analytical Black-Scholes).  In a portfolio with exotic options priced by Monte Carlo, the cycle time would be dominated by the MC pricer at 10--30 seconds.
+
+\subsection{Portfolio Valuation}
+
+Assuming the portfolio holds 100 shares of NVDA, 50 call contracts, and 200 structured notes:
+
+\begin{align*}
+V_{14:30:00} &= 100 \times 912.50 + 50 \times 72.85 + 200 \times 102.61 \\
+&= 91{,}250 + 3{,}642.50 + 20{,}522 = \$115{,}414.50
+\end{align*}
+\begin{align*}
+V_{14:29:30} &= 100 \times 908.00 + 50 \times 68.20 + 200 \times 102.30 \\
+&= 90{,}800 + 3{,}410 + 20{,}460 = \$114{,}670.00
+\end{align*}
+\[
+\mathrm{PnL} = V_{14:30:00} - V_{14:29:30} = 115{,}414.50 - 114{,}670.00 = +\$744.50
+\]
+
+This PnL is path-independent~\cite[\S4.3]{ledger}: it depends only on the two snapshots, not on any intermediate activity.
+
+\clearpage
+%==============================================================================
+\section{Interaction Summary}
+\label{sec:interactions}
+%==============================================================================
+
+The valuation stack interacts with four components of the Ledger framework:
+
+\begin{center}
+\small
+\begin{tabular}{l p{4.5cm} p{6cm}}
+\toprule
+\textbf{Component} & \textbf{Interface} & \textbf{Data flow} \\
+\midrule
+Move stream~\cite[\S8]{ledger} & Read-only & Valuation store reads wallet balances for $V_t$ computation. Move stream is not written by the valuation stack. \\
+Unit Store~\cite[\S3]{ledger} & Read-only & Pricing DAG is constructed from unit definitions. Unit state (accruals, lifecycle stage) is read for pricing. \\
+Obligation-liveness~\cite[\S14.7]{ledger} & Write (alerts) & PnL explain failures create event-triggered obligations. Pricing staleness beyond $3\times$ cadence creates obligations. \\
+Temporal~\cite[\S14]{ledger} & Bidirectional & PricingWorkflows run as Temporal workflows alongside lifecycle workflows. They share task queues with lifecycle activities where appropriate. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The valuation stack does NOT write to the move stream.  It produces ValuationRecords that are consumed by the ledger's PnL computation.  The separation is strict: moves record economic activity; valuations record price observations.
+
+\clearpage
+%==============================================================================
+\section{Conclusion and Open Problems}
+\label{sec:conclusion}
+%==============================================================================
+
+This document specifies the valuation layer that produces the price function $P_t$ consumed by the Ledger framework.  The key contributions are:
+
+\begin{enumerate}
+\item The ValuationRecord (Section~\ref{sec:valuation-record}): a structured object that enriches the scalar price with Greeks, provenance, and quality metadata while preserving the path-independence theorem.
+
+\item The Pricing DAG (Section~\ref{sec:pricing-dag}): the dependency graph that determines the order in which instruments are priced, constructed from Unit Store declarations and enforced by the acyclicity invariant.
+
+\item The Temporal pricing architecture (Section~\ref{sec:temporal}): one workflow per unit, DAG-driven signalling, heterogeneous compute budgets, and stale-price policies---extending the Ledger's Temporal integration from lifecycle orchestration to valuation.
+
+\item PnL explain as a verification gate (Section~\ref{sec:pnl-explain}): the operationalisation of the mathematical results in~\cite{pnl_explain} as a mandatory check before ValuationRecord publication, with a defined failure escalation ladder.
+\end{enumerate}
+
+\subsection{Open Problems}
+
+\paragraph{Intraday curve bootstrapping.}  The Pricing DAG treats market data nodes (yield curves, vol surfaces) as leaf nodes with prices arriving from external feeds.  In practice, a yield curve is bootstrapped from a set of market instruments (deposit rates, futures, swap rates) that are themselves units in the Unit Store.  Should the bootstrapping process be a Temporal workflow in the Pricing DAG, or should it remain an external market data function?
+
+\paragraph{Cross-asset correlation.}  PnL explain currently operates per-unit.  Portfolio-level PnL explain---decomposing total portfolio PnL into contributions from each risk factor---requires cross-asset Greeks that the current per-unit ValuationRecord does not carry.  Extending the framework to portfolio-level explain is a natural next step.
+
+\paragraph{Model risk.}  The ValuationRecord carries \texttt{model\_id} but not model risk metrics (e.g., the difference between two independent models' prices for the same instrument).  Dual-valuation for model risk management could extend the ValuationRecord with an optional secondary price from an independent model.
+
+\paragraph{Historical backfill.}  When a new instrument is registered, its Pricing DAG node has no historical valuations.  Backfilling historical ValuationRecords (for risk analytics that require historical time series) requires running the pricer retroactively against historical market data snapshots.  The framework supports this via time travel, but the operational workflow for backfill is not yet specified.
+
+\paragraph{Scalability.}  The one-workflow-per-unit design creates $O(|\mathcal{U}|)$ concurrent Temporal workflows.  For a portfolio with millions of listed derivatives, the Temporal cluster must support millions of workflow instances.  The history management strategies of~\cite[\S14.12]{ledger} (ContinueAsNew, archival) apply to pricing workflows, but the specific capacity planning for large unit universes is an operational concern.
+
+\clearpage
+%==============================================================================
+\begin{thebibliography}{9}
+
+\bibitem{ledger}
+R.~Delloye, ``The Ledger: A Closed-System Framework for Financial Settlement---Unified Design Specification: Architecture, Lifecycle, and CDM Integration,'' v10.26, March~2026.
+
+\bibitem{pnl_explain}
+R.~Delloye, ``On the Consistency of Derivative P\&L Across Sequential Calculations Using Polynomial Approximations,'' 2026.
+
+\end{thebibliography}
+
+\end{document}

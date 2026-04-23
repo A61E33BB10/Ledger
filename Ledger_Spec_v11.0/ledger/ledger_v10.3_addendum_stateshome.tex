@@ -1,0 +1,490 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{longtable}
+\usepackage{textcomp}
+\usepackage{array}
+\usepackage{xcolor}
+
+\geometry{margin=1in}
+\setcounter{tocdepth}{2}
+
+\newtheorem{definition}{Definition}[section]
+\newtheorem{principle}[definition]{Principle}
+\newtheorem{theorem}[definition]{Theorem}
+\newtheorem{proposition}[definition]{Proposition}
+\newtheorem{invariant}[definition]{Invariant}
+\newtheorem{remark}[definition]{Remark}
+\newtheorem{condition}[definition]{Condition}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  columns=fullflexible,
+  keepspaces=true,
+  xleftmargin=2em,
+  aboveskip=0.5em,
+  belowskip=0.5em,
+  breaklines=true,
+  showstringspaces=false
+}
+
+\lstdefinelanguage{pythonstyle}{
+  keywords={from,import,class,def,return,if,for,in,raise,self,None,True,False,Optional,Callable,Generic,TypeVar,dataclass,frozen},
+  keywordstyle=\bfseries,
+  ndkeywords={ValueError,dict,tuple,float,int,str,object,bool},
+  ndkeywordstyle=\bfseries,
+  comment=[l]{\#},
+  commentstyle=\itshape,
+  stringstyle=\ttfamily,
+  morestring=[b]",
+  morestring=[b]'
+}
+
+\title{The Ledger: Addendum to v10.3\\[6pt]
+\large StatesHome --- Where Does Unit State Live?\\
+\normalsize A resolution of \S 7 by 27-iteration adversarial multi-agent review}
+\author{R.\ Delloye}
+\date{April 2026 --- Addendum A1 to v10.3}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This addendum resolves the design question raised in \S 7 of the Ledger v10.3 specification: \emph{should the state of a unit be attached to the wallet or to the unit?} Four concrete test cases --- a future whose state depends on past transactions, a managed account whose state is inherently wallet-attached, a QIS strategy that trades futures, and an instrument that exists in the universe but has not been traded yet --- force the design. The conclusion, reached after twenty-seven independent adversarial agent invocations across eight review rounds, is that unit state lives in three distinct maps: an immutable versioned \textit{ProductTerms}, a shared mutable \textit{UnitStatus}, and a per-position \textit{PositionState}. There is no separate wallet-keyed state sector, because every economic per-wallet fact is naturally keyed by a mandate- or strategy-unit and collapses into \textit{PositionState}[w, u\textsubscript{MA}]. Twelve conditions, denoted C1--C12, make seven of the ten core invariants of \S 11 structurally unreachable. This addendum supersedes the phrasing at v10.3 line 1034 and line 2287.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+%==============================================================================
+\section{The Question}
+\label{sec:question}
+%==============================================================================
+
+\begin{quote}
+Should the state of a unit be attached to the wallet or to the unit?
+
+Consider: (1) a future whose state depends on past transactions; (2) a managed account, whose state is inherently attached to a wallet; (3) a QIS strategy that trades futures; (4) an instrument that exists in the universe but has not been traded yet.
+\end{quote}
+
+\noindent Adversarial reviewers --- \texttt{formalis}, \texttt{jane-street-cto}, \texttt{testcommittee}, \texttt{correctness-architect}, \texttt{institutional-brake} --- stress-tested every proposal on testability, correctness, and simplicity.
+
+%==============================================================================
+\section{The Ruling}
+\label{sec:ruling}
+%==============================================================================
+
+\textbf{State attaches to three distinct objects, each with its own map and its own totality discipline.}
+
+\begin{lstlisting}
+ProductTerms  : Map[UnitId, NonEmptyList[TermsVersion]]   # total on registered u, append-only, versioned
+UnitStatus    : Map[UnitId, UnitStatus]                   # total on registered u, mutable, shared across holders
+PositionState : Map[(WalletId, UnitId), PositionState]    # monotone carrier, Option accessor, per-(holder, unit)
+\end{lstlisting}
+
+\noindent Plus a non-state, non-financial sidecar:
+
+\begin{lstlisting}
+WalletRegistry : Map[WalletId, WalletMetadata]            # KYC, permissions, audit cursor, NOT state
+\end{lstlisting}
+
+\noindent \textbf{There is no \texttt{WalletState} sector.} Every economic per-wallet fact turned out to be $(w, u_{\mathrm{mandate}})$-keyed once the mandate/strategy is given its rightful identity as a unit --- so the $W$-sector is empty of economic state and collapses into \textit{PositionState}.
+
+\subsection{The Three Keys, in One Line Each}
+
+\begin{longtable}{p{3.5cm}p{3cm}p{8cm}}
+\toprule
+\textbf{Key} & \textbf{Home} & \textbf{Examples} \\
+\midrule
+$u$ (immutable) & \textit{ProductTerms} & multiplier, currency, expiry, CCP, strike, ISIN, fee schedule, mandate text, benchmark identity, index methodology \\
+\addlinespace
+$u$ (mutable, shared) & \textit{UnitStatus} & \texttt{lifecycle\_stage}, \texttt{last\_settlement\_price}, \texttt{last\_settlement\_date}, \texttt{current\_weights}, \texttt{nav\_index}, \texttt{triggered\_barrier}, \texttt{superseded\_by} \\
+\addlinespace
+$(w, u)$ & \textit{PositionState} & \texttt{accumulated\_cost}, \texttt{ccp\_binding}, per-position OTC lifecycle, \texttt{entry\_nav}, \texttt{hwm}, \texttt{accrued\_\{mgmt,perf\}\_fee}, \texttt{benchmark\_nav\_at\_inception}, \texttt{mandate\_breach\_flags} \\
+\bottomrule
+\end{longtable}
+
+\subsection{Two Orthogonal Disciplines on \textit{PositionState}}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Accessor returns \texttt{Option[PositionState]}} (Lattner, Jane Street): \texttt{None} means \emph{this wallet has never held this unit}. \texttt{Some(zero)} means \emph{held once, currently flat}. Both readings are load-bearing (VM-settle, wash-sale lookback, record-date entitlements); \texttt{None} versus \texttt{Some(zero)} cannot be collapsed.
+\item \textbf{Carrier is monotone} (Feynman, testcommittee): once created, a row is never garbage-collected. Close-out leaves a \texttt{zero} row. This makes replay a literal fold --- \texttt{apply\_all(events)} is identical regardless of checkpoint boundaries --- and makes the conservation property a single pass over a stable key set.
+\end{itemize}
+
+\noindent The two are orthogonal: one is type discipline, the other is storage discipline. Both are required. This is \textbf{C1}.
+
+\subsection{Conservation Lives at the Event Handler, Not at the Storage Shape}
+
+No map layout can enforce $\sum_w \texttt{accumulated\_cost}(w, u) = 0$ by types alone; refinement types on decimal sums are not free in any production language. Instead, every event handler --- \texttt{Trade}, \texttt{SettleVM}, \texttt{CorporateAction}, \texttt{QISRebalance}, \texttt{MandateAmend} --- produces a \texttt{StateDelta} that satisfies
+\[
+\sum_w \Delta f(w, u) = 0
+\]
+\emph{structurally per event class}, with explicit proofs for the 2-leg, $K$-leg, VM-fan-out, and vacuous (zero-holder) base cases. Induction over the event stream gives the global invariant. This is \textbf{C2}.
+
+\subsection{The Twelve Conditions C1--C12}
+
+\begin{description}[leftmargin=3.2em,labelwidth=2.8em,labelsep=0.4em,style=nextline]
+\item[\textbf{C1}] Option accessor + monotone carrier, both.
+\item[\textbf{C2}] Handler-level conservation, per event class, with vacuous base case.
+\item[\textbf{C3}] Atomic \texttt{StateDelta} across \textit{ProductTerms} / \textit{UnitStatus} / \textit{PositionState}. Partial application rejected.
+\item[\textbf{C4}] Capability-scoped reads; cross-$(w, u_{\mathrm{MA}})$ overlay reads forbidden; strategy exports flow only through \textit{UnitStatus}.
+\item[\textbf{C5}] \textit{UnitStatus} registration-total; product-declared defaults applied at Unit Store registration.
+\item[\textbf{C6}] \textit{ProductTerms} versioned append-only; no in-place mutation.
+\item[\textbf{C7}] \textit{ProductTerms} registration-total; first write at registration.
+\item[\textbf{C8}] Amendment two-track: a product-declared fungibility predicate decides \emph{Preserving} (append \texttt{TermsVersion}) versus \emph{Breaking} (allocate fresh $u$ + \texttt{SupersededBy}).
+\item[\textbf{C9}] Handlers on zero-holder units discharge $\sum = 0$ vacuously; per-class proof obligation includes the empty case.
+\item[\textbf{C10}] Re-registration of a $u_{\mathrm{id}}$ is a hard error --- never a silent reset.
+\item[\textbf{C11}] Each \textit{PositionState} field is tagged with the unique handler allowed to mutate it (\texttt{ac} $\to$ settle/trade; \texttt{hwm} $\to$ fee\_crystallise; \texttt{entry\_nav} $\to$ subscribe; $\ldots$).
+\item[\textbf{C12}] All per-$(w, \mathrm{mandate}/\mathrm{strategy})$ economic state lives at \textit{PositionState}$[w, u_{\mathrm{MA}}]$ / $[w, u_{\mathrm{QIS}}]$ --- no flat per-wallet scalars for economic state. $W$-sector collapse enforced by schema.
+\end{description}
+
+%==============================================================================
+\section{Effect on v10.3, Line 1034}
+\label{sec:line1034}
+%==============================================================================
+
+The v10.3 main document currently reads:
+
+\begin{quote}
+\textit{``Unit state is per-unit for most instrument types. For instruments with per-wallet state (e.g., futures accumulated cost), the state dictionary is per (wallet, unit) pair.''}
+\end{quote}
+
+\noindent This phrasing is replaced by:
+
+\begin{quote}
+Every unit $u \in \mathcal{U}$ carries immutable \textit{ProductTerms}$[u]$ (versioned append-only) and mutable \textit{UnitStatus}$[u]$ (shared across all holders). Every held position $(w, u)$ carries a \textit{PositionState}$[w, u]$, with \texttt{None} on the accessor distinguishing ``never held'' from \texttt{Some}$(zero_P)$ ``held-and-flat''. State pertaining to a holder's relationship to a strategy, mandate, or managed account lives at \textit{PositionState}$[w, u_{\mathrm{MA}}]$ where $u_{\mathrm{MA}}$ is the mandate/strategy contract unit. There is no separate wallet-keyed state sector.
+\end{quote}
+
+\noindent The change is additive-then-swap: \texttt{get\_unit\_state}$(u)$ remains as a deprecated alias to \texttt{product\_terms}$(u)$ \texttt{++} \texttt{unit\_status}$(u)$; \texttt{get\_unit\_state}$(w, u)$ at line 2287 maps to \texttt{position\_state}$(w, u)$.
+
+%==============================================================================
+\section{Application to the Four Test Cases}
+\label{sec:testcases}
+%==============================================================================
+
+\subsection{Future with State Depending on Past Transactions}
+
+\begin{longtable}{p{5.5cm}p{3.5cm}p{6cm}}
+\toprule
+\textbf{Field} & \textbf{Home} & \textbf{Rationale} \\
+\midrule
+\texttt{multiplier}, \texttt{currency}, \texttt{expiry}, \texttt{clearinghouse}, \texttt{exchange}, \texttt{product\_id} & \textit{ProductTerms}$[u_{\mathrm{ES}}]$ & Immutable. CME-ES and ICE-ES are \emph{distinct units} (this replaces v10.3 line 1168's ``per-wallet clearinghouse'' phrasing). \\
+\addlinespace
+\texttt{lifecycle\_stage}, \texttt{last\_settlement\_price}, \texttt{last\_settlement\_date} & \textit{UnitStatus}$[u_{\mathrm{ES}}]$ & Shared across all holders. One settle price per contract. \\
+\addlinespace
+\texttt{accumulated\_cost} (\texttt{ac}) & \textit{PositionState}$[w, u_{\mathrm{ES}}]$ & Conservation $\sum_w \texttt{ac}(w, u) = 0$ holds by handler-level structural zero-sum on every \texttt{Trade} (buyer delta + seller delta = 0) and every \texttt{SettleVM} (each wallet reset to target; cash moves offset exactly). \\
+\bottomrule
+\end{longtable}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Per-$(w, u)$ state earns its place} by the Karpathy substitution test: two wallets holding the same contract can have different \texttt{ac}; any $u$-keyed layout would collapse them.
+\item \textbf{\texttt{first\_touch\_date} is NOT state} --- it is derived from the event log on demand. Caching it in \textit{PositionState} would create a fold-inconsistency under back-dated corrections (R5\_futures A3).
+\item \textbf{Settled positions retain their rows} (monotone carrier). Tax reporting, wash-sale lookback, and 1099-B reconstruction demand the ghost row.
+\end{itemize}
+
+\subsection{Managed Account --- The ``Inherently Wallet-Attached'' Case}
+
+\textbf{The mandate itself is a unit} ($u_{\mathrm{MA}}$). v10.3 \S 6 already places mandates in $\mathcal{U}$ (``the managed-account smart contract'', ``CSA margin as a wallet-level smart contract''). The mandate is issued by the manager and held by the client:
+\[
+w_{\mathrm{manager}}(u_{\mathrm{MA}}) = -1 \qquad w_{\mathrm{client}}(u_{\mathrm{MA}}) = +1 \qquad \sum_w w(u_{\mathrm{MA}}) = 0.
+\]
+
+\noindent With $u_{\mathrm{MA}}$ promoted to a first-class unit, every field that \emph{looked} per-wallet in Sec 6 relocates naturally:
+
+\begin{longtable}{p{8.5cm}p{6.5cm}}
+\toprule
+\textbf{Field} & \textbf{Home} \\
+\midrule
+Mandate text, fee schedule, benchmark identity, max position limits & \textit{ProductTerms}$[u_{\mathrm{MA}}]$ \\
+HWM hurdle methodology, crystallisation frequency & \textit{ProductTerms}$[u_{\mathrm{MA}}]$ \\
+HWM \emph{value} (client-specific), \texttt{hwm\_date} & \textit{PositionState}$[w_{\mathrm{client}}, u_{\mathrm{MA}}]$ \\
+Accrued mgmt / perf fee, mandate breach flags, subscription / redemption cursor & \textit{PositionState}$[w_{\mathrm{client}}, u_{\mathrm{MA}}]$ \\
+Benchmark NAV at this wallet's inception & \textit{PositionState}$[w_{\mathrm{client}}, u_{\mathrm{MA}}]$ \\
+Current benchmark level (shared, from index source) & \textit{UnitStatus}$[u_{\mathrm{bench}}]$ \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Why this is not the Dirac $u_\emptyset$ hack.} $u_\emptyset$ had no issuer, no holder, no conservation partner --- it was a self-reflexive sentinel that broke $\sum_w = 0$ by fiat. $u_{\mathrm{MA}}$ is a real contract with a real issuer (manager) and a real holder (client); conservation holds by the standard issuance law.
+
+\paragraph{Multi-mandate composition} (a client with base + overlay mandate on the same wallet) is handled natively: two separate $(w_{\mathrm{client}}, u_{\mathrm{MA,base}})$ and $(w_{\mathrm{client}}, u_{\mathrm{MA,overlay}})$ rows, each with its own HWM, fees, breach flags. A flat per-wallet scalar would have collapsed them.
+
+\subsection{QIS Strategy that Trades Futures}
+
+\textbf{Five distinct keyings coexist --- and no two are in the same map.}
+
+\begin{lstlisting}
+u_QIS         -- the strategy itself (a tradable unit)
+u_ES, u_NQ    -- the futures the strategy trades
+u_MA_C        -- the mandate under which client C holds QIS (if applicable)
+w_QIS         -- the strategy's own wallet (where futures positions live)
+w_C           -- a client wallet
+\end{lstlisting}
+
+\begin{longtable}{p{8.5cm}p{6.5cm}}
+\toprule
+\textbf{State} & \textbf{Home} \\
+\midrule
+Strategy contract terms (vol target, barrier, universe, share-class index start) & \textit{ProductTerms}$[u_{\mathrm{QIS}}]$ \\
+Strategy current state (\texttt{last\_rebalance\_date}, \texttt{current\_weights}, \texttt{cumulative\_return}, \texttt{nav\_index}, \texttt{vol\_realised}, \texttt{triggered\_barrier}) & \textit{UnitStatus}$[u_{\mathrm{QIS}}]$ --- \emph{strategy-level, shared across all holders} \\
+Futures positions held by the strategy (\texttt{accumulated\_cost}, ccp) & \textit{PositionState}$[w_{\mathrm{QIS}}, u_{\mathrm{ES}}]$, $[w_{\mathrm{QIS}}, u_{\mathrm{NQ}}]$, $[w_{\mathrm{QIS}}, u_{\mathrm{YM}}]$ \\
+Per-client subscription state (\texttt{entry\_nav}, \texttt{hwm}) & \textit{PositionState}$[w_C, u_{\mathrm{QIS}}]$ \\
+Per-client mandate overlay (if any) & \textit{PositionState}$[w_C, u_{\mathrm{MA,C}}]$ \\
+\bottomrule
+\end{longtable}
+
+\paragraph{HWM resolved.} R5 had a live tension: \textit{WalletState}$[w_C]$.overlays$[u_{\mathrm{MA}}]$ (R5\_managed\_account) versus \textit{PositionState}$[w_C, u_{\mathrm{QIS}}]$ (R5\_qis). \texttt{correctness-architect} and \texttt{formalis} broke the tie: a client holding \emph{two} strategies must carry \emph{two} HWMs, so any $w$-only keying collapses them. HWM lives at \textit{PositionState}$[w_C, u_{\mathrm{QIS}}]$ (or $[w_C, u_{\mathrm{MA,C}}]$ when a mandate wrapper is in force).
+
+\paragraph{Rebalance event.} The barrier-hit or monthly-rebalance event is one atomic \texttt{StateDelta} that updates \textit{UnitStatus}$[u_{\mathrm{QIS}}]$ (new weights, new lifecycle if barrier breached) \emph{and} the strategy's \textit{PositionState}$[w_{\mathrm{QIS}}, u_{\mathrm{ES/NQ/YM}}]$ rows (via trade moves on the underlying futures). C3 mandates atomicity across all three maps.
+
+\paragraph{Wind-down.} \textit{UnitStatus}$[u_{\mathrm{QIS}}].\texttt{lifecycle\_stage} \to \texttt{CLOSED}$ propagates to clients as a NAV-strike redemption event. \textit{PositionState}$[w_C, u_{\mathrm{QIS}}]$ rows are \textbf{retained} with balance 0 (monotone carrier); they preserve the audit trail and the final HWM for tax reporting.
+
+\subsection{Instrument in the Universe that Has Not Been Traded Yet}
+
+\begin{itemize}[leftmargin=*]
+\item \textit{ProductTerms}$[u]$ --- \textbf{present} at Unit Store registration. C7.
+\item \textit{UnitStatus}$[u]$ --- \textbf{present and fully initialised} at registration with product-declared defaults (e.g., \texttt{lifecycle\_stage = LISTED}, \texttt{last\_settlement\_price = None}). C5. \texttt{view.unit\_status}$(u)$ is \emph{total}.
+\item \textit{PositionState}$[w, u]$ --- \textbf{no rows} for any $w$. \texttt{view.position\_state}$(w, u) = $ \texttt{None} for all $w$ until first touch. C1.
+\item \textit{WalletRegistry}$[w]$ --- unaffected.
+\end{itemize}
+
+\paragraph{Lifecycle totality.} An untraded option can transition $\texttt{LISTED} \to \texttt{ACTIVE} \to \texttt{EXPIRED}$ purely through \textit{UnitStatus} updates, with zero \textit{PositionState} rows ever created. Handlers fire on $\texttt{holders\_of}(u) = \emptyset$ and discharge $\sum_w \Delta = 0$ vacuously (C9). A naive bug class --- \texttt{dividend\_per\_share / len(holders)} --- is caught by C9's explicit empty-set obligation.
+
+\paragraph{Amendment discipline.} A bond amendment that preserves fungibility (coupon step-up, CSA eligible-collateral change, fee-rate tweak within declared band) appends a \texttt{TermsVersion} to \textit{ProductTerms}$[u]$ --- existing \textit{PositionState} rows survive untouched. An amendment that breaks fungibility (new ISIN, benchmark swap, bond restructuring) allocates a fresh $u_{\mathrm{new}}$, stamps $\texttt{SupersededBy}(u_{\mathrm{old}} \to u_{\mathrm{new}})$ in both \textit{UnitStatus} rows, and emits an atomic re-subscription \texttt{StateDelta} that moves $(w, u_{\mathrm{old}}) \to (w, u_{\mathrm{new}})$ preserving $\sum_w$. The product-declared fungibility predicate
+\[
+\texttt{is\_fungibility\_preserving} : \textit{ProductTerms} \times \textit{TermsAmendment} \to \{\texttt{Preserving}, \texttt{Breaking}\}
+\]
+is total and testable. C8.
+
+%==============================================================================
+\section{Pareto Frontier --- Alternatives Considered and Rejected}
+\label{sec:pareto}
+%==============================================================================
+
+The iteration tested six candidates on three axes (0--10, higher = better; simplicity axis inverted for display):
+
+\begin{longtable}{p{7cm}rrr}
+\toprule
+ & \textbf{Testability} & \textbf{Correctness} & \textbf{Simplicity (viable)} \\
+\midrule
+A --- v10.3 current (per-unit + per-(w,u) for futures) & 4 & 5 & 4 \\
+\textbf{B --- 3 maps + C1--C12 (ship)} & \textbf{9} & \textbf{9} & \textbf{8} \\
+C --- Dirac $\sigma : W \times U \rightharpoonup S_u$ with $u_\emptyset$ sentinel & 7 & 3 & 7 \\
+D --- Minsky 4-map (retains explicit \textit{WalletState}) & 7 & 7 & 5 \\
+E --- Grothendieck sheaf on $H_t \subseteq W \times U$ & 8 & 9 & 2 \\
+F --- 2-map (\textit{ProductTerms} + \textit{PositionState}) with universe wallet $w_\star$ & 5 & 6 & 6 \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Domination findings.}
+\begin{itemize}[leftmargin=*]
+\item \textbf{B strictly dominates A, C, D, F} on all three axes.
+\item \textbf{B dominates E} (Grothendieck): equal on correctness, higher on testability (sheaf generators require non-existent libraries), radically higher on simplicity. Elegance is real; shippability is not.
+\item \textbf{F looks simpler but isn't.} Folding \textit{UnitStatus} into \textit{PositionState}$[w_\star, u]$ re-introduces the per-unit/per-$(w,u)$ split as a \emph{runtime predicate} \texttt{is\_universe}$(w)$ on the wallet axis. Conservation $\sum_w \Delta \texttt{ac}(w, u) = 0$ must then \emph{exclude} $w_\star$ explicitly --- a carve-out, not a rule. This is the Minsky denormalisation trap. \textbf{B's \textit{UnitStatus} is the type-level expression of what F hides as a wallet-id convention.}
+\item \textbf{C (Dirac $u_\emptyset$)} fails day-one correctness: $u_\emptyset$ has no issuer, no conservation partner. It breaks $\sum_w w(u) = 0$ by fiat.
+\end{itemize}
+
+\noindent \textbf{B is the unique Pareto-optimum under any correctness gate $\geq 7$.} The iteration has converged.
+
+\subsection{Why Exactly Three Maps --- Not Two, Not Four}
+
+Three independent forcing constraints, each of which breaks a different map:
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Karpathy substitution} --- two wallets holding the ``same'' contract need distinct lifecycle state $\Rightarrow$ \textit{PositionState}$[w, u]$ is required.
+\item \textbf{Shared observables} --- \texttt{last\_settlement\_price}, index values, strategy weights are one-per-contract observables dereferenced by every holder $\Rightarrow$ a $u$-keyed map distinct from per-holder state is required.
+\item \textbf{Append-only versioned terms vs mutable per-$u$ status} --- \textit{ProductTerms} is never mutated in place (audit, amendment trail, regulatory reconstruction); \textit{UnitStatus} is written on every settle. Merging them would conflate two mutation disciplines under one name $\Rightarrow$ a third map is required.
+\end{enumerate}
+
+\noindent Removing any of the three breaks one of (i)--(iii). Adding a fourth (explicit \textit{WalletState}) introduces a sector whose economic content is empty (R6\_formalis \S 2 enumerates every candidate and shows each collapses to $(w, u_{\mathrm{MA}})$). The three-map schema is the minimum basis of the problem, not a compromise.
+
+%==============================================================================
+\section{Invariants that Become Structurally Unreachable}
+\label{sec:unreachable}
+%==============================================================================
+
+Under B with C1--C12, 7 of v10.3's 10 core invariants (\S 11) are \textbf{structurally unreachable} --- the system cannot express the illegal state:
+
+\begin{description}[leftmargin=3em,labelwidth=2em,labelsep=0.5em,style=nextline]
+\item[\textbf{P1}] (conservation of quantity) --- enforced by handler-level per-event-class structural zero-sum (C2) and atomic \texttt{StateDelta} (C3).
+\item[\textbf{P3}] (determinism of replay) --- monotone carrier (C1) makes $\texttt{apply\_all}(\texttt{events}[:k])$ \texttt{++} $\texttt{events}[k:] \equiv \texttt{apply\_all}(\texttt{events})$ a literal fold identity.
+\item[\textbf{P5}] (idempotency of lifecycle events) --- single $(w, u)$ lattice and per-field canonical handler (C11) make idempotency a per-key dedup, not a cross-map coordination.
+\item[\textbf{P6}] (immutability of terms) --- \texttt{NonEmptyList[TermsVersion]} append-only (C6) + registration totality (C7).
+\item[\textbf{P7}] (no in-place mutation of identity) --- C10 (re-registration rejected) + C8 (breaking amendments allocate $u_{\mathrm{new}}$, never rewrite $u_{\mathrm{old}}$).
+\item[\textbf{P9}] (capability scoping) --- C4 prohibits cross-$(w, u_{\mathrm{MA}})$ overlay reads.
+\item[\textbf{P10}] (handler-field canon) --- C11 names the unique writer per field; mutation by any other handler is a type error.
+\end{description}
+
+\noindent No other candidate exceeds 3 structurally-unreachable invariants (R7\_correctness).
+
+%==============================================================================
+\section{Mutation-Score and Testing Expectations}
+\label{sec:mutationscore}
+%==============================================================================
+
+The \texttt{testcommittee} (R4, R7) committed to concrete numbers:
+
+\begin{itemize}[leftmargin=*]
+\item Event handlers (arithmetic on \texttt{Decimal}): \textbf{85--90\%} mutation score --- conservation kills most sign/coefficient mutants.
+\item Lifecycle guards ($\texttt{LISTED} \to \texttt{ACTIVE} \to \texttt{EXPIRED}$): \textbf{70--80\%} --- boundary-comparison mutants (\texttt{>} vs \texttt{>=}) require targeted tests.
+\item Overall core: $\geq$ \textbf{80\%} --- meets the Feathers change-safety threshold.
+\item State-machine spec at $|W|=3,\ |U|=2,\ \text{depth}\leq 6$: $10^5$--$10^6$ reachable states (TLC-tractable); conservation-violating handlers caught at depth 1.
+\end{itemize}
+
+\noindent The generator universe --- CDM enum $\times$ product-type cross-product --- is finite and enumerable, so test coverage is structurally bounded.
+
+%==============================================================================
+\section{Risk Register --- Institutional-Brake Gate (R8)}
+\label{sec:risk}
+%==============================================================================
+
+The \texttt{institutional-brake} reviewer raised eight concerns. None invalidate the design on correctness grounds; all are migration / governance / operational risks that must be budgeted for.
+
+\begin{longtable}{p{0.7cm}p{6.5cm}p{7.5cm}}
+\toprule
+\textbf{\#} & \textbf{Risk} & \textbf{Mitigation} \\
+\midrule
+F1 & Migration scope of retrofitting v10.3 (every downstream reader of \texttt{unit\_state}) & Ship \texttt{get\_unit\_state} as deprecated alias; additive split before cutover; parallel-run at least one quarter with reconciliation. \\
+\addlinespace
+F2 & Ownership of the C8 fungibility predicate is ungoverned & Assign per-product RACI in the Unit Store registry; Legal/Product/Risk sign-off required for predicate changes; version the predicate itself. \\
+\addlinespace
+F3 & Monotone carrier key-space growth at $10^7 \times 10^6$ scale is unbenchmarked & Benchmark Option-accessor cost and cache behaviour before merge; add tombstone-compaction policy for \textit{PositionState} where a row has been \texttt{Some(zero)} for $>$ retention horizon. \\
+\addlinespace
+F4 & C1--C12 is a multi-sprint test programme, not a release & Land the schema first with C1/C5/C6/C7/C9/C10 (type-enforced-for-free); stage C2/C3/C8/C11 over subsequent releases; never merge without at least C1 + C2 + C3. \\
+\addlinespace
+F5 & Mandate-as-unit creates an SFTR/EMIR reporting surface for mandate issuance & Pre-flight with Regulatory team; determine whether $u_{\mathrm{MA}}$ issuance requires UTI / LEI pair; may need opt-out flag on \textit{ProductTerms}$[u_{\mathrm{MA}}]$.\texttt{reportable}. \\
+\addlinespace
+F6 & CDM alignment (\texttt{TradeState} per \texttt{Trade} vs \textit{PositionState}$[w, u]$) is asserted, not verified & Rerun Rosetta NS1--7 mapping against the 3-map schema before any CDM adapter work; publish a delta document. \\
+\addlinespace
+F7 & Onboarding cost of three maps + Option/Monotone + 12 conditions is real & Ship a decision tree and a runbook; mandatory training for new engineers before they touch handlers; one-page cheat sheet. \\
+\addlinespace
+F8 & Forward migration is not reversible once \textit{WalletState} is collapsed & Keep a read-only mirror of v10.3 \textit{WalletState} for at least 4 quarters post-cutover; document the inverse mapping (overlay-key $u_{\mathrm{MA}} \to$ former \textit{WalletState} field) explicitly. \\
+\bottomrule
+\end{longtable}
+
+\noindent \textbf{F2, F5, F6 are the three that require external stakeholders before any line of code ships.} F1, F3, F4, F7, F8 are internal engineering risks, manageable within the delivery programme.
+
+%==============================================================================
+\section{Iteration Log}
+\label{sec:iterationlog}
+%==============================================================================
+
+Twenty-seven independent agent invocations across eight rounds:
+
+\begin{longtable}{p{0.8cm}p{5cm}p{3.5cm}p{5cm}}
+\toprule
+\textbf{Round} & \textbf{Agents} & \textbf{Purpose} & \textbf{Key output} \\
+\midrule
+R1 & grothendieck, noether, minsky, dirac, finops-architect, rosetta-cdm-engineer & Independent proposals & Convergence on three-sector model \\
+\addlinespace
+R2 & formalis, jane-street-cto, testcommittee & Adversarial \#1 & Grothendieck / Dirac rejected; Minsky + Finops emerge \\
+\addlinespace
+R3 & geohot, karpathy, feynman, chris-lattner & Simplicity panel & \textit{ProductTerms} split from \textit{UnitStatus}; Option vs Monotone tension raised \\
+\addlinespace
+R4 & formalis, jane-street-cto, testcommittee & Adversarial \#2 & Option \emph{and} Monotone (orthogonal); C1--C6 established \\
+\addlinespace
+R5 & gatheral ($\times$2), finops-architect, correctness-architect & Test cases 1--4 & HWM placement tension between managed-account and QIS; amendment two-track (C8) \\
+\addlinespace
+R6 & correctness-architect, formalis, jane-street-cto & Reconciliation & 3 maps, not 4; mandate-as-unit legitimised; C1--C12 finalised \\
+\addlinespace
+R7 & testcommittee, correctness-architect, geohot & Pareto analysis & B Pareto-optimal on all three axes; convergence confirmed \\
+\addlinespace
+R8 & institutional-brake & Final gate & 8 migration/governance risks logged; no design-level blocker \\
+\bottomrule
+\end{longtable}
+
+\noindent All agent reports are preserved in \texttt{/home/renaud/A61E33BB10/output/v10.3/StatesHome\_work/R\{1..8\}\_*.md}.
+
+%==============================================================================
+\section{Minimal Reference Implementation ($\leq 50$ lines)}
+\label{sec:reference}
+%==============================================================================
+
+\begin{lstlisting}[language=pythonstyle]
+from dataclasses import dataclass
+from typing import Callable, Generic, Optional, TypeVar
+
+U = TypeVar("U"); W = TypeVar("W"); T = TypeVar("T")
+
+@dataclass(frozen=True)
+class NonEmpty(Generic[T]):
+    head: T; tail: tuple[T, ...] = ()
+    def append(self, x: T) -> "NonEmpty[T]": return NonEmpty(self.head, self.tail + (x,))
+    def current(self) -> T: return self.tail[-1] if self.tail else self.head
+
+@dataclass(frozen=True)
+class TermsVersion:
+    fields: dict
+    is_fungibility_preserving: Callable[["TermsVersion"], bool]
+
+@dataclass(frozen=True)
+class UnitStatus:
+    lifecycle: str; last_px: Optional[float]; superseded_by: Optional[object] = None
+
+@dataclass(frozen=True)
+class PositionState:
+    ac: float = 0.0; balance: float = 0.0; hwm: float = 0.0
+
+FIELD_SPEC = {                                              # C11
+    "ac":      {"conserved": True,  "handler": "settle"},
+    "balance": {"conserved": True,  "handler": "transfer"},
+    "hwm":     {"conserved": False, "monotone": True, "handler": "fee_crystallise"},
+}
+
+class Ledger:
+    def __init__(self) -> None:
+        self.PT: dict = {}                                  # ProductTerms       C6, C7
+        self.US: dict = {}                                  # UnitStatus         C5
+        self.PS: dict = {}                                  # PositionState      C1
+
+    def register(self, u, tv: TermsVersion, us: UnitStatus) -> None:
+        if u in self.PT: raise ValueError("C10: re-registration")
+        self.PT[u] = NonEmpty(tv); self.US[u] = us
+
+    def position(self, w, u) -> Optional[PositionState]:    # C1 Option accessor
+        return self.PS.get((w, u))
+
+    def apply(self, delta: dict) -> None:                   # C3 atomic; C2 checked; C11 handler-tagged
+        for f, spec in FIELD_SPEC.items():
+            if spec["conserved"] and sum(d.get(f, 0) for d in delta["rows"].values()) != 0:
+                raise ValueError(f"C2: {f} not conserved")
+        for (w, u), diff in delta["rows"].items():
+            old = self.PS.get((w, u), PositionState())
+            self.PS[(w, u)] = PositionState(**{**old.__dict__, **diff})   # monotone: never deleted
+
+    def amend(self, u, tv_new: TermsVersion, fresh: Callable[[], object]):  # C8 two-track
+        head = self.PT[u].current()
+        if head.is_fungibility_preserving(tv_new):
+            self.PT[u] = self.PT[u].append(tv_new); return u
+        u2 = fresh()
+        self.PT[u2] = NonEmpty(tv_new)
+        self.US[u]  = UnitStatus(**{**self.US[u].__dict__, "superseded_by": u2})
+        return u2
+\end{lstlisting}
+
+%==============================================================================
+\section{The One-Sentence Answer}
+\label{sec:onesentence}
+%==============================================================================
+
+\begin{quote}
+\textbf{Unit state lives in three places --- immutable \textit{ProductTerms}$[u]$, shared mutable \textit{UnitStatus}$[u]$, and per-position \textit{PositionState}$[w, u]$ --- with no separate wallet-keyed state sector, because every economic per-wallet fact is naturally keyed by a mandate or strategy unit and collapses into \textit{PositionState}$[w, u_{\mathrm{MA}}]$.}
+\end{quote}
+
+\noindent This is the Pareto-optimal schema on testability, correctness, and simplicity. It is the minimum basis of the problem, not a compromise. Ship B.
+
+\vfill
+\begin{center}
+\rule{0.5\textwidth}{0.4pt}\\[4pt]
+\textit{Document compiled 2026-04-22 from 27 adversarial agent rounds.}\\
+\textit{All supporting analyses preserved in \texttt{StatesHome\_work/}.}
+\end{center}
+
+\end{document}
