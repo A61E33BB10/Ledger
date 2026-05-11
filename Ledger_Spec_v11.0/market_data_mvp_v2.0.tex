@@ -1,0 +1,318 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage[margin=0.9in]{geometry}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor={blue!50!black},urlcolor={blue!50!black}}
+
+\setlist[itemize]{nosep,leftmargin=*}
+\setlist[enumerate]{nosep,leftmargin=*}
+\setlength{\parskip}{2pt}
+\setlength{\parindent}{0pt}
+\emergencystretch=3em
+\sloppy
+
+\title{Market and Reference Data: A Specification for the Ledger Platform\\[4pt]
+\large MVP, v2.0}
+\author{Data Engineering Specification}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+
+\noindent The document covers three things. First, the catalogue of data the platform needs --- what each kind of record looks like, what fields it carries, where the data comes from, and how each concept maps to CDM. Second, provenance: every record records its source, when the underlying event happened, and when our system received it. Third, bitemporal storage: nothing is silently overwritten, and a question about what we knew yesterday gets a different answer from a question about what is true today. A fourth section is the storage shape the pricing library needs to load this data quickly.
+
+The catalogue comes first because it is what we will be writing schemas against on Monday morning. The provenance, bitemporal, and fast-loading disciplines apply to every entry in the catalogue, and are stated once each.
+
+\section{The platform in one paragraph}
+
+The Ledger records portfolio activity as moves of \emph{units} (currencies, shares, bonds, OTC contracts, on-chain obligations) between \emph{wallets}. Every move conserves quantity per unit: what leaves one wallet enters another. The platform itself is not a pricing engine; portfolio value is computed by combining wallet balances with prices and curves drawn from the data substrate this document specifies. The data engineering team owns that substrate and the boundary at which outside data enters it.
+
+\section{The catalogue}\label{sec:catalogue}
+
+This section specifies the kinds of record the substrate stores. For each concept the document gives a definition, the fields, where the data comes from, why we need it, and a worked example with values populated.
+
+The provenance fields described in Section~\ref{sec:provenance} (\texttt{source}, $t_\text{obs}$, $t_\text{known}$, \texttt{restates\_ref}) are carried on every record in every concept below. They are not repeated in each field list; the worked examples in this section likewise omit them to keep the field tuples readable, and they should be treated as implicit on every record per the convention stated here. The single bitemporal worked example in Section~\ref{sec:bitemporal} carries them explicitly because the example is about them. Where a concept declares a \texttt{status} field, it is a per-concept closed list; the same field name on different concepts (currencies, listed equities, raw observations, \ldots) carries different values, not a global enum.
+
+\subsection{Currencies}
+
+A currency is a unit of money. The ISO 4217 standard maintains the canonical list of currencies and their codes. Fields: \texttt{iso\_code} (three letters), \texttt{name}, \texttt{minor\_units} (integer; e.g.\ 2 for USD, 0 for JPY), \texttt{status} (\texttt{active}, \texttt{historic}). Carrier: ISO 4217.
+
+We need this because every monetary amount in the system is a number plus a currency code, and code-to-name lookups, FX conversions, and rounding all depend on a single agreed table of currencies and their minor-unit precision. Without it, a JPY amount rounded to two decimals becomes a $100\times$ error.
+
+\textbf{CDM mapping.} CDM does not carry a separate currency-master table; the currency code itself is the model citizen. \texttt{ISOCurrencyCodeEnum} in \texttt{base-staticdata-asset-common-enum.rosetta} enumerates the ISO 4217 codes, and \texttt{CurrencyCodeEnum} (same file) extends it with the FpML non-ISO scheme for offshore and historical codes. The companion type \texttt{Cash extends AssetBase} (\texttt{base-staticdata-asset-common-type.rosetta}) is how a currency is held as an asset: the currency code lives in the inherited \texttt{AssetIdentifier} with \texttt{AssetIdTypeEnum -> CurrencyCode}. The display-name and \texttt{minor\_units} attributes are absent from CDM; the Ledger keeps them in a local currency-master table, joined to CDM by code.
+
+\textbf{Example.} \texttt{(USD, "US Dollar", 2, active)}; \texttt{(JPY, "Japanese Yen", 0, active)}.
+
+\subsection{Calendars and date conventions}
+
+Two related shapes. A \emph{business-centre calendar} is the holiday list for a city or market: \texttt{centre\_code} (e.g.\ \texttt{USNY}, \texttt{GBLO}, \texttt{EUTA}, \texttt{JPTO}), \texttt{holiday\_dates} (list of dates), \texttt{valid\_from}, \texttt{valid\_to}. Carrier: a vendor calendar service (e.g.\ Copp Clark) or the FpML business-centre service. \emph{Date conventions} are two closed lists: a day-count fraction (\texttt{ACT/360}, \texttt{ACT/365.FIXED}, \texttt{30/360}, \texttt{30E/360}, \texttt{ACT/ACT.ISDA}) and a business-day convention for date adjustment (\texttt{Following}, \texttt{ModifiedFollowing}, \texttt{Preceding}, \texttt{ModifiedPreceding}, \texttt{NONE}).
+
+We need this because every coupon date, payment date, fixing date, and reset date is a calendar-adjusted date evaluated against a specific business centre under a specific convention. Two systems running the same trade against different calendars compute different cashflows on different days. A single trade leg can carry distinct business centres for different purposes --- payment-date adjustment, fixing-date adjustment, and rate-publication --- so a leg's \texttt{business\_centres} field is per-purpose (payment, fixing, reset), not one combined list.
+
+\textbf{CDM mapping.} The business-centre side is well-supported. \texttt{BusinessCenters} in \texttt{base-datetime-type.rosetta} carries \texttt{businessCenter : BusinessCenter (0..*)} --- a list of \texttt{BusinessCenter} wrappers, each holding a \texttt{BusinessCenterEnum} from \texttt{base-datetime-enum.rosetta} (the standard FpML codes \texttt{USNY}, \texttt{GBLO}, \texttt{EUTA}, \texttt{JPTO}, etc.). The per-purpose split is honoured by CDM: a payout's \texttt{calculationPeriodDates}, \texttt{paymentDates}, and \texttt{resetDates} each carry their own \texttt{businessDayAdjustments} sub-record with its own \texttt{businessCenters}, which is precisely the payment-versus-fixing-versus-reset distinction we need. Day-count and business-day conventions are CDM enums: \texttt{DayCountFractionEnum} (in \texttt{base-datetime-daycount-enum.rosetta}) and \texttt{BusinessDayConventionEnum} (in \texttt{base-datetime-enum.rosetta}). The dated list of holidays itself is not modelled by CDM as a stored type --- CDM names a centre, but the resolution of that centre to a concrete date list is delegated to the implementation. The Ledger holds the resolution table locally, keyed by \texttt{BusinessCenterEnum}.
+
+\textbf{Example.} A USD floating leg paying quarterly under USNY calendar, day-count \texttt{ACT/360}, business-day convention \texttt{ModifiedFollowing}. The 2026 USNY calendar lists 2026-01-01, 2026-01-19, 2026-02-16, ..., 2026-12-25 as holidays.
+
+The shape of \texttt{holiday\_dates} --- an array column on the calendar row or a child \texttt{calendar\_holiday} table keyed by \texttt{(centre\_code, date)} --- is left to the warehouse design; the catalogue requires only that the set of holiday dates is retrievable per \texttt{(centre\_code, valid\_from, valid\_to)} as a single answer.
+
+\subsection{Parties}
+
+A party is a legal entity transacted with: a counterparty, a custodian, an exchange, an issuer, an internal entity. Fields: \texttt{lei} (20-character ISO 17442 identifier), \texttt{legal\_name}, \texttt{jurisdiction} (ISO 3166 country code), \texttt{lei\_status} (\texttt{Issued}, \texttt{Lapsed}, \texttt{Retired}, \texttt{Annulled}, \texttt{Duplicate}, with \texttt{PendingValidation}, \texttt{PendingTransfer}, \texttt{Merged} and any further values published by GLEIF admitted as the registry evolves), \texttt{bic} (optional), \texttt{mic} (optional, only when the party is an exchange or trading venue). Carrier: GLEIF for the LEI record itself; vendor or internal master for cross-references.
+
+We need this because every contract, holding, and obligation has at least one named legal party on it, and reconciling a counterparty across vendors is hopeless without a single legal-entity identifier. A lapsed LEI is not the same as an active one; status changes are recorded as new rows, not by mutating the existing record.
+
+\textbf{CDM mapping.} \texttt{Party} (\texttt{base-staticdata-party-type.rosetta}) carries \texttt{partyId : PartyIdentifier (1..*)} for one or more identifiers, \texttt{name : string (0..1)}, plus optional \texttt{businessUnit}, \texttt{person}, \texttt{personRole}, and \texttt{contactInformation}. \texttt{PartyIdentifier} holds the identifier string plus an \texttt{identifierType : PartyIdentifierTypeEnum (0..1)} tagging the identifier kind (e.g.\ \texttt{LEI}); the FpML party-id scheme rides on the field's \texttt{[metadata scheme]} annotation. \texttt{lei\_status} is not on CDM \texttt{Party}; the Ledger carries it as a sidecar attribute joined by LEI. \texttt{jurisdiction} has no CDM home --- \texttt{LegalEntity} (same file) carries only \texttt{name} and \texttt{entityIdentifier}, no jurisdiction field --- so the Ledger stores it as a local field (ISO 3166 country code). \texttt{bic} and \texttt{mic} are additional \texttt{PartyIdentifier} entries with their own \texttt{identifierType} values.
+
+\textbf{Example.} \texttt{(W22LROWP2IHZNBB6K528, "Goldman Sachs International", GB, Issued)}.
+
+\subsection{Listed equities}
+
+A listed equity is a share traded on at least one regulated exchange. Fields: \texttt{ticker}, \texttt{isin}, \texttt{cusip} (US listings), \texttt{sedol} (UK listings), \texttt{figi}, \texttt{mic} (primary listing exchange code), \texttt{currency}, \texttt{sector\_code\_system} (\texttt{GICS} or \texttt{ICB}), \texttt{sector\_code} (the value expressed in that system), \texttt{board\_lot} (integer), \texttt{status} (\texttt{active}, \texttt{delisted}, \texttt{suspended}). Carrier: a market-data vendor (e.g.\ Bloomberg, Refinitiv) cross-checked against the exchange's own master.
+
+We need the multi-identifier mapping because a single share trades under different names in different systems: ticker on the trading screen, ISIN on a settlement instruction, FIGI in a vendor feed, CUSIP on a US custody report. A trade reported under one identifier must reconcile to a position reported under another.
+
+\textbf{CDM mapping.} CDM models a listed equity as \texttt{Security extends InstrumentBase} (\texttt{base-staticdata-asset-common-type.rosetta}) with \texttt{securityType = SecurityTypeEnum.Equity} and an optional \texttt{equityType : EquityType (0..1)}. The inherited \texttt{InstrumentBase} carries the identifier list (via \texttt{Asset}'s \texttt{AssetIdentifier} with \texttt{AssetIdTypeEnum} values such as \texttt{Isin}, \texttt{Cusip}, \texttt{Sedol}, \texttt{Figi}, \texttt{Ticker}). \texttt{Security} is a leaf in the top-level \texttt{Instrument} choice (same file), which is itself a branch of the \texttt{Asset} choice. The \texttt{mic} for the primary listing is an additional identifier on the same record. Missing in CDM: \texttt{sector\_code\_system} and \texttt{sector\_code} (no GICS/ICB classification type in CDM 6.0.0). The Ledger carries these as a local \texttt{IndustryClassification} sidecar joined to the CDM record by instrument identifier; an extension would add a \texttt{sectorClassification : SectorClassification (0..1)} attribute to \texttt{EquityType}.
+
+\textbf{Example.} Apple Inc.: \texttt{(AAPL, US0378331005, 037833100, ---, BBG000B9XRY4, XNAS, USD, GICS, 4520, 1, active)}.
+
+\subsection{Listed derivatives}
+
+A listed derivative is a future or option traded on a regulated exchange. Fields: \texttt{root} (e.g.\ \texttt{ES} for E-mini S\&P), \texttt{exchange\_mic}, \texttt{contract\_month} (\texttt{YYYY-MM}), \texttt{instrument\_type} (\texttt{future} or \texttt{option}), \texttt{strike} (options only), \texttt{option\_type} (\texttt{call} or \texttt{put}, options only), \texttt{multiplier}, \texttt{tick\_size}, \texttt{settlement\_type} (\texttt{cash} or \texttt{physical}), \texttt{underlier\_ref} (foreign key to the underlying instrument), \texttt{currency}, \texttt{status}. Carrier: the exchange's own product specification, mirrored by vendors.
+
+We need the multiplier and tick size because they are the bridge between price and cash: a 0.25 tick on an E-mini S\&P at multiplier 50 is \$12.50 per contract per tick, and a system that loses the multiplier prices every contract at $1/50$ of its real value.
+
+\textbf{CDM mapping.} \texttt{ListedDerivative extends InstrumentBase} (\texttt{base-staticdata-asset-common-type.rosetta}) is the CDM type. It carries \texttt{deliveryTerm : string (0..1)} (the contract-month code, e.g.\ \texttt{Z23}), \texttt{optionType : PutCallEnum (0..1)} (absent for futures, set for options), and \texttt{strike : number (0..1)} (set only for options, enforced by the type's \texttt{Options} condition). The \texttt{root}, \texttt{exchange\_mic}, and other identifiers ride on the inherited \texttt{AssetIdentifier} list. Missing in CDM at the type level: \texttt{multiplier}, \texttt{tick\_size}, \texttt{settlement\_type}, \texttt{underlier\_ref}. CDM resolves these by reference to the listed-product master at the exchange; the Ledger keeps them locally on the listed-derivative record because we need them at pricing time without an extra round-trip. An extension would add a \texttt{contractSpecification : ListedContractSpec (0..1)} attribute to \texttt{ListedDerivative}.
+
+\textbf{Example.} The June 2026 E-mini S\&P 500 future: \texttt{(ES, XCME, 2026-06, future, ---, ---, 50, 0.25, cash, SPX, USD, active)}.
+
+\subsection{Bonds}
+
+A bond is a fixed-income instrument with a defined maturity, coupon stream, and issuer. Fields: \texttt{isin}, \texttt{issuer\_lei}, \texttt{coupon\_rate} (decimal, or the literal \texttt{FLOAT} for floating-rate notes), \texttt{coupon\_frequency} (\texttt{annual}, \texttt{semi}, \texttt{quarterly}, \texttt{monthly}, \texttt{zero}), \texttt{maturity\_date}, \texttt{issue\_date}, \texttt{accrual\_start\_date} (the date from which interest accrues; usually equal to \texttt{issue\_date} but distinct for bonds with a delayed first coupon), \texttt{first\_coupon\_date} (the date of the first scheduled coupon payment; distinct for odd-first-coupon bonds), \texttt{face\_value}, \texttt{currency}, \texttt{day\_count}, \texttt{bd\_convention}, \texttt{seniority} (\texttt{senior}, \texttt{subordinated}, \texttt{secured}), \texttt{callable} (boolean), \texttt{call\_schedule} (optional list of call dates and prices). Carrier: vendor bond master cross-checked against issuer's prospectus.
+
+We need the day-count, frequency, and convention on the bond record because accrued interest and clean-vs-dirty price calculations depend on them, and a bond stripped of these fields cannot be priced or settled correctly. Without \texttt{accrual\_start\_date} and \texttt{first\_coupon\_date}, an odd-first-coupon bond cannot be reproduced from the field list alone. Note that whether the schedule itself is calendar-adjusted is asset-class-dependent: US Treasury coupon dates are unadjusted by market convention (\texttt{bd\_convention=NONE}); standard corporate bonds typically adjust under \texttt{Following} or \texttt{ModifiedFollowing}. The pairing of \texttt{ACT/ACT.ISDA} with \texttt{NONE} on a UST is intentional, not an oversight.
+
+\textbf{CDM mapping.} A bond is a \texttt{Security extends InstrumentBase} (\texttt{base-staticdata-asset-common-type.rosetta}) with \texttt{securityType = SecurityTypeEnum.Debt} and \texttt{debtType : DebtType (0..1)}. \texttt{DebtType} holds a list of \texttt{DebtEconomics (0..*)} with \texttt{seniority : DebtSeniorityEnum}, \texttt{interest : DebtInterestEnum} (fixed/floating/zero), \texttt{principal : DebtPrincipalEnum}, \texttt{secured : SecuredDebt (0..1)}, and \texttt{redemption : DebtRedemption (0..1)} (callable schedule rides here). The ISIN, issuer LEI, and other identifiers are \texttt{AssetIdentifier} entries on the inherited \texttt{Asset}. The full coupon-schedule arithmetic --- \texttt{coupon\_rate}, \texttt{coupon\_frequency}, \texttt{maturity\_date}, \texttt{issue\_date}, \texttt{accrual\_start\_date}, \texttt{first\_coupon\_date}, \texttt{day\_count}, \texttt{bd\_convention} --- is not held as scalars on \texttt{Security}; CDM expresses these as a payout (\texttt{InterestRatePayout} in \texttt{product-asset-type.rosetta}, or \texttt{FixedPricePayout} in \texttt{product-template-type.rosetta}) attached to the bond when it appears in a contract. For static bond-master storage the Ledger flattens these onto the bond row so that pricing does not need to resolve a payout structure for every reference bond.
+
+\textbf{Example.} A 5-year US Treasury note: \texttt{(US91282CJZ59, 254900HROIFWPRGM1V77, 0.04250, semi, 2031-04-30, 2026-04-30, 2026-04-30, 2026-10-31, 1000, USD, ACT/ACT.ISDA, NONE, senior, false, ---)}.
+
+\subsection{OTC products}
+
+An OTC product is a contract whose terms are negotiated bilaterally rather than listed on an exchange. The substrate stores the \emph{terms}, not a vendor product identifier. The shape varies by product type. The common header is \texttt{product\_type} (closed list for the MVP: \texttt{IRS}, \texttt{FXForward}, \texttt{FXSwap}, \texttt{EquityOption}, \texttt{CDS}; new product types are admitted by adding an entry to the dictionary of supported types and the corresponding payoff-parameters shape, not by silent expansion of the enum), \texttt{effective\_date}, \texttt{termination\_date}, plus a payoff-parameters block whose contents are determined by the product type. For an interest rate swap the payoff block contains \texttt{notional}, \texttt{currency}, a fixed leg (\texttt{rate}, \texttt{frequency}, \texttt{day\_count}, \texttt{business\_centres}), and a floating leg (\texttt{index\_name}, \texttt{tenor}, \texttt{spread}, \texttt{frequency}, \texttt{day\_count}, \texttt{business\_centres}, \texttt{reset\_offset}, \texttt{compounding} where applicable). Carrier: internal trade capture. Industry identifiers --- the OTC ISIN and the UPI (ISO 4914) --- are recorded as additional identifiers on the terms record, not as substitutes for the terms. On-chain obligations (smart-contract derivatives) use the same terms shape, with the on-chain contract address recorded as one further identifier field.
+
+We need the full economic terms, not a vendor identifier, because the platform is the source of truth for the contract; if a vendor reissues identifiers or goes away, the contract still has to be valued and settled.
+
+\textbf{CDM mapping.} CDM is most opinionated here. An OTC product is a \texttt{NonTransferableProduct} (\texttt{product-template-type.rosetta}) whose core is \texttt{economicTerms : EconomicTerms (1..1)}. \texttt{EconomicTerms} holds \texttt{effectiveDate} and \texttt{terminationDate}, plus a \texttt{payout : Payout} choice with exactly eight branches: \texttt{AssetPayout}, \texttt{CommodityPayout}, \texttt{CreditDefaultPayout}, \texttt{FixedPricePayout}, \texttt{InterestRatePayout}, \texttt{OptionPayout}, \texttt{PerformancePayout}, \texttt{SettlementPayout} (forward settlement is carried by \texttt{SettlementPayout}, not by a separate \texttt{ForwardPayout}). The choice declaration is in \texttt{product-template-type.rosetta}; the interest-rate, credit-default, and commodity leaf-type bodies live in \texttt{product-asset-type.rosetta}. For an IRS, the swap is a pair of \texttt{InterestRatePayout} entries (one fixed, one floating); the floating leg references a \texttt{FloatingRateIndex} (\texttt{observable-asset-type.rosetta}, a branch of the \texttt{Index} choice) whose \texttt{floatingRateIndex} attribute is a \texttt{FloatingRateIndexEnum} value from \texttt{base-staticdata-asset-rates-enum.rosetta} (the live filename --- the v1 reference list named this as \texttt{floatingrateindex-enum.rosetta}, which does not exist on the current master branch). The compounding flag rides on the chosen enum value; SOFR's overnight-compounded variant is \texttt{USD\_SOFR\_COMPOUND}. UPI (ISO 4914) and ISIN-for-OTC are added as further \texttt{ProductIdentifier} entries (with \texttt{ProductIdTypeEnum} values) on the surrounding \texttt{NonTransferableProduct}. On-chain obligations have no first-class CDM type today; the Ledger carries the contract address as an additional \texttt{ProductIdentifier} with a local source value.
+
+\textbf{Example.} A 5-year USD SOFR OIS, traded 2026-04-30: \texttt{product\_type=IRS, effective\_date=2026-05-04, termination\_date=2031-05-04, notional=10{,}000{,}000, currency=USD, fixed\_leg=(rate=0.04150, frequency=annual, day\_count=ACT/360, business\_centres=\{payment:[USNY]\}), float\_leg=(index\_name=USD-SOFR, tenor=1D, spread=0.0, frequency=annual, day\_count=ACT/360, business\_centres=\{payment:[USNY], fixing:[USNY], reset:[USNY]\}, reset\_offset=-2BD, compounding=COMPOUND-IN-ARREARS)}.
+
+\subsection{Observable definitions}
+
+An observable definition is the \emph{key} under which raw market values are recorded; it does not carry any value itself. Separating the definition from the values lets us record the same observable across many timestamps and many sources without repeating the identifying tuple. Fields depend on what is being observed. For an equity quote: \texttt{kind=equity\_quote}, \texttt{ticker}, \texttt{mic}, \texttt{quote\_type} (\texttt{bid}, \texttt{ask}, \texttt{mid}, \texttt{last}, \texttt{close}), \texttt{currency}. For an FX print: \texttt{kind=fx\_print}, \texttt{pair} (e.g.\ \texttt{EURUSD}), \texttt{quote\_type}, plus two optional fields used by non-deliverable forward fixings: \texttt{settlement\_currency} (the currency in which the NDF cashflow is settled, e.g.\ USD for USDKRW NDF) and \texttt{fixing\_source} (the named fixing convention, e.g.\ \texttt{KFTC18} for KRW). For an interest-rate fixing: \texttt{kind=ir\_fixing}, \texttt{index\_name}, \texttt{tenor}.
+
+We need explicit definitions because raw observation tables grow into the billions of rows; without a stable, normalised key, joins are unmaintainable and definitional changes (a new quote type, a new fixing source) would force schema migrations on the values table.
+
+\textbf{CDM mapping.} CDM does not separate ``definition'' from ``value'' on an observation; it pushes the identifying tuple inside \texttt{ObservationIdentifier} (\texttt{observable-event-type.rosetta}) and combines it with the value in a single \texttt{Observation} row (rootType, same file). \texttt{ObservationIdentifier} holds \texttt{observable : Observable (1..1)}, \texttt{observationDate : date (1..1)}, \texttt{observationTime : TimeZone (0..1)}, \texttt{informationSource : InformationSource (0..1)}, and \texttt{determinationMethodology : DeterminationMethodology (0..1)}. \texttt{Observable} is a three-branch choice (\texttt{Asset | Basket | Index}) in \texttt{observable-asset-type.rosetta}; \texttt{Curve} is a separate, deprecated, top-level type in the same file --- not a branch of \texttt{Observable} --- which is why calibrated curves have no CDM-native home. For an equity quote the \texttt{Observable} resolves to a \texttt{Security} via the \texttt{Asset} branch; for an FX print it resolves to \texttt{ForeignExchangeRateIndex} (with the optional NDF \texttt{fixing\_source} riding directly on \texttt{ObservationIdentifier.informationSource} --- KFTC18 is exactly an \texttt{InformationSource} on the wire); for an IR fixing it resolves to \texttt{FloatingRateIndex} with \texttt{indexTenor : Period (0..1)}. The Ledger's definition-versus-value split is local: we store the \texttt{ObservationIdentifier} tuple once as a definition row keyed by surrogate id and join the value rows to it, because billions of fixings sharing the same identifying tuple do not need that tuple repeated.
+
+\textbf{Example.} \texttt{(equity\_quote, AAPL, XNAS, close, USD)}; \texttt{(fx\_print, EURUSD, mid)}; \texttt{(ir\_fixing, USD-SOFR, 1D)}.
+
+\subsection{Raw market observations}
+
+A raw market observation is a single value delivered against an observable definition. Fields: \texttt{definition\_ref} (foreign key into observable definitions), \texttt{value} (numeric), \texttt{value\_time} (the printed time of the quote or trade as reported by the source), \texttt{status} from the closed list \{\texttt{consensus}, \texttt{single\_source}, \texttt{quarantined}\}. When the same observable is delivered by two or more sources that agree within tolerance the record is marked \texttt{consensus}; a unique authoritative source carries \texttt{single\_source}; observations failing admission carry \texttt{quarantined} and are excluded from downstream computations. Carrier: market-data vendors, exchanges, and calculation agents.
+
+\texttt{value\_time} is the source-reported instant of the underlying market event (the printed quote or trade time on the vendor wire); the platform-canonical observation time $t_\text{obs}$ described in Section~\ref{sec:provenance} is the same instant normalised to UTC and carried on every record. For most ingests they coincide; they diverge when the source uses a non-UTC clock or restates a printed time and we preserve both for traceability.
+
+We need the explicit \texttt{status} field because a downstream pricing or risk calculation must be able to filter out bad observations with a SQL predicate on a typed column, not by guessing which records were meant to be excluded. The consensus tolerance --- how close two source values must be to mark the record \texttt{consensus} --- is a per-observable-kind parameter held in a configuration reference table (a fixing tolerance for an IR index is not the same as a price tolerance for a thinly-traded share). Status is assigned at admission by the admission service named in the record's \texttt{source} field; a status change is itself a restatement under the bitemporal rule in Section~\ref{sec:bitemporal}. When two named sources deliver the same observable and disagree beyond the tolerance, both source rows are retained and both land as \texttt{quarantined}; the full multi-source reconciliation policy --- which source wins, manual override workflow, alerting --- is a follow-on artifact, not part of this document.
+
+\textbf{CDM mapping.} \texttt{Observation} (\texttt{observable-event-type.rosetta}, marked \texttt{[rootType]}) carries \texttt{observedValue : Price (1..1)} and \texttt{observationIdentifier : ObservationIdentifier (1..1)}. The numeric value rides in \texttt{Price extends PriceSchedule} (\texttt{observable-asset-type.rosetta}), which itself extends \texttt{MeasureSchedule} with a unit and currency. \texttt{Observation} is annotated \texttt{[metadata key]}, so other CDM records can refer to a stored observation by hash. CDM does not name a \texttt{status} field, a \texttt{value\_time} field distinct from the observation's logical date, or a \texttt{source} attribute on the observation itself; the source is expected to ride at the surrounding \texttt{Event} or \texttt{TradeState} level. The Ledger carries \texttt{status}, \texttt{value\_time}, and the provenance fields locally on the observation row because admission, quarantine, and bitemporal restatement all happen at observation granularity for us, not at trade granularity.
+
+\textbf{Example.} \texttt{(definition=(equity\_quote, AAPL, XNAS, close, USD), value=189.32, value\_time=2026-04-30 16:00 ET, status=consensus, source="Bloomberg BPIPE")}.
+
+\subsection{Calibrated market objects}
+
+A calibrated market object is a curve or surface fitted from raw observations: a yield curve, a volatility surface, an FX surface, a hazard curve. Fields: \texttt{kind} (\texttt{yield\_curve}, \texttt{vol\_surface}, \texttt{fx\_surface}, \texttt{hazard\_curve}), \texttt{valuation\_date}, \texttt{cut\_time} (the wall-clock time of the inputs actually used --- end-of-day for daily marks, but intraday for intraday calibrations), \texttt{currency\_or\_underlier}, \texttt{calibration\_method}, \texttt{method\_version}, \texttt{knot\_points} (a list of \texttt{(tenor, value)} for curves; a list of \texttt{(strike, expiry, value)} for surfaces), \texttt{input\_observation\_refs} (foreign keys back into raw observations). Carrier: the platform's calibration process; the inputs come from raw observations.
+
+We need the \texttt{input\_observation\_refs} because reproducing yesterday's curve is the only way to reproduce yesterday's prices, and that needs both the calibration code version and the exact set of raw observations consumed. The refs are frozen at the moment of calibration: each ref points at a specific bitemporal row of the raw-observations table, identified by its surrogate id, and resolves to that row even if a later restatement supersedes it. A restated input does not implicitly restate the curve; restating the curve is a separate event that re-runs the calibration against the new inputs and writes a new bitemporal row.
+
+\textbf{CDM mapping.} Missing in CDM 6.0.0. CDM has \texttt{Curve} and \texttt{InterestRateCurve} stub types in \texttt{observable-asset-type.rosetta}, both annotated \texttt{[deprecated]}, with no knot-point representation, no surface type, and no calibration-method or input-refs attribute. The Ledger keeps a fully local shape: a \texttt{CalibratedMarketObject} row with the fields above and a foreign-key list back into the raw-observations table. An extension would add a \texttt{CalibratedCurve}/\texttt{CalibratedSurface} type alongside CDM's \texttt{Curve} stub, with a \texttt{knotPoint : KnotPoint (1..*)} list and an \texttt{inputObservation : Observation (0..*) [metadata reference]} list pointing back at the consumed observations.
+
+\textbf{Example.} A USD yield curve as of 2026-04-30 EOD: \texttt{kind=yield\_curve, valuation\_date=2026-04-30, cut\_time=2026-04-30 17:00 ET, currency\_or\_underlier=USD, calibration\_method=bootstrap, method\_version=2.3.1, knot\_points=[(1M, 0.0483), (3M, 0.0479), (6M, 0.0471), (1Y, 0.0455), (2Y, 0.0421), (5Y, 0.0410), (10Y, 0.0418), (30Y, 0.0430)]}.
+
+\subsection{Lifecycle events}
+
+A lifecycle event records something that happens to an instrument or a trade after it begins to exist: corporate actions (dividends, splits, mergers, tender offers, rights issues, bonus issues, spin-offs), index fixings, option exercises, defaults, swap resets, novations, cash-settlement determinations, IBOR or other index cessation fallbacks, and inbound confirmations from counterparties or platforms. Fields: \texttt{kind} (\texttt{dividend}, \texttt{split}, \texttt{merger}, \texttt{tender\_offer}, \texttt{rights\_issue}, \texttt{bonus\_issue}, \texttt{spin\_off}, \texttt{fixing}, \texttt{exercise}, \texttt{default}, \texttt{reset}, \texttt{cash\_settlement\_amount\_determined}, \texttt{index\_cessation\_fallback}, \texttt{confirmation\_received}), \texttt{instrument\_ref} or \texttt{trade\_ref} (one is required), \texttt{effective\_date}, plus kind-specific fields: \texttt{ex\_date}, \texttt{record\_date}, \texttt{payment\_date}, \texttt{cash\_amount}, \texttt{currency} for dividends; \texttt{ratio} for splits; \texttt{settlement\_amount}, \texttt{settlement\_currency} for \texttt{cash\_settlement\_amount\_determined} (the final cash amount of a cash-settled option at expiry or the cash leg of a physically-settled corporate action); \texttt{replaced\_index}, \texttt{replacement\_index}, \texttt{spread\_adjustment} for \texttt{index\_cessation\_fallback} (recorded when an IBOR or other index ceases and a fallback index plus spread takes its place on referencing contracts); \texttt{external\_message\_id} for inbound confirmations. Carrier: issuers, exchanges, calculation agents, and confirmation platforms (FpML feeds, ISDA Create, DRR submission acknowledgements). Securities-lending events (locate, recall, manufactured payment, rehypothecation) are out of scope for the MVP. The \texttt{kind} list above is closed for the MVP; admitting a new kind requires a catalogue revision, the same discipline applied to the observation status enum.
+
+The list mixes events at two layers: most kinds (\texttt{dividend}, \texttt{split}, \texttt{merger}, \texttt{fixing}, \texttt{exercise}, \texttt{default}, \texttt{reset}, and the new corporate-action and settlement kinds) are business-event qualifiers --- they describe what happened to the instrument or trade in the market. \texttt{confirmation\_received} is at a different layer: it is an operational-message event describing a wire arrival at our boundary, and it does not by itself change the economic state of any contract. Both layers belong in the same table because both feed downstream reconciliation, but a consumer that wants only business events filters on \texttt{kind != confirmation\_received}.
+
+We need lifecycle events on the same provenance and bitemporal footing as everything else because a misrecorded dividend or a missed corporate action shifts every position downstream of it, and the cash impact has to be reproducible weeks later.
+
+\textbf{CDM mapping.} CDM splits the lifecycle across two layers, which is why our \texttt{kind} list also crosses two layers. \texttt{BusinessEvent} (in \texttt{event-common-type.rosetta}) extends \texttt{EventInstruction} (in \texttt{event-workflow-type.rosetta}), which carries \texttt{instruction : Instruction (0..*)} and \texttt{corporateActionIntent : CorporateActionTypeEnum (0..1)}. Each \texttt{Instruction} references a \texttt{PrimitiveInstruction} (in \texttt{event-common-type.rosetta}), which is a record with optional sub-instruction fields --- not a choice --- namely \texttt{contractFormation}, \texttt{execution}, \texttt{exercise}, \texttt{partyChange}, \texttt{quantityChange}, \texttt{reset}, \texttt{split}, \texttt{termsChange}, \texttt{transfer}, \texttt{indexTransition}, \texttt{stockSplit}, \texttt{observation}, \texttt{valuation}; these are fields, not choice variants, and any combination can be set on a single primitive. \texttt{Reset} is its own type (same file), which joins product definition to \texttt{Observation}. Corporate actions are tagged via \texttt{CorporateActionTypeEnum} in \texttt{event-common-enum.rosetta}, which enumerates \texttt{CashDividend}, \texttt{StockDividend}, \texttt{StockSplit}, \texttt{ReverseStockSplit}, \texttt{Merger}, \texttt{Takeover}, \texttt{RightsIssue}, \texttt{BonusIssue}, \texttt{SpinOff}, \texttt{Delisting}, \texttt{Liquidation}, \texttt{EarlyRedemption}, and others. Operational-message events (our \texttt{confirmation\_received}) live in the FpML-ingest layer, in the \texttt{ingest-fpml-confirmation-*-func.rosetta} family (e.g.\ \texttt{ingest-fpml-confirmation-message-func.rosetta}, \texttt{ingest-fpml-confirmation-workflowstep-func.rosetta}) --- these are inbound-message handlers, not business events. \texttt{cash\_settlement\_amount\_determined} maps to the \texttt{transfer} field on \texttt{PrimitiveInstruction} (which carries a \texttt{TransferInstruction} that resolves to a \texttt{Transfer} choice over \texttt{TransferBase extends AssetFlowBase}) or to a \texttt{Reset} depending on whether the determination produces a settlement transfer or an interim observation; \texttt{index\_cessation\_fallback} maps to \texttt{IndexTransitionInstruction}. The Ledger's flat \texttt{LifecycleEvent} table is the storage shape; on ingest, CDM business-events are flattened into a row with their \texttt{CorporateActionTypeEnum} or instruction-field name mapped to our local \texttt{kind} value.
+
+\textbf{Example.} An Apple dividend: \texttt{(kind=dividend, instrument\_ref=AAPL, effective\_date=2026-05-08, ex\_date=2026-05-08, record\_date=2026-05-12, payment\_date=2026-05-15, cash\_amount=0.25, currency=USD)}.
+
+\subsection{Legal agreements}
+
+A legal agreement is a bilateral document stack governing how two parties trade. The stack has four kinds in order: a Master agreement, a Schedule that amends it, a Credit Support Annex (CSA) for collateral terms, and a Paragraph 11 election that sets specific CSA parameters. Fields: \texttt{agreement\_id}, \texttt{agreement\_type} (\texttt{Master}, \texttt{Schedule}, \texttt{CSA}, \texttt{Para11}), \texttt{parties} (exactly two LEIs for bilateral agreements), \texttt{governing\_law}, \texttt{signed\_date}, \texttt{effective\_date}, \texttt{document\_hash} (content hash for retrieval), \texttt{parent\_agreement\_id} (a Schedule references its Master, and so on up the stack). Carrier: contract management system; counterparties on signature.
+
+The CDM defines the named containers for these agreement types (the \texttt{Master}/\texttt{Schedule}/\texttt{CSA}/\texttt{Para11} field structures and the LEI-and-governing-law fields on each); the override-walk policy below is Ledger-local. To resolve an attribute (governing law, eligible collateral, threshold amount, minimum-transfer amount) for a given trade:
+
+\begin{itemize}
+\item Walk the stack in order: Master, then Schedule, then CSA, then Paragraph 11.
+\item At each level, if the attribute is set, it overrides whatever lower-precedence level set it.
+\item ``Set'' includes an explicit \texttt{null} value: a child agreement that explicitly nulls a parent's value (e.g.\ a Paragraph 11 setting the threshold from \$10mn back to zero, or a CSA explicitly clearing an eligible-collateral entry) overrides the parent. Only a missing field --- the field is not present on this level's document at all --- means inherit from the level above.
+\item The CSA carries its own \texttt{governing\_law}: a 2002 ISDA Master under English law sitting under a CSA under New York law is a routine arrangement, not an exception, and the walk treats CSA \texttt{governing\_law} as a normal override node.
+\item The walk's result for a given attribute is what the platform uses for valuation, collateral, and dispute purposes.
+\end{itemize}
+
+Stored agreement documents are verified against \texttt{document\_hash} on retrieval: a stored bytestream whose hash does not match the recorded \texttt{document\_hash} is rejected, the retrieval is failed, and the mismatch is logged as an exception event for operations review.
+
+We need the explicit override walk because two implementers comparing notes on the same trade reconstruct different governing terms when the walk is left implicit, and a dispute is exactly when that ambiguity is most expensive.
+
+\textbf{CDM mapping.} The agreement-record base type is \texttt{LegalAgreement extends LegalAgreementBase} (\texttt{legaldocumentation-common-type.rosetta}), with \texttt{LegalAgreementIdentification} carrying \texttt{agreementName : AgreementName}, \texttt{publisher : LegalAgreementPublisherEnum (0..1)}, \texttt{governingLaw : GoverningLawEnum (0..1)}, and \texttt{vintage : int (0..1)} (the year, e.g.\ 2013 for the ISDA 2013 CSA). The agreement-type discriminator is \texttt{LegalAgreementTypeEnum} in \texttt{legaldocumentation-common-enum.rosetta}, whose values are \texttt{MasterAgreement}, \texttt{CreditSupportAgreement}, \texttt{Confirmation}, \texttt{MasterConfirmation}, \texttt{BrokerConfirmation}, \texttt{SecurityAgreement}, \texttt{Other}. CDM does NOT separate ``Schedule'' from Master or ``Paragraph 11'' from CSA as enum values --- a Schedule is part of the \texttt{MasterAgreement} elections (\texttt{legaldocumentation-master-isda-type.rosetta}, \texttt{type MasterAgreement extends MasterAgreementBase}) and Paragraph 11 is part of the CSA elections (\texttt{legaldocumentation-csa-type.rosetta}, with the \texttt{CreditSupportAgreement\-Initial\-Margin\-Elections}, \texttt{Variation\-Margin\-Elections}, and \texttt{Legacy\-Elections} branches). The Ledger's 4-tier flat stack is a local denormalisation: we store each tier as its own row so the override walk reads as a list of rows joined by \texttt{parent\_agreement\_id} rather than a deeply nested CDM document. Document hash and the override-walk policy itself are absent from CDM and remain Ledger-local. Eligible collateral rides on \texttt{CollateralProvisions} (in \texttt{product-collateral-type.rosetta}, carrying \texttt{collateralType}, \texttt{eligibleCollateral}, \texttt{substitutionProvisions}); thresholds and minimum-transfer amounts ride on \texttt{CreditSupportObligationsBase} and its specialisations \texttt{CreditSupportObligationsInitialMargin}, \texttt{VariationMargin}, \texttt{Legacy} (in \texttt{legaldocumentation-csa-type.rosetta}), reachable from each CSA-elections type via its \texttt{creditSupportObligations} attribute.
+
+\textbf{Example.} A 2002 ISDA Master \texttt{(MA-001)} between Bank A (LEI \texttt{ABC...}) and Hedge Fund B (LEI \texttt{DEF...}), English law, signed 2025-01-15. Schedule \texttt{SC-001} references \texttt{MA-001}. CSA \texttt{CSA-001} references \texttt{SC-001}, sets \texttt{governing\_law=New York} for the collateral arrangement, and restricts eligible collateral to USD cash. Paragraph 11 \texttt{P11-001} references \texttt{CSA-001} and sets the threshold to \$10mn.
+
+\subsection{Reference tables}
+
+A small mixed bag of authoritative cross-cutting tables, each with its own field shape.
+\begin{itemize}
+\item \emph{Sanctions list}: \texttt{list\_authority} (\texttt{OFAC}, \texttt{UN}, \texttt{EU}), \texttt{entity\_name}, \texttt{lei} (where known), \texttt{effective\_date}, \texttt{delisting\_date} (nullable; the date the entity was removed from the list, recorded as a new row rather than by mutating the listing row).
+\item \emph{Withholding-tax}: \texttt{payer\_jurisdiction}, \texttt{payee\_jurisdiction}, \texttt{instrument\_kind}, \texttt{rate}, \texttt{treaty\_ref}.
+\item \emph{Index composition}: \texttt{index\_name}, \texttt{effective\_date}, \texttt{members} (list of \texttt{(ticker, weight)}).
+\end{itemize}
+We need these tables on the same provenance and bitemporal footing as the rest of the catalogue because their values determine cashflows (withholding rates, index weightings) and trading eligibility (sanctions); a quietly-updated sanctions list with no record of the prior version cannot answer the question ``did we trade with a sanctioned party last March?''.
+
+\textbf{CDM mapping.} Mostly missing. Sanctions lists are not modelled in CDM; the Ledger carries them as a local table joined to CDM \texttt{Party} by LEI. Withholding-tax schedules have no CDM type at the table level either (CDM models the per-cashflow tax withheld inside payouts, but not the rate-by-jurisdiction master). Index composition is the one item with some CDM presence: a basket index can be expressed as \texttt{Basket extends AssetBase} (\texttt{observable-asset-type.rosetta}) with \texttt{BasketConstituent extends Observable} entries, each carrying a weight via \texttt{ConstituentWeight} (\texttt{product-template-type.rosetta}); for a named market index like S\&P~500 the composition is normally implicit in the \texttt{EquityIndex} reference and the Ledger keeps the concrete weighted constituents in its own table. An extension would add \texttt{SanctionsList} and \texttt{WithholdingTaxSchedule} root types alongside the existing reference-data types.
+
+\textbf{Example (index composition).} S\&P 500 as of 2026-04-30: \texttt{(SPX, 2026-04-30, [(AAPL, 0.0720), (MSFT, 0.0670), (NVDA, 0.0530), \ldots])}.
+
+\section{Provenance and traceability}\label{sec:provenance}
+
+Every record in every concept above carries four provenance fields, in addition to whatever fields the concept itself defines.
+
+\begin{itemize}
+\item \texttt{source}: a named string identifying who said this. For a quote that might be \texttt{"Bloomberg BPIPE"}; for an LEI record, \texttt{"GLEIF"}; for a calibrated curve, \texttt{"internal/calibration-svc/v2.3.1"}. The permitted set of \texttt{source} strings is maintained in a small source-registry reference table; ingest rejects records whose \texttt{source} is not in the registry, so the field stays a controlled vocabulary rather than a free-text column.
+\item \texttt{t\_obs} (observation time): the wall-clock instant the underlying event occurred in the world --- the moment the price printed, the moment a corporate-action effective date applied, the moment a curve was calibrated. Stored in UTC.
+\item \texttt{t\_known} (known time): the wall-clock instant our system first received and admitted the record. Stored in UTC.
+\item \texttt{restates\_ref}: a nullable foreign key (by surrogate id) pointing into the same table at the prior row this record corrects. \texttt{null} on an original observation; populated only on a restatement. The mechanics of restatement are detailed in Section~\ref{sec:bitemporal}; the field is named here because, like the other three, it is carried on every record in every concept that admits restatement and is therefore part of provenance, not part of any concept's own field list.
+\end{itemize}
+
+We need \texttt{source} on every record because reconciliation, dispute resolution, and vendor-quality monitoring all begin with the question ``where did this number come from?'', and answering that with an \texttt{ETL\_LOAD\_DT} timestamp instead of a named upstream is the difference between a five-minute investigation and a five-day one. We need the two timestamps because the system is not the world: we learn things later than they happen, sometimes much later, and we need to be able to distinguish ``this happened then'' from ``we found out about it then''.
+
+The constraint $t_\text{obs} \le t_\text{known}$ holds on every record. A record claiming knowledge of an event before it happened is rejected at ingest; that is a clock or feed bug, not a legitimate observation. A small tolerance (on the order of one second) is permitted at ingest to absorb routine clock skew between our system and vendor feeds --- a vendor whose clock runs 200ms ahead of ours would otherwise produce records that fail the constraint legitimately. Records exceeding the tolerance are quarantined and flagged for operations review, not silently accepted.
+
+\textbf{Example.} A trade print on Apple at 16:00 ET on 2026-04-30, received by our system at 16:00:01 ET, then mirrored as: \texttt{source="NASDAQ TotalView"}, \texttt{t\_obs=2026-04-30 20:00:00Z}, \texttt{t\_known=2026-04-30 20:00:01Z}.
+
+\textbf{Out of scope: cryptographic signatures.} The Ledger platform is internally operated and is not exposed to adversarial counterparties at the ingest boundary; the named \texttt{source} field is the trust signal at this stage. Cryptographic signing of inbound payloads, an attestor key registry, and signature verification are noted as future hardening for a later document.
+
+\section{Bitemporal storage}\label{sec:bitemporal}
+
+The two timestamps on every record support two query modes. The reader who has just learned the names \texttt{t\_obs} and \texttt{t\_known} can think about it this way: \texttt{t\_obs} is when the world did something; \texttt{t\_known} is when we found out about it. They are usually close together. Sometimes they are not.
+
+\textbf{No record is overwritten.} When a vendor or a counterparty corrects a record for an earlier $t_\text{obs}$, the correction is stored as a \emph{new row} with the same $t_\text{obs}$, a later $t_\text{known}$, and a pointer back to the row it restates. The original row is not modified. We need this rule because the question ``what did we believe yesterday?'' has a single correct answer only if yesterday's belief is still on disk; an in-place update destroys that answer permanently.
+
+\textbf{Two query modes, both supported.}
+\begin{itemize}
+\item \emph{What did we know at time T?} The query returns the snapshot of the table as it was known at $T$: every row whose $t_\text{known} \le T$, with the latest such row per business key winning. This is the question an auditor asks: ``reproduce the NAV you published on 28 April with the data you had on 28 April.''
+\item \emph{Given everything we know now, what is our best estimate of the truth at time $T_o$?} The query returns the row with the latest $t_\text{known}$ among all rows whose $t_\text{obs} = T_o$. This is the question a risk team asks: ``with corrections applied, what is our best read on yesterday's exposure?''
+\end{itemize}
+Neither query mode is derivable from the other. A single ``as-of'' timestamp on each row cannot answer both.
+
+\textbf{Worked example: a vendor restates EUR/USD.} On 2026-04-27 at 15:30 UTC the vendor publishes EUR/USD = 1.0852 with $t_\text{obs}$ = 2026-04-27 15:30:00Z and $t_\text{known}$ = 2026-04-27 15:30:00Z (received the same instant). On 2026-04-30 at 09:00 UTC the vendor restates the same observation to 1.0853. The table now holds two rows:
+
+\begin{center}
+\begin{tabular}{cllll}
+\toprule
+Row & value & $t_\text{obs}$ & $t_\text{known}$ & restates \\
+\midrule
+$R_1$ & 1.0852 & 2026-04-27 15:30:00Z & 2026-04-27 15:30:00Z & --- \\
+$R_2$ & 1.0853 & 2026-04-27 15:30:00Z & 2026-04-30 09:00:00Z & $R_1$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\emph{Query 1: what did we know at 2026-04-29 00:00:00Z?} Answer: 1.0852. As of that knowledge time $R_2$ did not yet exist; the only row whose $t_\text{known} \le$ 2026-04-29 was $R_1$. This is the answer the auditor needs to reproduce a NAV published on 28 April.
+
+\emph{Query 2: with everything we know on 2026-04-30 at 10:00 UTC, what was the truth at 2026-04-27 15:30Z?} Answer: 1.0853. Among rows with matching $t_\text{obs}$, the row with the latest $t_\text{known} \le$ 2026-04-30 10:00 is $R_2$. This is the answer the risk team needs when restating yesterday's exposure with current best knowledge.
+
+This two-axis discipline applies to every concept in the catalogue that admits restatement: market observations, calibrated objects, lifecycle events, party records, instrument masters, legal agreements, and reference tables. A narrow carve-out is permitted only for tables whose values have never influenced a published number: a pure-internal lookup that nothing downstream reads, or a feature-flag table the platform itself owns. Any table that feeds admission, calibration, valuation, reporting, or any consumed snapshot must be bitemporal --- no carve-out, no exception. The no-overwrite rule is a constraint on the storage technology as well as on the discipline: a backing store that only supports update-in-place semantics cannot meet this audit floor, and the warehouse design must therefore use an append-only or row-versioned store for the bitemporal tables.
+
+\section{Loading for the pricing library}\label{sec:loading}
+
+The catalogue defines what we store. This section defines the storage shape the pricing library needs in order to load that data quickly. The pricing library is the component that produces a price for an instrument or a trade. To produce one price it fetches the instrument's static record, the observable definitions it depends on, the latest raw observations (when the price is a re-mark rather than a calibrated one), the calibrated market objects that feed valuation, and any lifecycle events that have changed the trade's state. The round-trip time for producing a single price is dominated by how fast it can fetch this data: when fetching is slow, every price is slow. A pricing batch that revalues a book at end-of-day issues many thousands of these reads; a real-time risk recalculation issues them on each tick. The catalogue's storage shape must therefore support a small set of access patterns as single indexed lookups or bounded range scans, not as scans of restatement history.
+
+The concrete access patterns the storage must support efficiently are these.
+
+\begin{itemize}
+\item \emph{Curve or surface by key.} ``Give me the as-of-known-time snapshot of curve $K$'' where $K$ is \texttt{(kind, currency\_or\_underlier, valuation\_date)} must be a single indexed lookup. The natural index is \texttt{(kind, currency\_or\_underlier, valuation\_date, t\_known)} with a latest-row-per-key resolver. Without this index, every price re-mark walks the calibrated-objects table.
+\item \emph{All curves for a valuation date.} ``Give me every calibrated object whose \texttt{valuation\_date = D}'' must be index-supported on \texttt{valuation\_date}, because the end-of-day pricing batch enumerates calibrated objects this way before issuing per-curve fetches.
+\item \emph{Instrument by identifier and known time.} ``Give me the instrument master row for \texttt{(authority, instrument\_id)} at known time $T$'' must be a single lookup. Authority here is the identifier source (ISIN, FIGI, CUSIP, internal id, LEI for parties). The natural index is \texttt{(authority, instrument\_id, t\_known)}.
+\item \emph{Latest observation for a definition.} ``Give me the latest as-of-now value for observable definition $O$'' must be a single lookup keyed by \texttt{definition\_ref}, returning the row with the maximum $t_\text{known}$ whose $t_\text{obs}$ falls in the requested window. The raw-observations table is the biggest table in the catalogue, so this query without an index is the single largest pricing-batch hazard.
+\item \emph{Lifecycle events on an instrument over a window.} ``Give me all lifecycle events for instrument $I$ with \texttt{effective\_date} in $[A, B]$'' must be a bounded range scan, indexed on \texttt{(instrument\_ref, effective\_date)}. Pricing a bond mid-life needs every coupon, every fixing, every call event in the period; pricing an equity needs dividends and splits.
+\item \emph{Override-walk for legal agreements.} Given a trade, fetching the four agreement rows that make up the trade's stack (Master, Schedule, CSA, Paragraph~11) must traverse \texttt{parent\_agreement\_id} in at most four indexed reads, not by scanning all agreements between the two parties.
+\end{itemize}
+
+We need these access patterns named explicitly because bitemporal storage's flexibility is bought at the cost of larger tables and longer history; without indexes on the natural access keys, every pricing read scales with the total history of restatements rather than with the size of the current snapshot, and that cost is felt on every price.
+
+Calibrated curves and surfaces are stored as the knot-point representation named in the catalogue, deserialisable directly into the pricing library's curve and surface objects without re-parsing a vendor-side format. The same applies to instrument masters: the bond record's day-count, frequency, and schedule fields are flat scalars, not a CDM payout structure to be resolved at query time. The pricing library should never have to traverse a CDM \texttt{NonTransferableProduct} tree to recover a coupon rate that the catalogue already holds as a column.
+
+A separate ``current'' projection --- the latest non-restated row per business key, materialised into a denormalised hot-path table --- may be maintained for the highest-volume reads (latest observations, current calibrated curves, current instrument masters). The projection is a cache and stays consistent with the bitemporal source by re-deriving on every write; the bitemporal table remains the system of record. A query that asks ``what did we know at time $T$'' for a $T$ in the past must read the bitemporal table directly. The projection exists only so that ``what is true now'' does not pay the bitemporal-query cost on every read.
+
+Order-of-magnitude sizing as design context, not as an operating-envelope number: the platform expects to hold tens of thousands of calibrated curves and surfaces per valuation date, millions of raw observations per business day, hundreds of thousands of instrument master rows, and a low six-figure count of active lifecycle events at any time. Specific latency and throughput targets are not set here; the data engineering team picks indexes, partitioning, and storage technology to meet them and reports back.
+
+\section{CDM as the wire vocabulary}\label{sec:cdm}
+
+CDM is the FINOS Common Domain Model, expressed in the Rosetta DSL and distributed as \texttt{*.rosetta} source files under \texttt{rosetta-source/src/main/rosetta/}. It defines named types for products, parties, events, observables, and legal documentation. CDM is the direction every counterparty, vendor, and regulator we exchange data with is converging on. We adopt it because private schemas multiply reconciliation cost: every pair of systems that disagree on field names or field meanings creates a translation layer, and translation layers are where data quietly goes wrong.
+
+The rule is simple. Where CDM defines a type for a concept in the catalogue, the CDM type is the wire format on ingest and the storage shape in the warehouse; the per-concept CDM mapping paragraphs in Section~\ref{sec:catalogue} name the exact Rosetta type and source file for each concept. Where CDM does not yet define a type --- calibrated curves and surfaces, observable definitions as a separate ``key'' from values, sanctions lists, withholding-tax schedules, holiday-date resolution tables, sector classifications --- the storage is a local shape and the gap is recorded in the data dictionary. The list of gaps is finite and stable enough for an MVP; an extension can be drafted later in the same Rosetta DSL, alongside the existing CDM source files, without changing this document's catalogue. The Ledger version that this document targets is CDM 6.0.0 (master branch, verified at authoring time); future CDM releases that fill these gaps will simplify the mapping but should not invalidate the catalogue.
+
+A clarifier on what this rule does and does not pin: CDM defines the \emph{field structure} --- the names, the types, the nesting, the cardinalities --- of each record. It does not pin the \emph{wire encoding bytes}: an FpML-style XML payload, an Avro container, a Protobuf message, or a JSON document can each carry the same CDM-shaped record. The FpML ingest functions in the \texttt{ingest-fpml-confirmation-*-func.rosetta} family illustrate the layering: the functions are CDM-typed but their inputs are FpML XML and their outputs are CDM \texttt{WorkflowStep} or \texttt{TradeState} records. Storage technology and wire encoding choices (listed as out of scope in Section~\ref{sec:scope}) are therefore independent of the CDM rule above; CDM constrains the schema, not the serialisation.
+
+\section{What this document does not cover}\label{sec:scope}
+
+The following are deliberately out of scope for this document.
+
+\begin{itemize}
+\item \emph{The move stream, position state, and unit balances.} These are the platform's internal record of what happened, derived from ingested data; they are written by the platform, not by the data team.
+\item \emph{Valuation, pricing methodology, and Greeks.} The data team supplies calibrated market objects; the mathematics that consumes them is the valuation team's responsibility.
+\item \emph{Cryptographic signing of inbound records, attestor key registry, key rotation.} Future hardening, not MVP.
+\item \emph{Securities-lending lifecycle events} (locate, recall, manufactured payment, rehypothecation). A separate workstream; the lifecycle concept above is sized for the non-SBL events.
+\item \emph{CCP initial-margin schedules.} The platform consumes margin calls (events), not schedules.
+\item \emph{Storage technology and wire encoding choices.} This document specifies data shape; whether the warehouse is columnar Parquet, an immutable log, or a relational store, and whether the wire format is Avro, Protobuf, JSON, or CBOR, are separate decisions. CDM pins the field structure regardless.
+\item \emph{Vendor selection, KYC/AML controls beyond the fields they require, legal-entity onboarding workflows.}
+\end{itemize}
+
+\section{Glossary}
+
+\begin{description}[style=nextline,leftmargin=1em,labelindent=0pt]
+\item[Bitemporal] Two-axis indexing of records by observation time and known time; both axes are queryable.
+\item[CDM] FINOS Common Domain Model, the shared field-structure vocabulary used as the wire format and storage shape wherever it defines a type that fits.
+\item[Calibrated market object] A curve or surface (yield curve, vol surface, FX surface, hazard curve) fitted from raw observations and stored as a list of knot points with a reference back to the inputs that produced it.
+\item[GLEIF] Global Legal Entity Identifier Foundation, the authority that issues LEIs.
+\item[Known time ($t_\text{known}$)] The wall-clock instant our system first received and admitted a record.
+\item[LEI] Legal Entity Identifier, ISO 17442; a 20-character identifier for a legal entity.
+\item[Lifecycle event] An event that happens to an instrument or a trade after it begins to exist: dividend, split, merger, fixing, exercise, default, reset, inbound confirmation.
+\item[MIC] Market Identifier Code, ISO 10383; a four-character identifier for a trading venue.
+\item[Observable definition] The key under which raw market values are recorded; identifies what is being observed without carrying any value.
+\item[Observation time ($t_\text{obs}$)] The wall-clock instant the underlying event occurred in the world.
+\item[OTC product] A contract whose terms are negotiated bilaterally rather than listed on an exchange; the substrate stores the terms, not a vendor identifier.
+\item[Restatement] A correction to a prior record, stored as a new row with the same $t_\text{obs}$, a later $t_\text{known}$, and a pointer back to the row it restates.
+\item[\texttt{restates\_ref}] The nullable foreign key on a record pointing into the same table at the prior row this record restates; \texttt{null} on an original, populated on a correction.
+\item[Source] A named string identifying who delivered a record (vendor name, authority name, internal service name). The permitted set is held in a source-registry reference table.
+\item[\texttt{value\_time}] On raw market observations, the source-reported instant of the underlying market event (the printed quote or trade time on the vendor wire). Distinct from $t_\text{obs}$ in that $t_\text{obs}$ is the same instant normalised to UTC; they usually coincide, and diverge when the source uses a non-UTC clock or restates a printed time.
+\item[Unit] Any traded thing recorded as a balance in a wallet: a currency, a share, a bond, an OTC contract, an on-chain obligation.
+\item[Wallet] A named account inside the Ledger holding quantities of units. Not a custody account or a bank account.
+\end{description}
+
+\vspace{0.5em}
+\noindent\rule{\textwidth}{0.4pt}\\
+\noindent\textbf{Document Version:} v2.0\quad\textbf{Date:} May 2026\quad\textbf{Classification:} MVP specification, data engineering audience.
+
+\end{document}
